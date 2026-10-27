@@ -306,6 +306,45 @@ export async function completeOnboardingTask(token, org, code, host = SITES.cn.h
   return { points: Number(body?.data?.points ?? 0) }
 }
 
+// ── ③c 每日登录积分（每日签到）────────────────────────────────────────
+//
+// POST /api/v1/login-gift，**无请求体**。这条是 2026-10-27 从网页抓包里挖出来的：
+//
+//   POST /api/v1/login-gift
+//   → {"code":1000,"data":{"granted":true,"point_amount":50,
+//                          "expire_type":1,"message":"成功领取每日登录积分"}}
+//
+// 关键性质（同日实测，两个站点都验过）：
+//
+//   · 幂等：当天已领过 → granted:false, point_amount:0, "今日已领取登录积分"
+//            HTTP 仍是 200，不是错误 —— 所以可以每天无脑调用
+//   · 两站同构：国际站 +50/天，国内站 **+200/天**，路径、方法、返回结构完全一样
+//   · 奖励进的是当天 23:59:59 过期的额度包（expire_type:1），不累积
+//
+// ⚠ 这条和「新手福利」（onboarding/tasks）是两套完全独立的机制。
+//   国际站的 onboarding 接口 participant_type 恒为 null、tasks 恒为空数组，
+//   靠它永远领不到每日登录积分 —— 早前版本就是这么漏的。
+
+/**
+ * 领取当日登录积分。已领取不是错误，靠 granted 字段区分。
+ *
+ * @returns {{granted:boolean, points:number, message:string}}
+ */
+export async function claimLoginGift(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/login-gift`, {
+    method: "POST",
+    headers: headersFor(token, org, host),
+    body: "",
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  return {
+    granted: Boolean(d.granted),
+    points: Number(d.point_amount ?? 0),
+    message: String(d.message ?? ""),
+  }
+}
+
 // ── ④ 积分与任务 ─────────────────────────────────────────────────────
 
 /**
@@ -358,11 +397,12 @@ export async function fetchPointRecords(token, org, { page = 1, pageSize = 20, h
 //   GET /api/v1/invitations/activity              → 活动配置
 //   GET /api/v1/invitations/rewards/total-points  → 已赚积分
 //
-// ⚠ 这三个接口只认**客户端登录**的那把 JWT（438 字符），网页版那把
-//   localstorage 里的 JWT（354 字符）调过去回 {"code":2155,"message":"用户不存在"}。
-//   两把都是同一账号签的，差别在 payload 里的用户字段 —— 网页版不带。
-//   ⇒ 所以「用我自己的邀请码」只能拿**本插件上次登录成功时存下的**那把 JWT，
-//     没登录过就没得用（报错，不猜）。
+// ⚠ 早前这里写着「这三个接口只认客户端那把 JWT（438 字符），网页版那把 354 字符的
+//   调过去回 2155 用户不存在」—— **2026-10-27 复核，这条已经不成立**：
+//   四个账号（两站各两个）全是 354 字符的网页 JWT、cus.device_id 全为空，
+//   `/api/v1/invitations/info` 全部返回 200 并正常给出 invite_code。
+//   上游放宽了这个限制。所以「用我自己的邀请码」不再受 JWT 来源限制，
+//   只要手里有登录态就能换成自己的码。
 export const INVITE_CODE_PATH = "/api/v1/invitations/info"
 
 /** 拿不到就抛错 —— 调用方要的是「真实结果」，不是静默降级 */

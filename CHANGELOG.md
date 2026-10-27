@@ -1,5 +1,118 @@
 # 更新记录
 
+## 0.3.8
+
+**签到补上「每日登录积分」—— 国际站一直领不到，根因是它压根不在 onboarding 任务里**
+
+症状：国际站账号点「立即签到」，永远回一句「新手福利 0 项已全部完成（当前积分 N）」，
+积分一动不动；可这个号在网页上手动登录，却能拿到一笔「Daily Login Bonus +50」。
+
+根因有两层：
+
+1. 国际站的每日奖励走 `POST /api/v1/login-gift`，和「新手福利」
+   （`GET /api/v1/onboarding/tasks` + `PUT .../completion`）是**两套完全独立的机制**。
+   0.3.7 的 checkin 只实现了后者，`login-gift` 一次都没调过。
+2. 国际站的 onboarding 接口对未登记账号恒返回 `{"participant_type":null,"tasks":[]}`。
+   `runCheckin` 把「0 项待办」当成「已全部完成」，于是 outcome 报 `done`、消息报
+   「0 项已全部完成」—— 看起来一切正常，实际上什么都没做。
+
+修法：
+
+- `src/api.mjs` 新增 `claimLoginGift(token, org, host)` —— `POST /api/v1/login-gift`，
+  无请求体，靠返回的 `granted` 区分「领到了」和「今天已经领过」
+- `src/tasks.mjs` 的 `runCheckin` 改成两步：先领每日登录积分，再处理新手福利，
+  任一步失败不影响另一步；消息里分别报两块的结果
+- 空任务列表不再算成功：如实报「本站无新手福利任务」，不再谎报「已全部完成」
+
+实测（2026-10-27，三个账号）：
+
+| 站点 | 每日登录 | 当天重复调用 |
+|---|---|---|
+| 国际站 magicrew.ai | +50 | `granted:false`「今日已领取登录积分」 |
+| 国内站 letsmagic.cn | **+200** | 同上 |
+
+- 两站路径、方法、返回结构完全一致，只是金额不同
+- **幂等**：当天已领返回 `granted:false`，HTTP 仍 200，不是错误 —— 可以每天无脑调
+- 国内站同样在漏领：实测 1350 → 1550（+200），不是国际站独有的问题
+- 奖励进的是当日 23:59:59 过期的额度包（`expire_type:1`），不累积
+- 接口来源：网页登录过程抓包（CDP Network），`POST /api/v1/login-gift` 无请求体
+
+---
+
+**邀请码滚动修复：`store.mjs` 少了一行 import，这个功能从上线起就没工作过**
+
+症状：每个新号注册，浏览器都被带到 `?invitation=<作者的码>`。用户自己的
+`invite_count` 永远是 0 —— 也就是说每注册一个号，都在给作者送积分
+（国际站 200/次，国内站 1,000/次）。
+
+根因：`src/store.mjs` 的 `rollInvite()` 里调 `fetchOwnInviteCode()`，但文件头
+**只 import 了 `node:fs` / `node:os` / `node:path`**，从来没 import 过这个函数。
+于是每次调用都在那一行抛 `ReferenceError`，又被下面的空 `catch {}` 静默吞掉：
+
+```js
+async function rollInvite(siteId, jwt, org, host) {
+  try {
+    const own = await fetchOwnInviteCode(jwt, org, host)  // ← ReferenceError
+    return writeInvite(siteId, own.code)
+  } catch {
+    return ""          // ← 错误在这里消失，调用方只看到「没滚到」
+  }
+}
+```
+
+结果 `magicrew-invite-<site>.json` 从来没被写过，`inviteToUse()` 每次都掉进
+「没有记录 → 用作者码」这个分支。滚动机制形同虚设。
+
+修法：
+
+- `src/store.mjs` 补上 `import { fetchOwnInviteCode } from "./api.mjs"`
+  （`api.mjs` 不反向依赖 store，无循环依赖）
+- `rollInvite` 加 6 秒超时（`Promise.race`），失败不再完全静默 ——
+  设 `MAGICREW_DEBUG=1` 时打一行错误，避免同类问题再次「安静地死掉」
+- `src/hooks/methods.mjs` 三处调用从 `rollInvite(...).catch(() => {})`
+  改成 `await rollInvite(...)`：发射后不管的话，host 进程在 callback 之后被回收，
+  滚动一样会丢
+- `src/hooks/checkin.mjs` 每天签到时顺带滚一次 —— 登录那一路万一被打断，
+  第二天还能补上
+
+实测（2026-10-27，隔离 HOME 里验的，不污染真实配置）：
+
+| 站点 | 滚动前 | 滚动后 |
+|---|---|---|
+| 国际站 | `IV75F0ZKVKXG`（作者） | `IVF4A4H12KM8`（账号自己的） |
+| 国内站 | `IVC8BAWYXRY1`（作者） | `IV1475HL797R`（账号自己的） |
+
+> 附带更正 `src/api.mjs` 里一条过时的注释：原来写「网页版 JWT（`device_id` 空）
+> 调 `/api/v1/invitations/info` 回 2155 用户不存在」。实测四个账号全是 354 字符的
+> 网页 JWT、`device_id` 全为空，接口全部返回 200 并正常给出邀请码 ——
+> 上游已经放宽了这个限制，滚动现在是通的，只是以前的 import 缺失挡住了它。
+
+---
+
+**文档更正：checkin 从来没有「顺带续 key」，那条保活链路只存在于文档里**
+
+`docs/internals.md` 第十四节和本文件 0.3.2 那条都写着「checkin 每天用 24 小时
+提前量强制续一次 key，防止 refresh_token 闲置 7 天失效」。逐版本核对
+0.3.0 / 0.3.2 / 0.3.7：**checkin 路径（`src/hooks/checkin.mjs` → `src/tasks.mjs`）
+从未 import 过 `ensureKey`**，全仓 `leadMs` 只出现在 `src/keys.mjs` 自身。
+
+它本来也不需要存在 —— 原来那段论证有个漏洞：
+
+- 「一整天没有请求，key 会静静过期」不成立：续期不靠请求触发，是 magpie 按
+  `refreshLead`（10 分钟）主动调 `auth.refresh`。只要 magpie 在跑，有没有请求都会续
+- 「挂在 checkin 上补洞」也补不了：真会让 refresh_token 闲置到 7 天失效的场景，
+  是 magpie 整整 7 天没开 —— 那时 checkin 同样不跑
+
+**所以没有去补这个功能，而是把文档改回实况**：`src/hooks/refresh.mjs` 绕过了
+`keys.mjs` 这个「唯一出口」（它直接调 `api.refreshGatewayKey(auth.refresh)`），
+两处各持一份 refresh_token 会分叉。补上 `ensureKey` 会把 key-store 写起来、
+进而抢轮换，结果是用户莫名被要求重新登录。真要补，得先把 `auth.refresh`
+收敛进 `ensureKey` —— 那是另一件事，不在本 PR 范围。
+
+顺带修正 `internals` 里过时的落盘路径：单槽 `magicrew-key-<siteId>.json`
+→ 0.3.3 起的 `<siteId>__<account>` A/B 双槽。并在 `src/keys.mjs` 顶部注释里
+标明「refresh 不经过本模块」这处未收敛的口子，避免后人照旧注释误判。
+
 ## 0.3.7
 
 **登录先看本机浏览器：你在自己浏览器里登过，插件直接认，不再开窗让你重登**
