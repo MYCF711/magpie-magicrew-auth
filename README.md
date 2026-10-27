@@ -115,6 +115,10 @@
 `--remote-debugging-port`），所以登录成功后能用 CDP 在页面上下文里把它自己的
 localStorage 读走，拿到 JWT 和组织码，签完密钥就关窗。
 
+**每次登录都是一个新的 profile，用完就删。** 这是必须的：共用一个 profile 的话，
+添加第二个账号时窗口一打开，页面里已经躺着上一个账号的凭据 —— 插件会以为登录完成、
+立刻关窗，而 magpie 拿到的还是旧账号（同账号 → 替换，不新增）。
+
 > **为什么必须自己拉浏览器？** 因为 magicrew 没有 OAuth 回调通道 —— 它的登录类型只有 13 种、全是「拿凭据换 token」，没有设备码、没有插件授权、没有一次性 ticket；也没有 WorkBuddy 那种 `/v2/plugin/auth/state` + `/v2/plugin/auth/token` 协议。网页登录成功后 token 只在 `www.magicrew.ai` 的 localStorage 里，而 magpie 打开的是你系统默认那个浏览器，插件够不到它的存储。自己起一个，就够得到了。
 >
 > 本机没装 Chrome / Edge 时自动降级：改用系统浏览器打开，登录完把凭证送进剪贴板，插件从剪贴板读。
@@ -161,6 +165,8 @@ magpie plugin list
 ## 常见问题
 
 **两个站要装两次吗？** 不用。一个包导出两个插件，装一次两个供应商都在，各自登录。
+
+**添加第二个账号时，网页闪一下就关了、magpie 里也没多出账号？** 0.3.5 及更早会这样：登录浏览器复用同一个 profile，第二个窗口一打开就读到上一个账号的凭据，于是立刻「登录成功」并关窗 —— 加到的是已有账号。0.3.6 起每次登录用一个一次性 profile（关窗即删），不会再串号。
 
 **npm 上叫 `magicrew-auth`，为什么卡片显示 `Magicrew`？** 卡片标题取包内 `package.json` 的 `name`（`Magicrew`），而 npm 拒绝含大写字母的新包名。发布时用 `publish-npm.mjs` 临时换成 `magicrew-auth`、发完还原 —— 所以 npm 页面是小写包名，git 源装出来是 `Magicrew`。功能完全一样。
 
