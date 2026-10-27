@@ -1,5 +1,38 @@
 # 更新记录
 
+## 0.3.13
+
+**首任务补完：登录那一刻做一次，之后永不再发（补齐 0.3.12 的另一半）**
+
+0.3.12 已经把闸门从「按日期」换成「按账号一次」（`src/store.mjs` 的
+`isAutoChatSettled` / `noteAutoChatFailure`），国内站的 `autoFirstWork` 也接上了。
+这一版补齐剩下的：
+
+- 国际站的 `autoFirstChat` 同样走一次性闸门；「已有工作台项目」直接落成 `sent`，
+  以后连查都不查
+- **登录成功那一刻**就做 —— `src/hooks/methods.mjs` 三条登录路径
+  （本机浏览器接上 / 浏览器登录 / 手填登录态）都会 `kickoffFirstTask(c, jwt, org)`，
+  发射后不管、不阻塞登录；签到退回兜底位，只防「登录那次进程被杀 / 网络抖」
+- `docs/internals.md` 的 checkin 小节按现状重写：标记文件结构、五种状态各写不写、
+  老日期格式怎么读
+
+回顾 0.3.11 的问题：闸门按**日期**记（`{ [org]: "YYYY-MM-DD" }`），服务端没把
+`first_ai_work` 翻成 COMPLETED 时，第二天签到又看到 PENDING，就再发一条 ——
+一个号天天烧一次模型积分。可这只是「让邀请奖励到账」的一次性条件，做一次就够。
+
+### 实测（2026-10-28，改完当场跑到的）
+
+```
+magicrew        (h97gk…)   first_ai_work  PENDING/PENDING → COMPLETED/GRANTED
+magicrew#g8rptf (66p0q…)   first_ai_work  PENDING/PENDING → COMPLETED/GRANTED
+```
+
+两个号各发一条（都是 `Qwen3.5 Flash`，topicId `973747526032797697` /
+`973747424593612801`），结算后任务真的翻成 COMPLETED/GRANTED —— 邀请奖励那条判据拿到。
+
+再调一次 `ensureFirstTaskOnce` 直接返回 `{ settled: true }`：不打网络、不发消息，
+一次性闸门生效。
+
 ## 0.3.12
 
 **插件不再写 magpie 自己的缓存**

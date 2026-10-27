@@ -17,11 +17,23 @@ import {
   fetchPoints,
   fetchWho,
   fetchOwnInviteCode,
-  fetchFirstWorkspaceId,
 } from "../api.mjs"
 import { inviteToUse, readSession, writeSession, noteLoginFailure, noteOrg, readKnownOrgs, rollInvite } from "../store.mjs"
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
+
+/**
+ * 账号刚加进来（登录成功）→ 一次性把「首次 AI 工作 / 首个对话」补掉。
+ *
+ * 不 await、不抛：建项目 + 发消息 + 兜底等结算最坏一分钟，登录必须立刻返回；
+ * 失败也不该让登录报错。真正的兜底是签到 —— 两边共用同一道闸门
+ * （`isAutoChatSettled`：每账号一次，永久），所以重复登录、刷新页面都不会重发。
+ */
+function kickoffFirstTask(c, jwt, org) {
+  import("../tasks.mjs")
+    .then((m) => m.ensureFirstTaskOnce({ jwt, org, host: c.host }))
+    .catch(() => {})
+}
 
 export function makeMethods(c) {
   return [
@@ -70,6 +82,7 @@ export function makeMethods(c) {
               // 等它落盘再返回：这条以前是 .catch(()=>{}) 发射后不管，
               // 一旦 host 进程在 callback 之后被回收，滚动就永远不生效
               await rollInvite(c.id, local.jwt, local.org, c.host)
+              kickoffFirstTask(c, local.jwt, local.org)
               const who = await fetchWho(local.jwt, local.org, c.host).catch(() => null)
               return {
                 type: "success",
@@ -151,6 +164,7 @@ export function makeMethods(c) {
               noteOrg(c.id, got.org)
               // 滚邀请码：把这个账号自己的码存成下一次用的（等落盘再返回）
               await rollInvite(c.id, got.jwt, got.org, c.host)
+              kickoffFirstTask(c, got.jwt, got.org)
               return {
                 type: "success",
                 access: key.apiKey,
@@ -224,6 +238,7 @@ export function makeMethods(c) {
             writeSession(c.id, jwt, org)
             noteOrg(c.id, org)
             await rollInvite(c.id, jwt, org, c.host)
+            kickoffFirstTask(c, jwt, org)
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)
             return {

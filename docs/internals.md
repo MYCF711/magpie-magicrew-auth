@@ -708,9 +708,32 @@ mgw_8f9a…（18:14 又一次续期换的）       → 网关请求 HTTP 200 正
 ```
 
 ② 是唯一有外部副作用的动作：会建项目 / 话题、真花一次模型积分（挑最便宜的模型）。
-所以有一道闸门 —— 每账号每天最多一次，落在
-`~/.cache/magpie/magicrew-autochat-<siteId>.json`（`siteId` 取 `magicrew` / `magicrew-intl`），
-内容是 `{ [org]: "YYYY-MM-DD" }`，按北京时间算日期，**发送成功才写**；失败不写，留给下一次。
+
+**它是每个账号一辈子只做一次的事，不是每天的事**（0.3.12 改正）。真正的触发点是
+**登录成功那一刻**（`src/hooks/methods.mjs` 三条登录路径都会 `kickoffFirstTask`，
+发射后不管、不阻塞登录）；签到只是兜底 —— 万一登录那次没跑成（进程被杀、网络抖），
+下一次签到接着做。
+
+闸门落在 `~/.cache/magpie/magicrew-autochat-<siteId>.json`
+（`siteId` 取 `magicrew` / `magicrew-intl`），内容是：
+
+```json
+{ "<org>": { "at": "ISO", "status": "sent|failed|gave-up", "attempts": 1,
+             "topicId": "…", "model": "Qwen3.5 Flash", "reason": "…" } }
+```
+
+规则：
+
+| 情况 | 写什么 | 之后还发不发 |
+|---|---|---|
+| 消息发出去了 | `status: "sent"` | **永远不发**（换天、重登、重启都一样） |
+| 真去发了但失败 | `status: "failed"`，`attempts++` | 发，最多 3 次 |
+| 连失败 3 次 | `status: "gave-up"` | 不发（别让永远失败的号每次撞一遍） |
+| 还没有工作台 / 项目 | 不写 | 发，下次再来（只读接口，成本低） |
+| 服务端本来就是 COMPLETED | `status: "sent"` + `reason` | 不发 |
+
+老版本（0.3.11）记的是 `{ [org]: "YYYY-MM-DD" }` 字符串日期 —— 读的时候按「已发过」
+归一化，所以升级上来不会补发一遍。
 
 怎么发的（协议帧、三个 id 从哪来、为什么不用浏览器）见 `src/chat-task.mjs` 顶部注释。
 key 依然一个都不碰。
