@@ -56,7 +56,16 @@ export function makeModels(c) {
       const out = {}
       for (const m of live) {
         const p = points[m.id] || {}
-        out[m.id] = modelEntry(c, m.id, withMultiplier(m.name, p.inputPoints), m.vision)
+        // cost 填「倍率」，让宿主把它渲染成名字后面的胶囊（0.01× 那种）
+        const cost =
+          p.inputPoints != null
+            ? {
+                input: Number(p.inputPoints) / MULT_BASE,
+                output: Number(p.outputPoints) / MULT_BASE,
+                cache: { read: 0, write: 0 },
+              }
+            : undefined
+        out[m.id] = modelEntry(c, m.id, m.name, m.vision, cost)
       }
       writeSnapshot(c.id, out)
       return out
