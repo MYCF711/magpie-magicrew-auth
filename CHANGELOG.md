@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.3.12
+
+**插件不再写 magpie 自己的缓存**
+
+`src/self-register.mjs` 每次加载都往 `~/.cache/magpie/plugin-market.json` merge 一条
+自己的条目。那份文件属于 magpie；按包名 merge 意味着一旦包进了官方 registry，
+每次启动都会把 registry 条目盖回包里写死的那份 —— 插件不该改写 magpie 给它自己看的列表。
+
+- 删掉 `src/self-register.mjs` 与 `index.mjs` 里的调用
+- 顺带修掉一个一直没生效的 bug：条目里 `package` 写的是 `Magicrew`，而 npm 包名是
+  `magicrew-auth`，两者对不上，这条自注册从来没能对上卡片
+- 卡片标题与文案的唯一载体是 registry 条目；其余行为一行未动
+
 ## 0.3.11
 
 **签到接管「完成第一次 AI 工作」—— 不再单开一个按钮**

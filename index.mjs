@@ -29,7 +29,6 @@
 // magpie 把包里每个具名导出当成一个独立插件，所以它们在供应商列表、用量概览、
 // 模型目录里各占一行，不聚合、不互相覆盖登录态。
 
-import { startSelfRegister } from "./src/self-register.mjs"
 import { SITES, siteCtx, REFRESH_LEAD_MS } from "./src/context.mjs"
 import { makeConfig } from "./src/hooks/config.mjs"
 import { makeMethods } from "./src/hooks/methods.mjs"
@@ -40,29 +39,11 @@ import { makeCheckin } from "./src/hooks/checkin.mjs"
 import { makeModels } from "./src/hooks/models.mjs"
 import { makeHeaders } from "./src/hooks/headers.mjs"
 
-const COMMUNITY_ENTRY = {
-  package: "Magicrew",
-  name: "超级麦吉 / MagiCrew",
-  providers: ["magicrew", "magicrew-intl"],
-  community: true,
-  summary: {
-    en: "Magicrew (super-magic) — an OpenAI-compatible gateway behind the agent platform, both builds: 超级麦吉 (letsmagic.cn) and MagiCrew (magicrew.ai).",
-    zh: "超级麦吉 / MagiCrew：Agent 平台背后的 OpenAI 兼容网关，国内站与国际站双份。",
-  },
-}
-
 /** 一个站点进，一个完整插件出 */
 function buildPlugin(c) {
-  return async ({ client, directory }) => {
-    startSelfRegister(COMMUNITY_ENTRY, {
-      configDir: directory,
-      log: (msg) => {
-        try {
-          client?.app?.log?.({ service: c.PROVIDER, level: "info", message: msg })
-        } catch {}
-      },
-    })
-
+  return async () => {
+    // 卡片标题与文案不在这里做 —— 那是 registry 条目的职责。
+    // 插件不写 magpie 自己的缓存目录：那份文件属于 magpie，插件只读不写。
     return {
       config: makeConfig(c),
 
