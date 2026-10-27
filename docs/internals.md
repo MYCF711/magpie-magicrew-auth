@@ -436,6 +436,43 @@ linux   xclip -selection clipboard -o
 传错的后果很具体：**点了登录，什么都不弹**。本项目 0.2.0 的中间版本踩过这个坑 ——
 密码登录和浏览器登录都传了 `opened: true`，两处都点了没反应。
 
+### 先读本机浏览器（首选路径，2026-10-27 加）
+
+magicrew 没有 OAuth 回调（第九节），所以「用户在自己浏览器里登录完了」这件事，插件原本
+只能靠「自己起的那个窗口」知道 —— 于是常有人报「网页登了、magpie 里却没多出账号」。
+其实凭据就在本地：Chromium 系把 localStorage 明文写在
+
+```
+<User Data>/<Default|Profile N>/Local Storage/leveldb/*.log|*.ldb
+```
+
+读法（`src/local-browser.mjs`）：
+
+```
+leveldb 目录全部读成 latin1 文本
+  → 以站点 host 出现的位置开窗（2000 字节）
+  → 窗口内取 `"key":"authorization"` 的 jwt、`"key":"organizationCode2?"` 的组织码
+```
+
+三个必须注意的点：
+
+1. **按 origin 截断**，否则串号：两个站点的记录可能紧挨着（用户两个都登过），窗口会把
+   国际站的 org 配到国内站的 jwt 上。截断点 = 下一个**不同站点**的 origin（同 origin 的
+   多条记录不截断）。
+2. **每把 jwt 配它自己后面的那个 org**，不要配「窗口里第一个 org」—— 同一站点存过多把
+   凭据时（旧值还没被 compaction 掉）会配错。
+3. **过期、空组织码直接丢**；多把有效凭据取 `iat` 最大的。
+
+实测（2026-10-27，本机 Edge）：**27 MB / 29 ms**，`www.letsmagic.cn` 命中、
+`www.magicrew.ai` 不命中（没在那里登录过），两站不串。
+
+读到之后还要防「重复加号」：`~/.cache/magpie/magicrew-orgs-<站点>.json` 记着**加过的 org**，
+命中就不再自动接 —— 用户点登录多半是想加新账号，自动接上同一个会被 magpie 按
+「同 accountId + uid → 替换旧账号」处理掉，看起来又像「没加上」。
+
+判据：`node tests/local-browser.mjs`（两站分离 / 过期过滤 / iat 取最大 / org 配对 /
+knownOrgs 去重）。真机：`node tests/smoke.mjs` 仍能跑通（凭据从同一个地方读）。
+
 ### 自己拉浏览器 + CDP 读凭据
 
 ```
