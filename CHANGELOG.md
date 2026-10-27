@@ -1,5 +1,48 @@
 # 更新记录
 
+## 0.3.19 — 2026-10-28
+
+**路由页不再说「剩余额度未知」：窗口不能标 `aside`**
+
+0.3.18 把积分窗口改成 `aside: true` + 只给 `display` —— 卡片好了，
+**路由页还是「剩余额度未知」**。
+
+根因在 magpie 宿主侧，读源码可证：
+
+```
+provider/routing.go   allowanceOf()     if (w.Aside || w.Text) { continue }    ← 整条跳过
+provider/routing.go   routedAllowance() if len(a) == 0 { return nil, false }   ← 一条不剩 ⇒ 不 ok
+gateway/trace.go      weighed()         if l, ok := wg.lefts[key]; ok { w.Known = true }
+routing/client.js     w.known 为假且 kind == "account" ⇒ 「剩余额度未知」
+```
+
+官方文档也逐字写着（`docs/subsystems/provider-plugins.md`，issue #3650）：
+
+> An account whose windows all tell no share has no allowance, so routing counts
+> it not known ... as one never read. A window that says `used: 0` is a reading
+> at 0, as before.
+
+⇒ **`aside` 的代价不是「不参与排序」，是这个号在路由里整个消失**
+（unknown 一律排在已知的之后）。
+
+现在改成钱包的恒等式：`limit = 余额`、`amount = 0`、`used = 0`，**不加 `aside`**。
+`used` 仍然是「已用 0」而不是缺省 —— 缺省会被 magpie 判成「没有份额的文本行」，
+又回到未知。
+
+判据（2026-10-28 实测，两站四个号）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `/v1/magpie/trace` 的 `known` | **字段缺失** | `true`，`limit` = 余额 |
+| 路由页那一行 | 剩余额度未知 | `1,363 / 1,363 积分 · 剩余 100%` |
+
+A/B 都跑过：把 `aside: true` 加回去、重启 magpie，`known` 立刻变回缺失；
+换回来就恢复 `true`。
+
+⚠ 代价说清楚：这样算出来的百分比**没有信息量**（分母就是分子）——
+magpie 的额度契约是为「周期配额」设计的，钱包型额度它没有专门表达。
+真正该修的是宿主侧，插件侧只能给出最接近的形态。
+
 ## 0.3.18 — 2026-10-28
 
 - **AGENTS 新增「零、magpie 升级时：只看稳定版」** —— magpie 有「更新渠道：每个版本 / 稳定版」，用户默认跑稳定版。两渠道实测差 **400 多个版本**（每版本 0.1.1763 / 稳定版 0.1.1327），但插件相关的契约字段**一条不差** ⇒ 追每版本几乎全是白跑。判断依据只有一条：**稳定版版本号变了**才需要重新同步

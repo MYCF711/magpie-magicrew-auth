@@ -64,6 +64,14 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 11 | Windows 上点登录，浏览器窗口拉不起来 | 浏览器可执行文件名**随版本变**（`msedge.exe` / Chrome 各版本目录不同），要逐个试候选，别写死一个名字 | internals 十一 |
 | 12 | 用户点「检查更新」显示有新提交，点了更新却没变化 | 本仓库是 **git 源**：magpie 比默认分支 HEAD 的 commit，只提示不自动更新，要用户点那一行的「更新」；更新后 `magpie plugin list` 的 commit 应变化 | 脚手架 UPDATING 一 |
 | 13 | 想让卡片标题 / 「源码」按钮对，去改了 magpie 的缓存 | 插件对 magpie 目录**只有读的份**；唯一载体是 `registry-entry.json`（提交给 `registry.json`） | internals 二 · README |
+| 14 | **卡片上额度正常，路由页里这个号却是「剩余额度未知」** | 窗口**不能标 `aside`**：magpie 的 `allowanceOf()` 把 `Aside`/`Text` 的窗口整条跳过，一条不剩 ⇒ 该号 `Known=false`（官网文档 issue #3650 明写）。判据：`curl -s http://127.0.0.1:3425/v1/magpie/trace`，看这个 provider 的 `known` 是 `true` 还是**字段缺失** | HOOKS 三 · `src/hooks/usage.mjs` 头 |
+
+**坑 14 的两个附带判据**（都实测过）：
+
+- **改了 `src/hooks/usage.mjs` 要重启 magpie 才生效** —— 插件跑在 `magpie-bun` 子进程里，
+  模块缓存不随文件变化失效。改完先 `Stop-Process` 再 `Start-Process` 同一个 exe，
+  然后 `curl /v1/magpie/quotas` 看窗口里的 `spans`：`[{}]` = 没标 aside，`[{"aside":true}]` = 还标着。
+- **额度读取有 1 分钟缓存**，改完立刻看可能还是旧值。
 
 补充一条最容易误信的旧说法：
 

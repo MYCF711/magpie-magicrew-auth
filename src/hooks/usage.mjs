@@ -4,29 +4,57 @@
 // 空号反而排到队首。
 //
 // ════════════════════════════════════════════════════════════════════
-// 这个窗口该长什么样（结论来自 magpie 二进制取证 + Loomy 的实测笔记）
+// 真机踩过两次，两次都不是「显示」的问题，是「magpie 认不认得」的问题
 // ════════════════════════════════════════════════════════════════════
 //
-//   quotaCount(w){ if (!(w.limit > 0)) return w.display || ""; … }
-//   const counted = q.windows.filter((w) => !w.unlimited);
-//   … else if (w.aside) s = t("{api} only after the others")   // aside 排后面
+//   第一次（0.3.18）：`amount: 0, limit: total` + 服务端格式的 `resetsAt`
+//     ⇒ 卡片全部「剩余额度未知」。根因是时间不是 ISO。
 //
-// 两条硬规矩：
+//   第二次（0.3.18）：改成 `aside: true` + 只给 `display`
+//     ⇒ **卡片好了，路由页还是「剩余额度未知」**。
 //
-//   ① **预充值积分制放 `aside: true`** —— 它没有周期、没有上限，不该参与路由
-//      排序。`used: 0` 的窗口如果参与排序，会让「余额充足」和「空号」看起来
-//      一样，路由就会把请求派到已经蹬空的号上。
+// 第二次的根因在 magpie 宿主侧，读源码可证：
 //
-//   ② **aside 窗口不给 `amount` / `limit`** —— 给了，magpie 会把它当成一条真
-//      额度去算占比，而「总量 = 剩余」这种假总量算出来的百分比没有意义。
-//      只给 `display`，magpie 就直接显示这个字符串。
+//   provider/routing.go  allowanceOf()   if (w.Aside || w.Text) { continue }   ← aside 被整条跳过
+//   provider/routing.go  routedAllowance() if len(a) == 0 { return nil, false } ← 一条不剩 ⇒ 不 ok
+//   gateway/trace.go     weighed()       if l, ok := wg.lefts[key]; ok { w.Known = true }
+//   routing/client.js    w.known 为假且 kind=="account" ⇒ 「剩余额度未知」
 //
-// ⚠ 真机踩过（0.3.18）：原来给了 `amount: 0, limit: total`，还把 `resetsAt`
-//   写成服务端那种 `"2026-11-26 16:01:02"`（**不是 ISO**，Loomy 用的是
-//   `toISOString()`）。结果卡片上三条账号全显示「剩余额度未知」——
-//   usage 本身返回正常（plan/balance/windows 都在、没有 error），
-//   是 magpie 读不懂这个窗口才不画。
-//   ⇒ 现在的写法：aside + display + unit，别的都不给。
+// 官方文档逐字写着这件事（docs/subsystems/provider-plugins.md，issue #3650）：
+//   "An account whose windows all tell no share has no allowance, so routing
+//    counts it not known ... as one never read, rather than as the one with
+//    all of it left. A window that says `used: 0` is a reading at 0, as before."
+//
+// ⇒ **aside 的代价是「这个号在路由里不存在」**，不是「只是不参与打分」。
+//   多账号路由下这很实：unknown 的号一律排在已知的之后，
+//   一个余额充足的号会被当成「不知道有没有额度」而压到最后。
+//
+// ════════════════════════════════════════════════════════════════════
+// 所以超级麦吉这条窗口怎么给
+// ════════════════════════════════════════════════════════════════════
+//
+// 积分是**预充值钱包**：没有周期、没有总量，服务端只回一个「还剩多少」
+// （`/api/v1/quota/points/total` → `total_points`；`organization_*_limit_points`
+// 和 `user_*_limit_points` 在个人号上全是 null，积分流水端点实测 500）。
+//
+// 而 magpie 的额度契约是为「周期配额」设计的：`used` 是 0-100 的百分比，
+// 路由的 `quota()` 又只在 `limit > 0` 时才显示数字。两条加起来 ——
+// **要让它显示一个数，就必须给 `limit`**。
+//
+// 于是把钱包写成它的恒等式：
+//
+//     limit = 余额      amount = 0      used = 0
+//     ⇒ 总量 = 已用 + 剩余 = 0 + 余额
+//
+// 余下的都对：剩余 100% 是真的（这点余额一分没动），路由行为也对：
+//
+//     余额 > 0 → used 0   → fine 档，正常参与
+//     余额 = 0 → used 100 → spent 档，沉底
+//
+// ⚠ 代价说清楚：**百分比没有信息量**（分母就是分子）。这是 magpie 契约能
+//   表达钱包的唯一形态，不是我们算错了。真正的「余额型额度」表达
+//   （已知、但不参与百分比）magpie 目前没有 —— 那是宿主侧的事。
+//   判据：卡片与路由页都显示 `<余额> 积分`，不再是「剩余额度未知」。
 
 import { fetchPoints } from "../api.mjs"
 
@@ -38,8 +66,8 @@ export function makeUsage(c) {
       const p = await fetchPoints(auth.jwt, auth.org, c.host)
       const total = Number(p?.total ?? 0)
 
-      // 余额为 0 时**必须**给一条参与路由的 used:100 窗口，让这个号排到最后；
-      // 只靠 aside 是压不住的（aside 不参与排序）。
+      // 余额为 0 时**必须**给一条参与路由的 used:100 窗口，让这个号排到最后。
+      // 只靠 aside 是压不住的（aside 根本不进路由）。
       if (!(total > 0)) {
         return {
           plan: "已耗尽",
@@ -48,19 +76,22 @@ export function makeUsage(c) {
         }
       }
 
+      const text = `${total.toLocaleString("zh-CN")} 积分`
       return {
         plan: "积分制",
-        balance: `${total.toLocaleString("zh-CN")} 积分`,
+        balance: text,
         windows: [
           {
             name: "积分余额",
+            // 「钱包」的恒等式：总量 = 已用 + 剩余 = 0 + 余额。
+            // 不能标 aside —— 那样整条窗口会被 allowanceOf 跳过，
+            // 这个号在路由页就变成「剩余额度未知」（见文件头）。
             used: 0,
-            aside: true,
-            display: `${total.toLocaleString("zh-CN")} 积分`,
+            amount: 0,
+            limit: total,
+            display: text,
             unit: "积分",
-            // 官方字段：剩余额度**什么时候失效**、失效时损失多少。
-            // 有它就不用自己往 display 里拼「185 分今天到期」——
-            // magpie 自己会在额度行后面加这句（见脚手架 HOOKS.md 第十一节）。
+            // 官方字段：剩余额度**什么时候失效**、失效时损失多少（最早作废的那批）。
             ...runsOutOf(p.expiring),
           },
         ],
