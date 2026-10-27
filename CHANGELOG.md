@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.3.4
+
+**上下文窗口向 magpie 的模型库查，不再一律填 256K**
+
+- 症状：`pi-ai detected context overflow for model "magicrew/deepseek-v4.1-flash"` —— 会话明明还能继续
+- 成因：magicrew 的两个模型接口（`/api/v1/flows/models`、`/v1/models`）**都不返回上下文窗口**，
+  早前一律填 `256_000` 当保守值。而 `deepseek-v4.1-flash` 实际是 **1,048,576**，
+  等于把可用容量砍掉四分之三 —— agent 拿 256K 判断"放不下"就拒绝了
+- 修法：`src/model-context.mjs` 向 magpie 自己的 `~/.cache/magpie/models.json` 查
+  （按 `limit.context`，支持全名 / 尾段 / 多厂商前缀取最大），查不到才退回 256K
+- 实测：deepseek-v4.1-flash 1,048,576 · qwen3.5-flash 1,000,000 · glm-5.3-flash 262,144 ·
+  kimi-k3.1-pro 1,048,576 · 查不到的 256,000
+
 ## 0.3.3
 
 **key 按账号隔离 + A/B 双槽，保证每个账号至少一把活的**
