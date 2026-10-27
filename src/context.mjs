@@ -37,8 +37,24 @@ export function siteCtx(SITE) {
   }
 }
 
-/** 把一条 flows/models 变成一个 magpie 模型条目 */
-export function modelEntry(c, id, name, vision) {
+/**
+ * 把一条 flows/models 变成一个 magpie 模型条目。
+ *
+ * `opts.rate` / `opts.free` 是 **magpie 自己的字段**（从 codearts 插件里挖到的，
+ * packages/codearts/index.mjs 的 modelOf）：
+ *
+ *   free  boolean  → 名字后面画一个绿色的「免费」胶囊
+ *   rate  number   → 画一个灰色的倍率胶囊（0.09× 这种，就是网站上的「消耗系数」）
+ *
+ * 关键规则（codearts 原注释）：**free 的时候不给 rate** ——
+ *   免费模型不该再标一个倍率，两个胶囊并排没意义。
+ * 没有 rate 就什么都不画，正好符合「没有倍率就不显示」。
+ *
+ * ⚠ 别再用 name 拼倍率了：那样筛选框会连倍率一起匹配，
+ *   而且和真正的胶囊样式差得远。
+ */
+export function modelEntry(c, id, name, vision, opts = {}) {
+  const { rate = 0, free = false } = opts
   return {
     id,
     name,
@@ -56,5 +72,7 @@ export function modelEntry(c, id, name, vision) {
       input: { text: true, image: !!vision },
       output: { text: true },
     },
+    ...(free ? { free: true } : {}),
+    ...(!free && Number(rate) > 0 ? { rate: Number(rate) } : {}),
   }
 }
