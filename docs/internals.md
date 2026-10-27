@@ -501,3 +501,39 @@ JSON.stringify({ jwt: pick("MAGIC:user:authorization"), org: pick("MAGIC:user:or
 
 > 0.2.0 里那条「密码登录」方法已经删掉了：网页登录拿到的 token 一样能签发
 > `mgw_` key（见第十节的更正），再让用户在小窗里输手机号密码是多余的一步。
+
+---
+
+## 十二、流式请求必须补 `stream_options.include_usage`
+
+**症状**：agent 里反复出现
+
+```
+模型请求重试 (3/5) · Stream ended without finish_reason
+```
+
+用户手动终止后，magpie 记 `499`（客户端断开，属于终止的后果，不是原因）。
+
+**实测（2026-10-27，deepseek-v4-flash）**：magicrew 的流式返回本身是完整的 ——
+`[DONE]` 前有 `choices[0].finish_reason = "stop"`，经我们的 loader 原样转发也没丢。
+真正缺的是**收尾 chunk**：
+
+| 请求 | finish_reason | usage | `[DONE]` 前的收尾 chunk |
+|---|---|---|---|
+| 不带 `stream_options` | `stop` | **无** | **无** |
+| 带 `stream_options: {include_usage:true}` | `stop` | 有 | 有（`{"choices":[],"usage":{...}}`） |
+
+magpie 新版靠那条**只含 usage、choices 为空**的收尾 chunk 判定「流正常结束了」。
+缺了就报 `Stream ended without finish_reason` 并重试。
+
+**修法**（`src/hooks/loader.mjs`）：流式请求且调用方没指定 `stream_options` 时，补上
+`{ include_usage: true }`。upstream 支持，无害；实测补完后
+
+```
+finish_reason=stop | usage=有 | 收尾chunk=true | [DONE]=true
+```
+
+⚠ 只对 `stream: true` 生效，非流式请求不加（那是多余的字段，有的上游会 400）。
+
+⚠ 这个坑的判据是「看流里有没有那条 choices 为空的收尾」，不是「看 finish_reason 在不在」——
+后者一直在，容易误判成上游的问题。

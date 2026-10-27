@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.3.1
+
+- **修流式请求被 magpie 判为「没结束」**：`Stream ended without finish_reason` → 重试 → 499 中断
+  - 成因：magicrew 在 `stream: true` 下**默认不返回 usage**；magpie 新版靠 `[DONE]` 前那条
+    `{"choices":[],"usage":{...}}` 收尾 chunk 判定流正常结束，缺了就重试
+  - 修法：流式请求自动补 `stream_options: { include_usage: true }`（upstream 支持，实测有效）
+  - 实测：补之前 `usage=无`，补之后 `finish_reason=stop · usage=有 · 收尾chunk=true · [DONE]=true`
+
 ## 0.3.0
 
 **结构重构：一个针脚一个模块。行为不变，形状变了。**

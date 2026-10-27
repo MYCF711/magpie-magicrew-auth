@@ -45,9 +45,28 @@ export function makeLoader(c) {
         let body = init?.body
         if (body === undefined && req) body = await req.text()
 
-        // 实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""
-        //                    512 → 正常出话（reasoning 208 / total 233）
-        if (typeof body === "string" && body.includes('"max_tokens"')) {
+        // 改写两处请求体，都为实测出来的：
+        //
+        // ① max_tokens 抬到 512
+        //    实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""
+        //                        512 → 正常出话（reasoning 208 / total 233）
+        //
+        // ② 流式请求补 stream_options.include_usage
+        //    magicrew 在 stream:true 下**默认不返回 usage**；补上之后，[DONE]
+        //    之前会多一条 {"choices":[],"usage":{...}} 的收尾 chunk。
+        //    magpie 新版靠这条收尾 chunk 判定「流正常结束了」——缺了它就报
+        //    「Stream ended without finish_reason」然后重试（实测 2026-10-27）。
+        //    控制台里看到的就是：模型请求重试 (3/5) · Stream ended without finish_reason
+        if (typeof body === "string" && body.includes('"stream"')) {
+          try {
+            const j = JSON.parse(body)
+            if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) j.max_tokens = 512
+            if (j.stream === true && !j.stream_options) {
+              j.stream_options = { include_usage: true }
+            }
+            body = JSON.stringify(j)
+          } catch {}
+        } else if (typeof body === "string" && body.includes('"max_tokens"')) {
           try {
             const j = JSON.parse(body)
             if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) j.max_tokens = 512
