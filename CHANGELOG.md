@@ -1,5 +1,56 @@
 # 更新记录
 
+## 0.3.15
+
+**修掉「网页已经登好、magpie 里一直转圈等」—— 弹窗永远拉不起来**
+
+现象：点「浏览器登录」，浏览器里登完了、跳到 agent 界面了，magpie 的卡片一直停在
+「请在浏览器中完成登录」，直到 5 分钟超时。
+
+根因在 `~/.cache/magpie/magicrew-login-<site>.log` 里躺着，每次都是同一行：
+
+```
+launch: 本机没找到 Chrome / Edge / Bravo / Chromium
+```
+
+**这台机器上 Edge 是装着的**（122.0.2365.106，微软官方包）。`findBrowser()` 写死的
+文件名是 `msedge.exe`，但微软在 Windows 上实际落盘的是 **`Microsoft Edge.exe`**
+（带空格、带大写）。`existsSync` 一路 miss → 返回 `null` → 永远走「降级到系统浏览器 +
+让用户去 Console 粘一行」。用户看到的就是「登好了但插件还在等」。
+
+顺带两件事：
+
+- **国产 Chromium 系一个都没列**。用户日常用的是 360 极速浏览器 X（360ChromeX，
+  Chrome 132 内核），实测 `--remote-debugging-port=0` + CDP `Runtime.evaluate`
+  完全可用 —— 没有任何理由不支持。
+- **只挑「第一个存在的」**，一旦那个起不来就彻底失败。改成**逐个试**，
+  第一个真写出 `DevToolsActivePort` 的才算数；全失败时把每个候选的失败原因都带出来。
+
+### 浏览器优先级（按「谁最干净」排，不是按名气）
+
+```
+① Chrome / Chromium   自己装的，无企业策略、无强制登录  ← 首选
+② 国产 Chromium 系    用户日常在用的，CDP 实测一样能用
+③ Edge                垫底：策略最多、最容易被拦、且用户明确不想用它
+```
+
+本机实测（Chromium 154.0.8037.93，scoop 安装）：**起 CDP 650–800ms，页面就绪 ~2s，
+`waitForCreds` 正常读到凭据，关窗后 profile 彻底删除。**
+
+- `findBrowser()` 改为返回 `{ name, path }`（原来是裸字符串），新增 `browserCandidates()`
+- 新增 scoop / 便携版 Chromium 路径（本机就是 scoop 装的那条）
+- `waitPort()` 支持「进程已退出就别白等 8 秒」的提前放弃
+- `launchLoginBrowser()` 返回体新增 `name` / `exe`，卡片文案会写明用的是哪个浏览器
+- `local-browser.mjs` 的 `roots()` 补上 360 / QQ / 搜狗等，让「本机已登录就直接认」也能命中
+- 判据：`node tests/browser-detect.mjs`（Edge 真实文件名 / 国产覆盖 / Chromium 优先 / 逐个试）
+
+### 为什么先修「怎么把窗口拉起来」，而不是去补更多登录方式
+
+这条链只有一个出口：**窗口拉不起来，后面的 CDP 读取一步都走不到**。
+0.3.12 及更早的失败还是**静默**的 —— 它会「成功」降级到剪贴板通道，而那一步要求
+用户知道有 F12 这回事。所以症状不是「报错」，而是「看起来什么都没发生」。
+判据落在 `magicrew-login-<site>.log` 里，就是为了这种静默失败下次能一眼看见。
+
 ## 0.3.14
 
 **两处判据修正：国际站看「话题」而不是「项目」；「免费」不再从倍率反推**
@@ -90,6 +141,7 @@ magicrew#g8rptf (66p0q…)   first_ai_work  PENDING/PENDING → COMPLETED/GRANTE
 
 再调一次 `ensureFirstTaskOnce` 直接返回 `{ settled: true }`：不打网络、不发消息，
 一次性闸门生效。
+
 
 ## 0.3.12
 
