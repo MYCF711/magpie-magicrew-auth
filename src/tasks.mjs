@@ -237,15 +237,16 @@ async function autoFirstWork(h) {
  * 国际站的「首个对话」：没有任务清单可依，只能看它用没用过。
  *
  * 判据是**有没有工作台项目**：项目是发第一条消息时前端顺带建的，
- * 一个都没有基本等于从没说过话。已经有项目就跳过，免得每天签到都发一条。
+ * 一个都没有基本等于从没说过话。已经有项目 = 用过 → 直接记成已补过
+ * （一次性），以后再也不用查。
  *
- * @returns {{ok?:boolean, skipped?:boolean, reason?:string, topicName?:string, model?:string}}
+ * @returns {{ok?:boolean, settled?:boolean, reason?:string, topicName?:string, model?:string}}
  */
 async function autoFirstChat(h) {
   const siteId = siteIdOf(h.host)
-  // 同一道闸门：每账号每天最多一条
-  if (sentToday(siteId, h.org)) {
-    return { skipped: true, reason: "今天已经补过一次" }
+  // 同一道闸门：一次性。换天、重登、重启都不会再发。
+  if (isAutoChatSettled(siteId, h.org)) {
+    return { settled: true, reason: "首对话此前已补过（一次性任务）" }
   }
 
   try {
@@ -254,17 +255,60 @@ async function autoFirstChat(h) {
 
     const { findProjectId, runChatTask } = await import("./chat-task.mjs")
     const existing = await findProjectId(h.jwt, h.org, h.host, wsId).catch(() => "")
-    if (existing) return { skipped: true }
+    if (existing) {
+      // 已有项目 = 早就说过话。直接落一次性标记，省得以后每次登录都查一遍。
+      noteAutoChat(siteId, h.org, { reason: "已有工作台项目，视为用过" })
+      return { settled: true, reason: "此前已用过（已有工作台项目）" }
+    }
 
     const r = await runChatTask({ jwt: h.jwt, org: h.org, host: h.host, workspaceId: wsId })
-    if (!r.ok) return { reason: r.reason || "发送失败" }
+    if (!r.ok) {
+      const f = noteAutoChatFailure(siteId, h.org, r.reason || "发送失败")
+      const why = r.reason || "发送失败"
+      return { reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
+    }
 
-    // 发出去了才落标记；失败的不写，留给下一次（明天）重试
-    noteAutoChat(siteId, h.org)
+    // 发出去了才写一次性标记；失败的一直不写，留给下一次
+    noteAutoChat(siteId, h.org, { topicId: r.topicId || undefined, model: r.model || undefined })
     return { ok: true, topicName: r.topicName, model: r.model }
   } catch (e) {
-    return { reason: String(e?.message ?? e) }
+    const why = String(e?.message ?? e)
+    const f = noteAutoChatFailure(siteId, h.org, why)
+    return { reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
   }
+}
+
+/**
+ * 账号刚加进来时的一次性补完 —— 登录成功后调用，和签到共用同一道闸门。
+ *
+ * 为什么单独开一个入口：主人的要求是「一个账号加入的时候做一次」，
+ * 而不是「每天签到都做」。登录那一刻就是「加入」，做完就永久标记，
+ * 之后无论重登多少次、签到多少天，都不会再发第二条消息。
+ *
+ * 调用方**不要 await** —— 建项目 + 发消息 + 兜底等结算最坏要一分钟，
+ * 登录必须立刻返回。失败也不用管：下一个签到日 checkin 会接着做（同一道闸门）。
+ *
+ * @param {{jwt:string, org:string, host:string}} h
+ */
+export async function ensureFirstTaskOnce(h) {
+  const siteId = siteIdOf(h.host)
+  if (isAutoChatSettled(siteId, h.org)) return { settled: true }
+
+  // 国内站：有任务清单。清单里没有 first_ai_work、或者已经完成 → 什么都不用做
+  const tasks = await fetchOnboardingTasks(h.jwt, h.org, h.host).catch(() => null)
+  if (Array.isArray(tasks) && tasks.length) {
+    const fw = tasks.find((t) => t.code === "first_ai_work")
+    if (!fw) return { skipped: true, reason: "本站没有这项任务" }
+    if (fw.status === "COMPLETED" || fw.rewardStatus === "GRANTED") {
+      // 服务端已经认过了 —— 落标记，以后不查了
+      noteAutoChat(siteId, h.org, { reason: "服务端已标记完成" })
+      return { skipped: true, reason: "已完成" }
+    }
+    return autoFirstWork(h)
+  }
+
+  // 国际站：没有任务清单 → 看有没有工作台项目
+  return autoFirstChat(h)
 }
 
 export { NOT_MANUALLY_COMPLETABLE }
