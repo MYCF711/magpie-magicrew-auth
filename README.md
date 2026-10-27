@@ -1,18 +1,18 @@
 # 超级麦吉 / MagiCrew for magpie
 
-**一个包，两个供应商：国内 27 个模型、国际 49 个模型，原样走它的 OpenAI 兼容网关。**
+**一个包，两个供应商：国内的 GLM / DeepSeek / Qwen / Kimi，国际再加 Claude / GPT / Gemini —— 原样走它的 OpenAI 兼容网关。**
 
 超级麦吉（`letsmagic.cn`）和 MagiCrew（`magicrew.ai`）是同一产品的两套云。这个插件把它们各接成一个独立供应商 —— 在 magpie 的供应商列表、用量概览、模型目录里各占一行，不聚合、不互相覆盖登录态。
 
 ```
-国内   超级麦吉   www.letsmagic.cn     27 个账号可选模型
-国际   MagiCrew   www.magicrew.ai      49 个账号可选模型
+国内   超级麦吉   www.letsmagic.cn     GLM / DeepSeek / Qwen / Kimi / MiniMax / MiMo / 豆包
+国际   MagiCrew   www.magicrew.ai      上面全部，再加 Claude / GPT / Gemini
 协议   OpenAI Chat Completions —— 原生，不是翻译出来的
 计费   积分（预充值，不是月度配额）
 凭证   登录一次 30 天全自动：api_key 两小时自续，refresh_token 自滚
 ```
 
-> 数字是 2026-10-27 实测：`GET <站点>/api/v1/flows/models` 各拉一遍数出来的。两站列表不一样，而且会随订阅档位变 —— 所以插件里**没有一张写死的模型清单**，账户能选什么就显示什么。
+> 上面那排是 2026-10-27 从两站 `GET /api/v1/flows/models` 拉下来核对的。清单会随订阅档位和平台上下架变 —— 所以插件里**没有一张写死的模型清单**，账户能选什么就显示什么。
 
 ---
 
@@ -31,20 +31,33 @@
 
 ## 模型
 
-不写死。上面那张表是**数量**，不是清单：
+**国内的 GLM、DeepSeek、Qwen、Kimi、MiniMax、MiMo、豆包；国际站再加 Claude、GPT、Gemini 三家。**
 
-| 站点 | 可选语言模型 | 网关全量（含生图/向量） |
-|---|---|---|
-| 国内 · 超级麦吉 | 27 | 44 |
-| 国际 · MagiCrew | 49 | 65 |
+登录后按账号实时拉 `/api/v1/flows/models`，账户能选什么就显示什么 —— 下表只列各家**最新**和**热门**的那几款：
+
+| 发行商 | 最新 / 热门 | 上下文 | 国内 | 国际 |
+|---|---|---|---|---|
+| GLM（智谱） | `glm-5.3` · `glm-5.3-flash` | 1M · 256K | ✓ | ✓ |
+| DeepSeek | `deepseek-v4.1-flash` | 1M | ✓ | ✓ |
+| DeepSeek | `deepseek-v4-pro` | 128K | — | ✓ |
+| Qwen（阿里） | `qwen3.8-max` · `qwen3.7-plus` | 1M | ✓ | ✓ |
+| Kimi（月之暗面） | `kimi-k3.1-pro` | 1M | ✓ | ✓ |
+| MiniMax | `minimax-m3` · `minimax-m3.1-flash` | 1M | ✓ | ✓ |
+| MiMo（小米） | `mimo-v2.6-pro` · `mimo-v2.6-flash` | 1M | ✓ | ✓ |
+| 豆包 Seed（字节） | `doubao-seed-2.0-pro` · `doubao-seed-2.0-code` | 256K | ✓ | ✓ |
+| Claude（Anthropic） | `claude-haiku-5.5` | 1M | — | ✓ |
+| GPT（OpenAI） | `gpt-6-luna` · `gpt-5.4-mini` | 1.05M · 400K | — | ✓ |
+| Gemini（Google） | `gemini-3.7-flash` | 1M | — | ✓ |
+
+全量（含生图、向量、各家历史版本）不进 README —— 装好以后模型选择器里看到的才是账号真实的全部。
 
 用的是 `/api/v1/flows/models`（网页模型选择器里眼睛能点到的那些），不是 `/v1/models` —— 后者混着 VIP 锁定、生图、embedding，塞进来用户会选到根本调不动的模型。
 
-上下文窗口统一按 **256K** 保守填：这两个接口都不返回 `context_length`。填大了 agent 要等上游报错才知道越界，填小了自己压得早。
+上下文按 magpie 的模型库查（`~/.cache/magpie/models.json`），查不到才退回 256K 保守值。这两个接口都不返回 `context_length`；早期一律填 256K，把 `deepseek-v4.1-flash` 真实 1M 的窗口砍成四分之一，agent 反而更早拒绝 —— 根因与修法见 `docs/internals.md` 第十六节。
 
 推理模型会吃 `max_tokens`：`glm-5.3-flash` 给 64 个 token 时 `reasoning_content` 就吃满、`content` 是空串。插件把低于 512 的 `max_tokens` 抬到 512。
 
-国际站有 27 个模型是国内没有的：GPT 5.x / 6-luna、Gemini 3.x、Claude Haiku 5.5、Kimi K3 等。
+两站不是简单叠加：国际站多出 Claude / GPT / Gemini 三家，另有豆包 Seed 1.8 / 2.0-mini / seed-code、Kimi K2.6 / K2.7-code / K3、GLM 5.2、Qwen3.7-max 这些国内没有的档位。
 
 ---
 
@@ -146,7 +159,7 @@ magpie plugin list
 
 **两个站要装两次吗？** 不用。一个包导出两个插件，装一次两个供应商都在，各自登录。
 
-**为什么国际站的模型数会变？** 因为这个数字是从 `/api/v1/flows/models` 实时拉的。订阅档位变了、平台方开关变了，数字就跟着变 —— 插件里没有需要维护的清单。
+**为什么模型列表会变？** 因为清单是从 `/api/v1/flows/models` 实时拉的。订阅档位变了、平台方上下架变了，清单就跟着变 —— 插件里没有需要维护的模型表。
 
 **国际站 `/v1/chat/completions` 报 500，22 字节的纯文本？** 那是缺 `organization-code` 请求头。国内站不需要，国际站强制。插件按站点自动带。
 
