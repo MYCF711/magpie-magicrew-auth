@@ -340,6 +340,29 @@ cat "<安装目录>/resources/app-update.yml"
 
 ## 九、为什么做不到「点一下全自动」
 
+> ### ⚠ 更正（2026-10-28）：这一节原来的结论是**错的**
+>
+> 原文断言「magicrew 没有这条路」，理由是「登录类型全是拿凭据换 token，没有设备码、
+> 没有一次性 ticket」。**真正的错因是找错了域名** —— 登录用的用户中心不在
+> `i-magic-service.letsmagic.cn`，而在 keewood：
+>
+> | 站点 | 用户中心 |
+> |---|---|
+> | 国内 | `https://i-keewood-service.teamshare.cn` |
+> | 国际 | `https://keewood-service.magicrew.ai`（**没有 `i-` 前缀**） |
+>
+> 换成这个域名，整条链一个 404 都没有：`/captcha/generate` → `/captcha/verify` →
+> `/v4/user/send-sms` → `/v4/user/login`，**全程纯 HTTP、不开浏览器**。
+> 那个「拖动滑块使图片角度为正」的答案就是提交参数里的 `angle`（加密过的整数），
+> 用 magpie 设置里的识图模型判「主体上方向指向钟面几点」就能算出来。
+>
+> 实现见 `src/captcha.mjs` / `src/vision.mjs` / `src/headless.mjs`，
+> 以及登录方法「手机号验证码」。下面保留原文，只为了说明**当时为什么判断错了**。
+
+下面的分析**在换对域名之前**成立，其中「① 13 种登录类型」和「③ 试过的三个端点」
+仍然是事实，只是它们不能推出「没有这条路」——真正缺的那个域名当时没找到。
+
+
 对比 OfficeAce：它能做到「浏览器登录完，magpie 窗口自动继续」，因为华为云 OAuth 的
 `redirect_uri` 指向一个**可控的服务**（`${CLAW_BASE}/v1/claw/auth/callback`），
 插件轮询那个服务取结果。magicrew 没有这条通道：

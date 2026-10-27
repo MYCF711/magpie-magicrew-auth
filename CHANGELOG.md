@@ -1,5 +1,97 @@
 # 更新记录
 
+## 0.3.17
+
+**不用开浏览器也能登录了 —— 手机号 + 短信验证码，纯 HTTP 走完**
+
+那个卡了很久的「拖动滑块使图片角度为正」现在能自动过：用 magpie 设置里你自己选的
+识图模型（`settings.json` 的 `vision`）判断旋转角度，然后纯 HTTP 把整条链走完。
+
+### 之前为什么做不了，以及真相
+
+旧文档（internals 第九节）写着「magicrew 没有这条路」。**那是错的，原因是找错了域名。**
+登录用的用户中心不在 `i-magic-service.letsmagic.cn`，而在另一套 keewood 服务上：
+
+| 站点 | 用户中心 |
+|---|---|
+| 国内 letsmagic.cn | `https://i-keewood-service.teamshare.cn` |
+| 国际 magicrew.ai | `https://keewood-service.magicrew.ai`（**没有 `i-` 前缀**） |
+
+换成这个域名，整条链一个 404 都没有。
+
+### 五步链路（全部实测）
+
+```
+POST /captcha/generate    {account_type:"mobile", mobile, state_code}
+     → {token, image(data:image/webp;base64,…), expire_time}      ← 纯 JSON，无 cookie、无指纹
+POST /captcha/verify      {token, angle, account_type, mobile, state_code}
+     → {verified:true, business_token:"biz_…"}
+POST /v4/user/send-sms    {type:"account_login", phone, state_code}
+     + header X-Captcha-Token: <business_token>                  ← 这个 type 填错会炸
+POST /v4/user/login       {type:"phone_captcha", phone, state_code, code, device:{id,name}}
+     → jwt + 组织
+```
+
+**`angle` 不是一个裸角度，是加密过的整数**，前端那么算：
+
+```
+l = deg,  u = n (n = Date.now()%90000+10000)
+d = 52249517 × (l + u) + 5976906165
+angle = String(d & 0xFFFFFFFF) + String(n)
+```
+
+`deg` 就是「图片要顺时针转多少度」，**1 px = 1.6°，满行程 225 px = 360°**。
+验证方式：抓浏览器真实提交的 4 组 angle，对每组正向穷举 0…359 **都唯一命中**，
+命中值与拖动像素严格成 1.6 倍；另用图像互相关独立验算，拖 100px 前后帧相差 160°±0.25°。
+
+### 识图判角度：问钟点，不问角度
+
+**不要问模型「这图歪了多少度」** —— 实测填空 6 次错 5 次。改问
+「主体自己的『上方向』指向钟面的几点」（12=正上、3=正右），再 `deg = (12 - clock) × 30`。
+
+而且**必须问两遍比分歧**：实测的失败样本是两个判官给出 1.7 和 7.5 钟点（相差 174°），
+其中一个把方向看反了 —— 这种情况取平均毫无意义，只能换图重来。
+分歧阈值 1.5 钟点（45°）。
+
+服务端**容差实测 ≥ ±10°**（正确答案 120°，故意提交 130° 仍然通过），所以钟点法的
+精度是够的：24 格 15° 网格的那点误差根本不影响。
+
+⚠ `Bun.Image.rotate()` **只支持 90° 的倍数**（`rotate: only multiples of 90 are supported`），
+`bytes()`/`buffer()` 给的是编码后的 PNG、拿不到原始像素 —— 所以「旋转 24 格网格」
+这条路在插件里走不通，才改用钟点法。
+
+### 新增
+
+- `src/captcha.mjs` —— 取图 / 角度加密 / 验证 / 发短信 / 验证码换登录态 / 三站域名映射
+- `src/vision.mjs` —— 读 `settings.json` 的 `vision`、找 magpie 自己的网关
+  （默认 `127.0.0.1:3425`，`MAGPIE_GATEWAY_PORT` 可覆盖）、webp→png、钟点双问与分歧判定
+- `src/headless.mjs` —— 编排：最多换 4 张图、每张只提交一次（风控不允许反复试同一 token）、
+  失败把每轮原因带出来
+- 登录方法「手机号验证码」—— `prompts` 问手机号，`authorize` 里过验证并发短信，
+  然后 `method: "code"` 等用户填 6 位验证码，`callback(code)` 换登录态并建号
+
+### 两个坑，都是实测撞出来的
+
+1. **`send-sms` 的 `type` 必须是 `"account_login"`**。填 `"login"` / `"phone_captcha"`
+   / `"sms_login"` 全部返回 `9999 服务异常，请联系管理员` —— 后端内部炸了，不是参数校验，
+   所以从错误信息上完全看不出是 type 的问题。这个值是从浏览器真实请求里抓出来的。
+2. **`device` 是必填且结构要试**：缺 → 9999；给字符串 → 9999；
+   `{device_id}` → 「id 字段是必须的」；`{id, name}` → 放行。
+   ⇒ `{id: 64 位 hex, name: "web"}`。
+
+### 没配识图模型时
+
+**不瞎猜。** 容差 ±10° 意味着瞎猜命中率只有约 5.6%（20/360），平均要试十几次，
+先撞上的会是「验证提交过于频繁」。这种情况直接报错并指路：去 magpie 设置里配一个
+识图模型，或者改用「浏览器登录」。
+
+### ⚠ 未实测的一步
+
+`/v4/user/login` 成功之后**响应里 jwt / 组织码的确切结构没验到** —— 手上没有能收短信的
+号码，只能验到 `2168 验证码错误`（这已经证明参数结构对了）。所以那一步写成：
+按 `eyJ` 三段式特征找 JWT、组织码找不着就用拿到的 JWT 调
+`/api/v1/aggregation/login-data` 补；两条都拿不到时把原始响应带进错误信息。
+
 ## 0.3.16
 
 **加了给 AI 执行者的入口 —— 因为「发布」这一步真的被漏过一次**
