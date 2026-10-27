@@ -306,6 +306,45 @@ export async function completeOnboardingTask(token, org, code, host = SITES.cn.h
   return { points: Number(body?.data?.points ?? 0) }
 }
 
+// ── ③c 每日登录积分（每日签到）────────────────────────────────────────
+//
+// POST /api/v1/login-gift，**无请求体**。这条是 2026-10-27 从网页抓包里挖出来的：
+//
+//   POST /api/v1/login-gift
+//   → {"code":1000,"data":{"granted":true,"point_amount":50,
+//                          "expire_type":1,"message":"成功领取每日登录积分"}}
+//
+// 关键性质（同日实测，两个站点都验过）：
+//
+//   · 幂等：当天已领过 → granted:false, point_amount:0, "今日已领取登录积分"
+//            HTTP 仍是 200，不是错误 —— 所以可以每天无脑调用
+//   · 两站同构：国际站 +50/天，国内站 **+200/天**，路径、方法、返回结构完全一样
+//   · 奖励进的是当天 23:59:59 过期的额度包（expire_type:1），不累积
+//
+// ⚠ 这条和「新手福利」（onboarding/tasks）是两套完全独立的机制。
+//   国际站的 onboarding 接口 participant_type 恒为 null、tasks 恒为空数组，
+//   靠它永远领不到每日登录积分 —— 早前版本就是这么漏的。
+
+/**
+ * 领取当日登录积分。已领取不是错误，靠 granted 字段区分。
+ *
+ * @returns {{granted:boolean, points:number, message:string}}
+ */
+export async function claimLoginGift(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/login-gift`, {
+    method: "POST",
+    headers: headersFor(token, org, host),
+    body: "",
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  return {
+    granted: Boolean(d.granted),
+    points: Number(d.point_amount ?? 0),
+    message: String(d.message ?? ""),
+  }
+}
+
 // ── ④ 积分与任务 ─────────────────────────────────────────────────────
 
 /**
@@ -358,11 +397,12 @@ export async function fetchPointRecords(token, org, { page = 1, pageSize = 20, h
 //   GET /api/v1/invitations/activity              → 活动配置
 //   GET /api/v1/invitations/rewards/total-points  → 已赚积分
 //
-// ⚠ 这三个接口只认**客户端登录**的那把 JWT（438 字符），网页版那把
-//   localstorage 里的 JWT（354 字符）调过去回 {"code":2155,"message":"用户不存在"}。
-//   两把都是同一账号签的，差别在 payload 里的用户字段 —— 网页版不带。
-//   ⇒ 所以「用我自己的邀请码」只能拿**本插件上次登录成功时存下的**那把 JWT，
-//     没登录过就没得用（报错，不猜）。
+// ⚠ 早前这里写着「这三个接口只认客户端那把 JWT（438 字符），网页版那把 354 字符的
+//   调过去回 2155 用户不存在」—— **2026-10-27 复核，这条已经不成立**：
+//   四个账号（两站各两个）全是 354 字符的网页 JWT、cus.device_id 全为空，
+//   `/api/v1/invitations/info` 全部返回 200 并正常给出 invite_code。
+//   上游放宽了这个限制。所以「用我自己的邀请码」不再受 JWT 来源限制，
+//   只要手里有登录态就能换成自己的码。
 export const INVITE_CODE_PATH = "/api/v1/invitations/info"
 
 /** 拿不到就抛错 —— 调用方要的是「真实结果」，不是静默降级 */
@@ -377,6 +417,89 @@ export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
     count: Number(d.invite_count ?? 0),
     invited: Array.isArray(d.invited_users) ? d.invited_users.length : 0,
   }
+}
+
+// ── ④b-2 邀请奖励明细 ────────────────────────────────────────────────
+//
+//   GET /api/v1/invitations/rewards  → { page, total, list:[…] }
+//
+// 每条 = 一笔「因为邀请而该发给我的奖励」：
+//
+//   { reward_points: 1000, description: "注册奖励", status: "COMPLETED",
+//     status_description: "已完成", scheduled_at: "…", invited_user_id: "usi_…" }
+//
+// 发放条件（前端 locale 原文，2026-10-27 核对）：
+//
+//   「被邀请人完成首个任务或对话后，即可获得 {{points}} 积分奖励。」
+//   「邀请的用户开通付费套餐，在其套餐每个月度周期结束后，发放奖励积分」
+//
+// ⚠ 这就是「小号注册了、邀请人却没到账」的答案：**光注册不发**。
+//   被邀请人得真的在**产品里**跑完一次任务/对话 —— 走 socket 的那条路。
+//   通过 magpie / OpenAI 兼容网关调模型**不算**：实测同一个号用 magpie
+//   调了好几轮、真扣了积分，`first_ai_work` 仍然是 PENDING（见 CHANGELOG 0.3.9）。
+export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/invitations/rewards`, {
+    headers: headersFor(token, org, host),
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = Array.isArray(d.list) ? d.list : []
+  return {
+    total: Number(d.total ?? list.length),
+    earned: list
+      .filter((r) => String(r.status).toUpperCase() === "COMPLETED")
+      .reduce((s, r) => s + Number(r.reward_points ?? 0), 0),
+    list: list.map((r) => ({
+      points: Number(r.reward_points ?? 0),
+      description: String(r.description ?? ""),
+      status: String(r.status ?? ""),
+      statusText: String(r.status_description ?? ""),
+      scheduledAt: r.scheduled_at ?? null,
+      invitedUserId: String(r.invited_user_id ?? ""),
+    })),
+  }
+}
+
+// ── ④e 某个项目下的话题 ────────────────────────────────────────────
+//
+//   GET /api/v1/super-agent/projects/{id}/topics → { total, list:[{ id, chat_topic_id, chat_conversation_id, topic_name, … }] }
+//
+// 两个用途：
+//   ① 发消息时拿 chat_topic_id / chat_conversation_id
+//   ② **判断这个账号到底说没说过话** —— 有话题 = 发过。
+//
+// ⚠ 别用「有没有项目」来判断：项目在打开工作台时就会自动建，
+//   建了项目但一句话没说的情况很常见（新号就是）。
+export async function fetchProjectTopics(token, org, projectId, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/super-agent/projects/${projectId}/topics`, {
+    headers: headersFor(token, org, host),
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = Array.isArray(d.list) ? d.list : []
+  return list.map((t) => ({
+    id: String(t.id ?? ""),
+    chatTopicId: String(t.chat_topic_id ?? ""),
+    chatConversationId: String(t.chat_conversation_id ?? ""),
+    name: String(t.topic_name ?? ""),
+    status: String(t.task_status ?? ""),
+  }))
+}
+
+// ── ④d 第一个工作区 ──────────────────────────────────────────────────
+//
+// 自动完成首任务要打开 `/<站点>/global/super/workspace/<id>`，这个 id 只有接口给。
+// 每个账号注册时会自动建一个默认工作区，取第一个就够。
+export async function fetchFirstWorkspaceId(token, org, host = SITES.cn.host) {
+  const res = await fetch(
+    `${host}/api/v1/super-agent/workspaces/queries?page=1&page_size=1&pin_priority=true`,
+    { headers: headersFor(token, org, host) },
+  )
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = d.list ?? d.items ?? []
+  const w = list[0] ?? null
+  return String(w?.id ?? w?.workspace_id ?? w?.workspaceId ?? "")
 }
 
 // ── ④c 这个登录态是谁 ────────────────────────────────────────────────
