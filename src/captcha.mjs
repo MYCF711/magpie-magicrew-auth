@@ -233,6 +233,16 @@ export function extractCreds(payload) {
   const looksJwt = (v) => typeof v === "string" && v.startsWith("eyJ") && v.split(".").length === 3
   const looksOrg = (v) => typeof v === "string" && /^[a-z0-9]{6,32}$/i.test(v) && !looksJwt(v)
 
+  // 这些键名是服务端真实用的（实测 `login-data` 的形状），优先级高于「键名里带 org」的泛匹配 ——
+  // 后者会撞上 `organization_name: ""`、`organization_logo: null` 这类同名前缀的字段。
+  const STRONG_ORG_KEYS = [
+    "magic_organization_code",
+    "third_platform_organization_code",
+    "teamshare_organization_code",
+    "organization_code",
+    "organizationCode",
+  ]
+
   const walk = (node, depth) => {
     if (!node || depth > 5 || seen.has(node)) return
     if (typeof node !== "object") return
@@ -240,11 +250,17 @@ export function extractCreds(payload) {
 
     for (const [k, v] of Object.entries(node)) {
       if (!jwt && looksJwt(v)) jwt = v
-      if (!org && looksOrg(v) && /org/i.test(k)) org = v
+      if (!org && STRONG_ORG_KEYS.includes(k) && looksOrg(v)) org = v
     }
-    // 常见嵌套：data / organization / organizations[0]
-    if (!org && typeof node.organization_code === "string") org = node.organization_code
-    if (!org && typeof node.organizationCode === "string") org = node.organizationCode
+    // 弱匹配兜底：键名带 org 且值形似组织码
+    if (!org) {
+      for (const [k, v] of Object.entries(node)) {
+        if (looksOrg(v) && /org/i.test(k)) {
+          org = v
+          break
+        }
+      }
+    }
     for (const v of Object.values(node)) {
       if (v && typeof v === "object") {
         if (Array.isArray(v)) {
