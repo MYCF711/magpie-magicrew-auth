@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
+import { fetchOwnInviteCode } from "./api.mjs"
 
 function cacheDir() {
   return join(homedir(), ".cache", "magpie")
@@ -117,12 +118,30 @@ function inviteToUse(siteId) {
   return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
 }
 
-/** 登录成功后把账号自己的邀请码滚上去；拿不到就安静跳过 */
+/** 滚动请求最多等这么久 —— 登录流程不能被它拖死 */
+const INVITE_TIMEOUT_MS = 6000
+
+/**
+ * 登录成功后把账号自己的邀请码滚上去；失败不挡登录。
+ *
+ * ⚠ 这个函数曾经**完全没有 import `fetchOwnInviteCode`**（0.3.7 及更早版本）。
+ *   于是每次调用都在调它的那一行抛 ReferenceError，又被下面的空 catch 静默吞掉 ——
+ *   「滚动邀请码」这个功能从上线起一次都没成功过：
+ *   magicrew-invite-<site>.json 永远不存在，每次注册都退回作者码，
+ *   等于每个新号都在给作者送 200 分（国内站 1,000 分）。
+ *   留痕留在 MAGICREW_DEBUG 下，就是为了不再重演这种「静默停摆」。
+ */
 async function rollInvite(siteId, jwt, org, host) {
   try {
-    const own = await fetchOwnInviteCode(jwt, org, host)
+    const own = await Promise.race([
+      fetchOwnInviteCode(jwt, org, host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("超时")), INVITE_TIMEOUT_MS)),
+    ])
     return writeInvite(siteId, own.code)
-  } catch {
+  } catch (e) {
+    if (process.env.MAGICREW_DEBUG) {
+      console.error(`[magicrew] 滚动邀请码失败（${siteId}）：${e?.message ?? e}`)
+    }
     return ""
   }
 }
@@ -195,6 +214,59 @@ function noteOrg(siteId, org) {
     const f = orgsPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, JSON.stringify(list.slice(-50)))
+  } catch {}
+}
+
+// ═══ 自动发消息的去重标记 ═══════════════════════════════════════════
+//
+// 签到里那条「替账号完成首个任务/对话」的动作是有成本的：建项目、建话题、
+// 真花积分跑一次模型。所以必须有闸门，否则会踩三种雷：
+//
+//   ① 结算慢 —— 消息发出去了，服务端要几十秒才把任务标成 COMPLETED。
+//      这期间签到结束，下一次（当天重试或第二天）又看到「未完成」，再发一条。
+//   ② 判定不到 —— 国际站没有任务清单，只能看「有没有项目」。万一项目建了
+//      但消息没发出去，下次会被当成「已用过」而永远不补；反过来若项目没建
+//      成，又会每次都重发。
+//   ③ 异常重试 —— checkin 抛错时 magpie 当天会重试，同一件事做两遍。
+//
+// 闸门就一条规则：**每个账号每天最多发一次**。按 org 记日期，跨天自动失效。
+// 发送前查、发送成功才写；失败的不要写，留给下一次重试。
+
+function autochatPath(siteId) {
+  return join(cacheDir(), `magicrew-autochat-${siteId}.json`)
+}
+
+/** { [org]: "YYYY-MM-DD" } */
+export function readAutoChat(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(autochatPath(siteId), "utf8"))
+    return v && typeof v === "object" ? v : {}
+  } catch {
+    return {}
+  }
+}
+
+/** 北京时间的那一天 —— magpie 也是按北京时间调签到 */
+export function todayInBeijing() {
+  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+}
+
+/** 这个账号今天是不是已经替它发过了 */
+export function sentToday(siteId, org) {
+  return readAutoChat(siteId)[org] === todayInBeijing()
+}
+
+/** 记一笔「今天已经发过」。只在**发送成功**后调用 */
+export function noteAutoChat(siteId, org) {
+  try {
+    const m = readAutoChat(siteId)
+    m[org] = todayInBeijing()
+    // 只留最近 80 个账号，文件别无限涨
+    const keys = Object.keys(m)
+    if (keys.length > 80) for (const k of keys.slice(0, keys.length - 80)) delete m[k]
+    const f = autochatPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify(m))
   } catch {}
 }
 
