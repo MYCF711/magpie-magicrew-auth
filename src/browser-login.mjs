@@ -95,7 +95,9 @@ export function sweepProfiles({ maxAgeMs = 2 * 3600_000 } = {}) {
  *     360ChromeX (Chrome 132 内核)    同上可用
  *
  * ⚠⚠ Edge 这里曾经还有一个真 bug：写死的文件名是 `msedge.exe`，
- *   而微软在 Windows 上实际落盘的是 **`Microsoft Edge.exe`**（带空格、带大写）。
+ *   而**有些**机器上微软落盘的是 **`Microsoft Edge.exe`**（带空格、带大写），
+ *   另一些机器的同一版本只有 `msedge.exe`。落盘名随安装方式/版本变，
+ *   写死任何一个都必有一类机器命中不到。
  *   于是 existsSync 一路 miss → findBrowser() 返回 null → 永远走「降级」：
  *   系统浏览器打开 + 让用户去 Console 粘一行。用户看到的现象就是
  *   **「网页已经登好、跳到 agent 界面了，magpie 里还在转圈等」**。
