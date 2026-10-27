@@ -14,9 +14,10 @@ launch: 本机没找到 Chrome / Edge / Bravo / Chromium
 ```
 
 **这台机器上 Edge 是装着的**（122.0.2365.106，微软官方包）。`findBrowser()` 写死的
-文件名是 `msedge.exe`，但微软在 Windows 上实际落盘的是 **`Microsoft Edge.exe`**
-（带空格、带大写）。`existsSync` 一路 miss → 返回 `null` → 永远走「降级到系统浏览器 +
-让用户去 Console 粘一行」。用户看到的就是「登好了但插件还在等」。
+文件名是 `msedge.exe`，但这台机器上微软落盘的名字是 **`Microsoft Edge.exe`**
+（带空格、带大写）—— 而另一台机器的 156 版只有 `msedge.exe`。**落盘名随安装方式/版本变**，
+写死任何一个都必有一类机器命中不到。`existsSync` 一路 miss → 返回 `null` →
+永远走「降级到系统浏览器 + 让用户去 Console 粘一行」。用户看到的就是「登好了但插件还在等」。
 
 顺带两件事：
 
