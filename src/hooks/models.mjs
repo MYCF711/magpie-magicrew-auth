@@ -42,17 +42,28 @@ export function makeModels(c) {
         if (locked) continue
 
         const p = points[m.id] || {}
-        const hasPoints = p.inputPoints != null && Number(p.inputPoints) > 0
+        // 三分支 —— 按 HOOKS.md 十一之二：`free` 的判据是「花不花这份订阅的
+        // 额度」，**不能从 rate 反推**（实测 rate===0 的 51 条里，38 条是
+        // 「套餐内不按次计费」，照样吃配额；标成免费会让 Free first 一直派到它们身上）。
+        //
+        //   input_points > 0   → 有倍率，free 不设
+        //   input_points === 0 → 厂商声明免费 → free: true，且不给 rate
+        //   input_points 缺失  → 价格未知 → 不列（不猜，也不谎标免费）
+        //
+        // 「已知」要挡住空串与非数字：`Number("") === 0` 会把没填的价格当成免费。
+        const raw = p.inputPoints
+        const known = raw != null && String(raw).trim() !== "" && Number.isFinite(Number(raw))
+        const isFree = known && Number(raw) === 0
         // 计费接口整体成功、但这条没价格 → 不列。
         // 不填 rate 就不会画倍率胶囊（正确），但也别让它出现在列表里 ——
         // 用户选了不知道花多少。接口整体失败时不过滤，免得列表空掉。
-        if (pointsOk && !hasPoints) continue
+        if (pointsOk && !known) continue
 
-        // name 保持干净，倍率走 magpie 自己的 `rate` 字段 → 渲染成灰色胶囊。
-        // （之前试过拼进 name、也试过塞进 cost，都不对：抓 codearts 插件的
-        //   modelOf 才看到宿主认的是 rate / free 这两个字段）
+        // name 保持干净，倍率走 magpie 自己的 `rate` 字段 → 渲染成灰色胶囊，
+        // 免费走 `free` → 进 Free first 那一档（codearts 的 modelOf 认的就是这两个）。
         out[m.id] = modelEntry(c, m.id, m.name, m.vision, {
-          rate: hasPoints ? Number(p.inputPoints) / MULT_BASE : 0,
+          rate: known ? Number(raw) / MULT_BASE : 0,
+          free: isFree,
         })
       }
       writeSnapshot(c.id, out)
