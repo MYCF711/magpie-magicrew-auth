@@ -122,11 +122,14 @@ export async function finishSmsLogin(site, { mobile, stateCode = "+86", code, de
       raw: json,
     })
   }
-  const finalOrg = org ?? (await fetchFirstOrg(site, jwt))
-  if (!finalOrg) {
+  // 响应里给了组织码就用它；没给就把该账号的组织**全列出来**，
+  // 由调用方逐个拿 fetchPoints 验（见 methods.mjs 的 completeSignIn）——
+  // 只取第一个是不够的：多组织账号会落到「列表第一个」而不是用户平时用的那个。
+  const orgs = org ? [org] : await fetchOrgs(site, jwt)
+  if (!orgs.length) {
     throw Object.assign(new Error("登录成功但拿不到组织码（该账号没有任何组织？）"), { raw: json })
   }
-  return { jwt, org: finalOrg, raw: json }
+  return { jwt, org: orgs[0], orgs, raw: json }
 }
 
 function extractLoginCreds(json) {
@@ -135,8 +138,15 @@ function extractLoginCreds(json) {
   return { jwt, org }
 }
 
-/** 用刚拿到的 JWT 问服务端「这个账号属于哪些组织」，取第一个 */
-export async function fetchFirstOrg(site, jwt) {
+/**
+ * 这个账号属于哪些组织（按服务端返回的顺序）。
+ *
+ * ⚠ 浏览器登录能直接读到用户**当前选中**的组织（localStorage 里的
+ *   `MAGIC:user:organizationCode`），无头这条路没有那个信息 —— 所以只能把候选
+ *   全拿回来，让调用方逐个验，验不过再换下一个。单组织账号没有区别；
+ *   多组织账号靠这一步才不会落错地方。
+ */
+export async function fetchOrgs(site, jwt) {
   const res = await fetch(`${site.host}/api/v1/aggregation/login-data?teamshare_login_code=`, {
     headers: {
       authorization: `Bearer ${jwt}`,
@@ -144,13 +154,27 @@ export async function fetchFirstOrg(site, jwt) {
     },
     signal: AbortSignal.timeout(20_000),
   }).catch(() => null)
-  if (!res?.ok) return null
+  if (!res?.ok) return []
   const j = await res.json().catch(() => null)
-  const list = j?.auth_status ?? j?.data?.auth_status ?? []
-  const first = Array.isArray(list) ? list[0] : null
-  const candidates = [first?.organization_code, first?.organizationCode, first?.code]
-  for (const c of candidates) {
-    if (typeof c === "string" && /^[a-z0-9]{6,32}$/i.test(c)) return c
+  const list = j?.data?.auth_status ?? j?.auth_status ?? []
+  if (!Array.isArray(list)) return []
+
+  // ⚠ 字段名是 `magic_organization_code`（实测）。`organization_code` 只在**外层**存在，
+  //   而且是空串 —— 认它就会拿到 ""。每项里另有 third_platform_ / teamshare_ 两份同值码。
+  const KEYS = [
+    "magic_organization_code",
+    "third_platform_organization_code",
+    "teamshare_organization_code",
+  ]
+  const out = []
+  for (const item of list) {
+    for (const key of KEYS) {
+      const v = item?.[key]
+      if (typeof v === "string" && /^[a-z0-9]{6,32}$/i.test(v) && !out.includes(v)) {
+        out.push(v)
+        break
+      }
+    }
   }
-  return null
+  return out
 }

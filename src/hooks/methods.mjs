@@ -42,26 +42,44 @@ function kickoffFirstTask(c, jwt, org) {
  *
  * 无头登录和浏览器登录最后都落到这里，保证「验证一次 / 建 key / 落 session /
  * 记组织 / 滚邀请码 / 补首任务 / 取昵称」这一串只有一份实现。
+ *
+ * `orgs` 是候选组织列表（无头那条路拿不到「用户当前选中的组织」，只能猜）。
+ * 按顺序用 `fetchPoints` 真验一遍，第一个验得过才算 —— 多组织账号靠这个
+ * 才不会落错地方。浏览器登录只有一个候选，行为不变。
  */
-async function completeSignIn(c, jwt, org) {
-  // 真的验一次：读积分能过，说明 JWT + 组织码都对
-  await fetchPoints(jwt, org, c.host)
-  const key = await issueGatewayKey(jwt, org, c.host)
-  writeSession(c.id, jwt, org)
-  noteOrg(c.id, org)
+async function completeSignIn(c, jwt, org, orgs = []) {
+  const candidates = [org, ...orgs.filter((o) => o && o !== org)]
+  let lastErr = null
+  let picked = null
+
+  for (const o of candidates) {
+    try {
+      // 真的验一次：读积分能过，说明 JWT + 组织码都对
+      await fetchPoints(jwt, o, c.host)
+      picked = o
+      break
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  if (!picked) throw lastErr ?? new Error("没有可用的组织码")
+
+  const key = await issueGatewayKey(jwt, picked, c.host)
+  writeSession(c.id, jwt, picked)
+  noteOrg(c.id, picked)
   // 滚邀请码：把这个账号自己的码存成下一次用的
-  await rollInvite(c.id, jwt, org, c.host)
-  kickoffFirstTask(c, jwt, org)
-  const who = await fetchWho(jwt, org, c.host).catch(() => null)
+  await rollInvite(c.id, jwt, picked, c.host)
+  kickoffFirstTask(c, jwt, picked)
+  const who = await fetchWho(jwt, picked, c.host).catch(() => null)
   return {
     type: "success",
     access: key.apiKey,
     refresh: key.refreshToken,
     expires: Date.now() + 2 * 3600_000,
-    accountId: who?.name || org,
-    uid: org,
+    accountId: who?.name || picked,
+    uid: picked,
     jwt,
-    org,
+    org: picked,
   }
 }
 
@@ -202,7 +220,7 @@ export function makeMethods(c) {
               return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
             }
             try {
-              return await completeSignIn(c, creds.jwt, creds.org)
+              return await completeSignIn(c, creds.jwt, creds.org, creds.orgs)
             } catch (e) {
               return { type: "failed", error: `登录成功了，但换 key 失败：${String(e?.message ?? e).slice(0, 300)}` }
             }
