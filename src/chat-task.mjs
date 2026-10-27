@@ -146,6 +146,27 @@ export async function findProjectId(jwt, org, host, workspaceId) {
   return String(list[0]?.id ?? "")
 }
 
+/** 建一个项目 —— 新注册的号只有工作区、没有项目，不建就发不了消息 */
+export async function createProject(jwt, org, host, workspaceId, name = pickName()) {
+  const res = await fetch(`${host}/api/v1/super-agent/projects`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${jwt}`,
+      "content-type": "application/json",
+      accept: "application/json",
+      origin: host.includes("magicrew") ? "https://www.magicrew.ai" : "https://www.letsmagic.cn",
+      "organization-code": org,
+    },
+    body: JSON.stringify({ workspace_id: workspaceId, project_name: name }),
+  })
+  const body = await res.json().catch(() => ({}))
+  const d = body?.data?.project ?? body?.data ?? {}
+  if (body?.code !== 1000 || !d.id) {
+    throw new Error(`建项目失败：${body?.message ?? "无返回"}（code ${body?.code}）`)
+  }
+  return String(d.id)
+}
+
 /** 建一个话题，返回 chat_topic_id / chat_conversation_id */
 export async function createTopic(jwt, org, host, projectId, name = pickName()) {
   const res = await fetch(`${host}/api/v1/super-agent/topics`, {
@@ -281,9 +302,15 @@ export async function runChatTask({ jwt, org, host = SITES.cn.host, workspaceId,
   const model = await pickCheapestModel(jwt, org, host).catch(() => null)
 
   onProgress("定位项目…")
-  const projectId = await findProjectId(jwt, org, host, workspaceId)
+  let projectId = await findProjectId(jwt, org, host, workspaceId)
   if (!projectId) {
-    return { ok: false, reason: "这个账号还没有工作台项目 —— 先在网页里进一次工作台，或换用「浏览器登录」让它自动建项目" }
+    // 新注册的号只有工作区、没有项目 —— 不建就发不了消息。
+    // 实测 POST /super-agent/projects {workspace_id, project_name} 就能建。
+    onProgress("新建一个项目…")
+    projectId = await createProject(jwt, org, host, workspaceId).catch(() => "")
+    if (!projectId) {
+      return { ok: false, reason: "建项目失败 —— 这个账号可能还没进过工作台，先在网页里打开一次" }
+    }
   }
 
   onProgress("建一个话题…")
