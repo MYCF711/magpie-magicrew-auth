@@ -13,33 +13,12 @@ import { fetchModels, fetchModelPoints } from "../api.mjs"
 import { modelEntry } from "../context.mjs"
 import { readSnapshot, writeSnapshot } from "../store.mjs"
 
-// 倍率显示
-//
-// 网站（模型选择器）在名字后面带一个「0.01×」这样的倍率。它来自运营后台的
-// 「模型参考倍率」，算法是「模型平均金额 ÷ 当前基准金额」（前端 locale 原文：
-// `division: 模型平均金额 ÷ 当前基准金额`）—— 那套配置走 admin 接口，
-// 普通账号的 token 调不到（/api/v1/flows/model-multipliers 回 31001）。
-//
-// magpie 的模型条目里也没有倍率字段（zcode 那套 cost 同样填 0，却显示倍率，
-// 说明那是宿主自己接的）。所以这里把倍率直接拼进 name —— 一定能显示出来。
-//
-// 数值用 input_points / 2000 估：与网站实测值高度吻合
+// 倍率系数：input_points / 2000 与网站实测值吻合
 //   Qwen3.5 Flash  20   → 0.01  (网站 0.01) ✓
 //   Qwen3.8 Flash  100  → 0.05  (网站 0.05) ✓
 //   Qwen3.7 Plus   200  → 0.10  (网站 0.10) ✓
-//   MiMo V2.6 Pro  300  → 0.15  (网站 0.13)
 //   Qwen3.8 Max   1200  → 0.60  (网站 0.56)
-// 高位有轻微偏差（真实公式里 output 也参与），但足够横向比价 —— 目的就是
-// 让人一眼看出哪个便宜。
 const MULT_BASE = 2000
-
-function withMultiplier(name, inputPoints) {
-  const n = Number(inputPoints)
-  if (!n || n <= 0) return name
-  // 统一两位小数 —— 网站也是这个口径（0.01 / 0.04 / 0.13 / 0.56），
-  // 用一位会把 0.15 截成 0.1，看起来和 0.10 一样，比价就失真了
-  return `${name} · ${(n / MULT_BASE).toFixed(2)}×`
-}
 
 export function makeModels(c) {
   return async (provider, { auth } = {}) => {
@@ -52,19 +31,32 @@ export function makeModels(c) {
 
       // 计费信息拿不到就退回原名，不挡列表
       const points = await fetchModelPoints(auth.jwt, auth.org, live.map((m) => m.id), c.host).catch(() => ({}))
+      const pointsOk = Object.keys(points).length > 0
 
       const out = {}
       for (const m of live) {
+        // VIP / 锁定的模型不列 —— 选中会报错，插件注释里那条铁律
+        // （语言模型这批实测 tags 全是 `Magic`，没有 VIP；VIP 只出现在
+        //  网站的「生图模型 / 视频模型」里，那两个接口不在本插件范围内）
+        const locked = (m.tags || []).some((t) => /vip|lock|pay|premium/i.test(String(t?.value ?? "")))
+        if (locked) continue
+
         const p = points[m.id] || {}
-        // cost 填「倍率」，让宿主把它渲染成名字后面的胶囊（0.01× 那种）
-        const cost =
-          p.inputPoints != null
-            ? {
-                input: Number(p.inputPoints) / MULT_BASE,
-                output: Number(p.outputPoints) / MULT_BASE,
-                cache: { read: 0, write: 0 },
-              }
-            : undefined
+        const hasPoints = p.inputPoints != null && Number(p.inputPoints) > 0
+        // 计费接口整体成功、但这条没价格 → 不列。
+        // 填 0 会被宿主当成「免费」显示绿色徽章，那是谎报；
+        // 网页上那些 VIP/无倍率模型也是这样 —— 没有价格就不标价格。
+        // 接口整体失败时（pointsOk=false）不过滤，免得列表直接空掉。
+        if (pointsOk && !hasPoints) continue
+
+        const cost = hasPoints
+          ? {
+              input: Number(p.inputPoints) / MULT_BASE,
+              output: Number(p.outputPoints) / MULT_BASE,
+              cache: { read: 0, write: 0 },
+            }
+          : undefined
+
         out[m.id] = modelEntry(c, m.id, m.name, m.vision, cost)
       }
       writeSnapshot(c.id, out)
