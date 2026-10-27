@@ -1,6 +1,6 @@
 {
   "name": "Magicrew",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "description": "超级麦吉 / MagiCrew for magpie and OpenCode — one package, two providers: letsmagic.cn (国内) and magicrew.ai (international). Password or web-JWT sign-in, the account's own live model list, points balance, newcomer rewards, invite codes.",
   "type": "module",
   "main": "./index.mjs",
