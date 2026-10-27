@@ -103,7 +103,7 @@
 
 ## 安装
 
-在 magpie 的 **插件 → 发现** 搜 `magicrew`，点**安装**。
+在 magpie 的 **插件 → 发现** 搜 `magicrew`，点**安装**（npm 上的包名是 `magicrew-auth`）。
 
 装完选站点，然后**点第一个「浏览器登录」** —— 没有任何输入框，插件自己把浏览器拉起来：
 
@@ -135,18 +135,21 @@ DevTools → Application → Local Storage → https://www.magicrew.ai
 ### 命令行
 
 ```bash
+# npm（推荐：magpie 按 version 检测更新，有新版本会提示）
+magpie plugin add magicrew-auth
+
+# 从仓库源码（拿最新提交，不走 npm；更新按 commit，要手动 update）
 magpie plugin add github:MYCF711/magpie-magicrew-auth
 ```
 
-> 卡片标题取自 `package.json` 的 `name`，也就是 **`Magicrew`**。
-> 包名从 `magpie-magicrew-auth` 改成 `Magicrew` 之后，已经装过的用户要
-> `magpie plugin rm magpie-magicrew-auth` 再装一次。
+> **两条路的卡片标题不一样**：npm 装 → 卡片标题就是包名 `magicrew-auth`；git 装 → 取 `package.json` 的 `name`，也就是 **`Magicrew`**。功能一样，只是标题。
+> 从旧包名 `magpie-magicrew-auth` 过来的，先 `magpie plugin rm magpie-magicrew-auth` 再装。
 
 装完确认：
 
 ```bash
 magpie plugin list
-# magpie-magicrew-auth  on
+# magicrew-auth  on
 #   magicrew (超级麦吉, 27 models)  signed in as ...
 #   magicrew-intl (MagiCrew, 49 models)  signed in as ...
 ```
@@ -158,6 +161,8 @@ magpie plugin list
 ## 常见问题
 
 **两个站要装两次吗？** 不用。一个包导出两个插件，装一次两个供应商都在，各自登录。
+
+**npm 上叫 `magicrew-auth`，为什么卡片显示 `Magicrew`？** 卡片标题取包内 `package.json` 的 `name`（`Magicrew`），而 npm 拒绝含大写字母的新包名。发布时用 `publish-npm.mjs` 临时换成 `magicrew-auth`、发完还原 —— 所以 npm 页面是小写包名，git 源装出来是 `Magicrew`。功能完全一样。
 
 **为什么模型列表会变？** 因为清单是从 `/api/v1/flows/models` 实时拉的。订阅档位变了、平台方上下架变了，清单就跟着变 —— 插件里没有需要维护的模型表。
 

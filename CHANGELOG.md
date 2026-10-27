@@ -26,6 +26,14 @@
 - 对照官方社区插件：Qoder 纯硬编码（`context: 1_000_000`）；WorkBuddy 硬编码一张表，
   再从自家 `/v3/config` 的 `maxInputTokens` 覆盖。magicrew 不提供后者，所以查模型库更省事
 
+**发布到 npm：包名 `magicrew-auth`**
+
+- `magpie plugin add magicrew-auth` 从此可用；npm 源的更新按 `version` 检测，有新版本会提示
+- git 源标题仍是 `Magicrew`：npm 拒绝含大写字母的新包名，所以发布走 `npm run publish:npm`
+  —— `publish-npm.mjs` 临时把 `name` 换成 `magicrew-auth`、跑完无论成败都还原（已实测逐字节一致）
+- **README 模型段改版** —— 按 [magpie-plugin-scaffold 0.1.7](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/README-TEMPLATE.md)：
+  开头写发行商（GLM / DeepSeek / Qwen / Kimi…），不写「支持 N 个模型」；表格只列各家最新 / 热门
+
 ## 0.3.4
 
 **上下文窗口向 magpie 的模型库查，不再一律填 256K**
