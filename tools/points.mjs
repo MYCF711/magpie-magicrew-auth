@@ -6,11 +6,12 @@
 //
 // 只看两个数：余额，和流水里有没有「新人引导任务奖励 / 每日登录」这类入账。
 
+import { homedir } from "node:os"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { SITES, fetchPoints, fetchPointRecords } from "../src/api.mjs"
 
-const EDGE_DIR = "C:/Users/Administrator/AppData/Local/Microsoft/Edge/User Data/Default/Local Storage/leveldb"
+const EDGE_DIR = join(homedir(), "AppData/Local/Microsoft/Edge/User Data/Default/Local Storage/leveldb")
 
 function fromEdge() {
   let jwt = ""

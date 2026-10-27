@@ -7,11 +7,11 @@
 //   1. 环境变量 MAGICREW_JWT + MAGICREW_ORG
 //   2. 本机 Edge 的 localStorage（key `MAGIC:user:authorization`）
 
+import { homedir } from "node:os"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 
-const EDGE_DIR =
-  "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Local Storage\\leveldb"
+const EDGE_DIR = join(homedir(), "AppData/Local/Microsoft/Edge/User Data/Default/Local Storage/leveldb")
 
 function fromEdge() {
   let jwt = ""
