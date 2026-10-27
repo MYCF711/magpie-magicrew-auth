@@ -89,13 +89,13 @@ payload {"iss":<组织id>,"exp":<30天后>,"iat":<现在>,"jti":<会话id>,
 
 ### ⚠ `organization-code` 是另一个东西
 
-JWT 里只有 `cus.tenant_id`（18 位数字，例 `765235992687812611`），而服务端要的
-`organization-code` 是另一套 12 位短串（例 `67u4oe6fbenj`）。两者不能互推。
+JWT 里只有 `cus.tenant_id`（18 位数字，例 `700000000000000001`），而服务端要的
+`organization-code` 是另一套 12 位短串（例 `orgcode67890`）。两者不能互推。
 
 这个值在浏览器的 local storage：
 
 ```
-MAGIC:user:organizationCode      → {"key":"organizationCode","value":"67u4oe6fbenj"}
+MAGIC:user:organizationCode      → {"key":"organizationCode","value":"orgcode67890"}
 MAGIC:user:teamshareOrganizationCode → 同值
 ```
 

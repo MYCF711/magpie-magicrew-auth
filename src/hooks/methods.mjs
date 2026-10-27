@@ -142,7 +142,7 @@ export function makeMethods(c) {
           type: "text",
           key: "org",
           message: "组织码（MAGIC:user:organizationCode 的 value）",
-          placeholder: "67u4oe6fbenj",
+          placeholder: "orgcode67890",
           validate: (v) => (/^[a-z0-9]{6,32}$/i.test(String(v || "").trim()) ? undefined : "12 位左右的字母数字"),
         },
       ],
