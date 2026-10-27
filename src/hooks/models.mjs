@@ -20,18 +20,6 @@ import { readSnapshot, writeSnapshot } from "../store.mjs"
 //   Qwen3.8 Max   1200  → 0.60  (网站 0.56)
 const MULT_BASE = 2000
 
-// ⚠ 实测（2026-10-27）：宿主**不渲染 cost 字段**。
-//   填 cost.input=0.01 之后，模型列表里连数字都不显示了 —— 说明它既不用它做
-//   徽章，也不会退化成文本。所以倍率只能拼进 name，至少能看见。
-//   （宿主那个胶囊（0.09× / 免费）是它自己从别处来的，插件侧喂不进去。）
-function withMultiplier(name, inputPoints) {
-  const n = Number(inputPoints)
-  if (!n || n <= 0) return name
-  // 统一两位小数 —— 网站也是这个口径（0.01 / 0.04 / 0.13 / 0.56），
-  // 用一位会把 0.15 截成 0.1，看起来和 0.10 一样，比价就失真了
-  return `${name} · ${(n / MULT_BASE).toFixed(2)}×`
-}
-
 export function makeModels(c) {
   return async (provider, { auth } = {}) => {
     const snapshot = readSnapshot(c.id)
@@ -56,21 +44,16 @@ export function makeModels(c) {
         const p = points[m.id] || {}
         const hasPoints = p.inputPoints != null && Number(p.inputPoints) > 0
         // 计费接口整体成功、但这条没价格 → 不列。
-        // 填 0 会被宿主当成「免费」显示绿色徽章，那是谎报；
-        // 网页上那些 VIP/无倍率模型也是这样 —— 没有价格就不标价格。
-        // 接口整体失败时（pointsOk=false）不过滤，免得列表直接空掉。
+        // 不填 rate 就不会画倍率胶囊（正确），但也别让它出现在列表里 ——
+        // 用户选了不知道花多少。接口整体失败时不过滤，免得列表空掉。
         if (pointsOk && !hasPoints) continue
 
-        const cost = hasPoints
-          ? {
-              input: Number(p.inputPoints) / MULT_BASE,
-              output: Number(p.outputPoints) / MULT_BASE,
-              cache: { read: 0, write: 0 },
-            }
-          : undefined
-
-        // 倍率同时拼进名字 —— cost 宿主不认（实测），这是唯一能看见的通道
-        out[m.id] = modelEntry(c, m.id, withMultiplier(m.name, p.inputPoints), m.vision, cost)
+        // name 保持干净，倍率走 magpie 自己的 `rate` 字段 → 渲染成灰色胶囊。
+        // （之前试过拼进 name、也试过塞进 cost，都不对：抓 codearts 插件的
+        //   modelOf 才看到宿主认的是 rate / free 这两个字段）
+        out[m.id] = modelEntry(c, m.id, m.name, m.vision, {
+          rate: hasPoints ? Number(p.inputPoints) / MULT_BASE : 0,
+        })
       }
       writeSnapshot(c.id, out)
       return out
