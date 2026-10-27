@@ -1,5 +1,33 @@
 # 更新记录
 
+## 0.3.0
+
+**结构重构：一个针脚一个模块。行为不变，形状变了。**
+
+magpie 是主板 —— 九个针脚，能力全在它那边；插件只填自己那一份。
+原来 `makePlugin` 返回一个大对象把九样东西焊在一起，现在拆成：
+
+```
+index.mjs                 框：把选中的小插头拼起来，不实现任何东西
+src/context.mjs           站点上下文（siteCtx(SITES.cn) → 一个供应商）
+src/store.mjs             三份落盘：模型快照 / 邀请码 / 登录态
+src/clipboard.mjs         剪贴板降级通道
+src/browser-login.mjs     自己拉浏览器 + CDP 读凭据（可选能力，按需加载）
+src/hooks/config.mjs      ① config(cfg)
+src/hooks/methods.mjs     ② auth.methods[]
+src/hooks/refresh.mjs     ③ auth.refresh
+src/hooks/loader.mjs      ④ auth.loader
+src/hooks/usage.mjs       ⑤ auth.usage
+src/hooks/checkin.mjs     ⑥ auth.checkin
+src/hooks/models.mjs      ⑦ provider.models
+src/hooks/headers.mjs     ⑧ chat.headers
+```
+
+- **一个模块坏了不影响别的**：`browser-login` 和 `tasks` 都是运行时按需加载，
+  它们挂了这个插件照常登录（走登录态那条路）、拉模型、报额度
+- **只做一半功能也能用**：不要签到就把那行从 `index.mjs` 的 return 里删掉，别处不用改
+- 每个 hook 文件头写清「magpie 什么时候调它、拿到什么、要返回什么、**不要**做什么」
+
 ## 0.2.1
 
 - **删掉「密码登录」** —— 两站都删，只剩浏览器登录与「登录态（JWT + 组织码）」两条。网页登录拿到的 token 一样能签 `mgw_` key，让用户再输一次手机号密码是多余的一步
