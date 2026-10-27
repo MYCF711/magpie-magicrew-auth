@@ -53,7 +53,7 @@
 
 用的是 `/api/v1/flows/models`（网页模型选择器里眼睛能点到的那些），不是 `/v1/models` —— 后者混着 VIP 锁定、生图、embedding，塞进来用户会选到根本调不动的模型。
 
-上下文按 magpie 的模型库查（`~/.cache/magpie/models.json`），查不到才退回 256K 保守值。这两个接口都不返回 `context_length`；早期一律填 256K，把 `deepseek-v4.1-flash` 真实 1M 的窗口砍成四分之一，agent 反而更早拒绝 —— 根因与修法见 `docs/internals.md` 第十六节。
+上下文按三档取：magpie GUI 里手选 > 模型库（`~/.cache/magpie/models.json`）> 兜底 1M。这两个接口都不返回 `context_length`；早先一律填 256K，把 `deepseek-v4.1-flash` 真实 1M 的窗口砍成四分之一，agent 反而更早拒绝 —— 根因与取舍见 `docs/internals.md` 第十六节。
 
 推理模型会吃 `max_tokens`：`glm-5.3-flash` 给 64 个 token 时 `reasoning_content` 就吃满、`content` 是空串。插件把低于 512 的 `max_tokens` 抬到 512。
 
