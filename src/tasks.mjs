@@ -20,7 +20,7 @@
 //
 // 每天跑一次，两步都做，任一步失败不影响另一步。
 
-import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask } from "./api.mjs"
+import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId } from "./api.mjs"
 
 /** 已知不支持手动完成的任务，别再白试 */
 const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
@@ -87,8 +87,18 @@ export async function runCheckin(auth) {
       const taskFailed = []
 
       for (const t of pending) {
-        if (NOT_MANUALLY_COMPLETABLE.has(t.code)) {
-          skipped.push(`${t.title}（${t.points} 分，要真跑一次 AI 任务）`)
+        // 「完成第一次 AI 工作」是唯一 PUT 不掉的：服务端认死必须是产品内
+        // 真的跑完过一次对话（PUT 回 9303）。所以改成**替它发一条消息** ——
+        // 走 chat-task 的纯协议通道，不开浏览器。
+        // 这也是邀请奖励的触发条件：被邀请人完成首个任务后，邀请人才拿到分。
+        if (t.code === "first_ai_work") {
+          const r = await autoFirstWork(h)
+          if (r.ok) {
+            claimed.push({ code: t.code, title: t.title, points: t.points })
+            if (r.pending) parts.push("首任务：消息已发出，等结算")
+          } else {
+            skipped.push(`${t.title}（${t.points} 分）：${r.reason}`)
+          }
           continue
         }
         try {
@@ -131,6 +141,51 @@ export async function runCheckin(auth) {
     outcome: claimedAnything ? "claimed" : failed ? "failed" : "done",
     credit: gained > 0 ? gained : undefined,
     message: msg,
+  }
+}
+
+/**
+ * 替账号完成「第一次 AI 工作」：建个话题、发一条消息、等结算。
+ *
+ * 为什么不能 PUT：`PUT /onboarding/tasks/first_ai_work/completion` 回 9303
+ * 「该新人引导任务不支持手动完成」—— 服务端只认产品内真的有一次对话。
+ *
+ * 为什么不用浏览器：消息走 Socket.IO，协议已经摸清（见 chat-task.mjs），
+ * 纯 Node 发得出去，比拉一个 Chrome 再点输入框可靠得多。
+ *
+ * @returns {{ok:boolean, pending?:boolean, reason?:string}}
+ */
+async function autoFirstWork(h) {
+  try {
+    const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
+    if (!wsId) {
+      return { ok: false, reason: "这个账号还没有工作台项目 —— 先在网页里进一次工作台" }
+    }
+
+    // 重模块按需加载：WebSocket 那套挂了不该拖累整个签到
+    const { runChatTask } = await import("./chat-task.mjs")
+    const r = await runChatTask({
+      jwt: h.jwt,
+      org: h.org,
+      host: h.host,
+      workspaceId: wsId,
+    })
+    if (!r.ok) return { ok: false, reason: r.reason || "发送失败" }
+
+    // 等结算：服务端是异步判定，实测通常 5～40 秒内变成 COMPLETED。
+    // 拿不到就算了，消息确实发出去了，别把这次签到判成失败。
+    for (let i = 0; i < 12; i++) {
+      await new Promise((res) => setTimeout(res, 5000))
+      const list = await fetchOnboardingTasks(h.jwt, h.org, h.host).catch(() => null)
+      if (!list) continue
+      const fw = list.find((x) => x.code === "first_ai_work")
+      if (fw && (fw.status === "COMPLETED" || fw.rewardStatus === "GRANTED")) {
+        return { ok: true }
+      }
+    }
+    return { ok: true, pending: true }
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e) }
   }
 }
 
