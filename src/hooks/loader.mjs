@@ -10,7 +10,7 @@
 // ⚠ 不要在这里读流、不要重试换号、不要手拼 x-api-key ——
 //   前两件 magpie 做了，第三件看 SDK 包自动加。见 README「最小交付面」。
 
-import { ensureKey } from "../keys.mjs"
+import { ensureKey, accountOf } from "../keys.mjs"
 
 export function makeLoader(c) {
   return async (getAuth) => {
@@ -27,6 +27,7 @@ export function makeLoader(c) {
         // key 只有一个来源（src/keys.mjs）—— 服务端签一把顶一把，多入口必互相吊销
         const key = await ensureKey(c, getAuth)
         if (!key) throw new Error(`${c.SHORT} 未登录（拿不到可用的 key）`)
+        const account = accountOf(fresh)
 
         const req = input instanceof Request ? input : null
         const url =

@@ -1,83 +1,140 @@
-// 这个插件自己维护的那一把 key
+// 每个账号一把活的 key —— A/B 双槽
 //
-// ═══ 为什么必须自己管 ═══════════════════════════════════════════════════
+// ═══ 两条不能破的线 ═══════════════════════════════════════════════════
 //
-// `POST /api/v1/model-gateway/tokens` **一个账号只保留一把 `mgw_` key**：
-// 签一把新的，上一把立刻在服务端失效 —— 不是"过期"，是**当场吊销**。
+// ① **按账号隔离**：同一个站点可以登多个账号（magpie 里就是 `magicrew` /
+//    `magicrew#1` / …）。key 必须一个账号一份，否则第二个账号登录时
+//    会把第一个账号的 key 覆盖掉，第一个账号从此 403。
+//    账户标识用 `org`（组织码，登录后固定不变），拿不到才退回 accountId。
 //
-// 所以只要有两个地方会签 key，它们就会互相顶掉：
+// ② **每个账号至少有一把活的**：一个账号存两槽（a / b）。
+//    · 续期时把新的签到**另一个槽**再切过去，旧的留着 —— 中途出错还能切回来
+//    · 当前这把被上游拒了（403）就切到另一槽
+//    · 两槽都空时从 magpie 存的凭据接管一次
 //
-//   ① magpie 到期前调 `auth.refresh`
-//   ② loader 里发现 key 不新鲜了顺手续一次
+// 实测（2026-10-27）：同一账号的两把 `mgw_` key 可以同时有效，所以双槽是安全的；
+// 一把 key 也能并发（6 个并发请求全成功），不需要"闲置池"。
 //
-// 一旦两边各签一把，先签的那把就成了死 key，而持有它的那一方还以为自己能用 ——
-// 表现就是「登录着、模型也列得出来，一发请求 403 token无效」。
-//
-// ⇒ 全插件只有这一个文件是 key 的来源。所有签发、续期都写这里，**只留最新一把**，
-//   旧的直接被覆盖（服务端那边它也已经失效了，留着没有意义）。
+// ⚠ 全插件只有这个文件是 key 的来源。magpie 的 `auth.refresh` 和 loader 都走
+//   src/keys.mjs，不各自签发 —— 否则本地会分叉，说不清手里那把是不是服务端认的。
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 
 /** 提前多久续期。key 只活 2 小时，10 分钟够用 */
 const LEAD_MS = 10 * 60_000
 
-export function keyPath(siteId) {
-  return join(homedir(), ".cache", "magpie", `magicrew-key-${siteId}.json`)
+/** 只接受看起来像真的 key —— 测试/占位值不许落盘 */
+const REAL_KEY = /^mgw_[A-Za-z0-9_-]{20,}$/
+
+/** 账号标识净化：只留安全字符，空值给 default */
+export function safeAccount(account) {
+  const s = String(account || "").replace(/[^A-Za-z0-9_-]/g, "")
+  return s || "default"
 }
 
-/** @returns {{apiKey:string, refreshToken:string, expiresAt:number, at:string} | null} */
-export function readKey(siteId) {
-  try {
-    const v = JSON.parse(readFileSync(keyPath(siteId), "utf8"))
-    if (typeof v?.apiKey !== "string" || !v.apiKey) return null
+/** 一个账号一份文件 */
+export function keyPath(siteId, account) {
+  return join(homedir(), ".cache", "magpie", `magicrew-key-${siteId}__${safeAccount(account)}.json`)
+}
+
+function blank() {
+  return { current: "a", refreshToken: "", keys: { a: null, b: null }, at: "" }
+}
+
+function normalize(v) {
+  // 旧格式（单槽）：{ apiKey, refreshToken, expiresAt, at } → 迁移到 a 槽
+  if (v && typeof v === "object" && typeof v.apiKey === "string" && !v.keys) {
     return {
-      apiKey: v.apiKey,
+      current: "a",
       refreshToken: String(v.refreshToken || ""),
-      expiresAt: Number(v.expiresAt) || 0,
+      keys: {
+        a: REAL_KEY.test(v.apiKey) ? { apiKey: v.apiKey, expiresAt: Number(v.expiresAt) || 0 } : null,
+        b: null,
+      },
       at: String(v.at || ""),
     }
-  } catch {
-    return null
+  }
+  const s = v && typeof v === "object" ? v : {}
+  const keys = s.keys && typeof s.keys === "object" ? s.keys : {}
+  const clean = (k) =>
+    k && typeof k.apiKey === "string" && REAL_KEY.test(k.apiKey)
+      ? { apiKey: k.apiKey, expiresAt: Number(k.expiresAt) || 0 }
+      : null
+  return {
+    current: s.current === "b" ? "b" : "a",
+    refreshToken: String(s.refreshToken || ""),
+    keys: { a: clean(keys.a), b: clean(keys.b) },
+    at: String(s.at || ""),
   }
 }
 
-/** 覆盖写 —— 只保留最新一把，旧的没了 */
-export function writeKey(siteId, k) {
-  const rec = {
-    apiKey: String(k.apiKey || ""),
-    refreshToken: String(k.refreshToken || ""),
-    expiresAt: Number(k.expiresAt) || 0,
-    at: new Date().toISOString(),
-  }
-  // ⚠ 只接受看起来像真的 key。测试/占位值（"mgw_test_key"、空串、随便写的）不许落盘 ——
-  //   曾经因此把国际站那把真 key 顶成了 mgw_test_key。
-  if (!/^mgw_[A-Za-z0-9_-]{20,}$/.test(rec.apiKey)) return ""
+export function readStore(siteId, account) {
   try {
-    const f = keyPath(siteId)
-    mkdirSync(dirname(f), { recursive: true })
-    writeFileSync(f, JSON.stringify(rec))
-  } catch {}
-  return rec.apiKey
+    return normalize(JSON.parse(readFileSync(keyPath(siteId, account), "utf8")))
+  } catch {
+    return blank()
+  }
 }
 
-/** 还能用吗：没有到期信息时按「能用」处理，由服务端说了算 */
+export function writeStore(siteId, account, st) {
+  const next = normalize(st)
+  next.at = new Date().toISOString()
+  try {
+    const f = keyPath(siteId, account)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify(next))
+  } catch {}
+  return next
+}
+
+/** 这个站点下所有账号的 key 文件（排障用） */
+export function listAccounts(siteId) {
+  try {
+    const dir = join(homedir(), ".cache", "magpie")
+    const pfx = `magicrew-key-${siteId}__`
+    return readdirSync(dir)
+      .filter((f) => f.startsWith(pfx) && f.endsWith(".json"))
+      .map((f) => f.slice(pfx.length, -5))
+  } catch {
+    return []
+  }
+}
+
+/** 清掉某个账号的 key（重新登录时用） */
+export function dropStore(siteId, account) {
+  try {
+    unlinkSync(keyPath(siteId, account))
+  } catch {}
+}
+
+export const otherSlot = (slot) => (slot === "a" ? "b" : "a")
+
+/** 这一把还能用吗：没有到期信息时按「能用」处理，由服务端说了算 */
 export function isFresh(k, leadMs = LEAD_MS) {
   if (!k?.apiKey) return false
   if (!k.expiresAt) return true
   return Date.now() + leadMs < k.expiresAt
 }
 
+export function currentKey(st) {
+  return st?.keys?.[st.current] ?? null
+}
+
+/** 两槽里还有活的吗 */
+export function hasLiveKey(st, leadMs = 0) {
+  return ["a", "b"].some((s) => isFresh(st?.keys?.[s], leadMs))
+}
+
 /**
  * 把服务端给的到期时间标准化成毫秒时间戳。
- * 实测两种样子：`"2026-10-27 18:36:26"`（本地时间字符串）和毫秒数字。
+ * 实测两种样子：`"2026-10-27 18:36:26"`（本地时间）和毫秒数字。
  */
 export function toEpochMs(v) {
   if (typeof v === "number" && v > 1e12) return v
   if (typeof v === "string" && v.trim()) {
     const s = v.trim()
-    // "2026-10-27 18:36:26" —— 服务端给的是本地时间（UTC+8）
     const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/)
     if (m) {
       const [, y, mo, d, h, mi, se] = m.map(Number)
@@ -89,19 +146,33 @@ export function toEpochMs(v) {
   return 0
 }
 
+/**
+ * 当前这把被上游拒了 → 切到另一槽。被拒的那把标失效，免得下次又用它。
+ * @returns 另一槽那把 key，没有可用的就 null
+ */
+export function switchSlot(siteId, account, badApiKey) {
+  const st = readStore(siteId, account)
+  const keys = { ...st.keys }
+  for (const slot of ["a", "b"]) {
+    if (keys[slot]?.apiKey === badApiKey) keys[slot] = { ...keys[slot], expiresAt: 0 }
+  }
+  const alt = otherSlot(st.current)
+  const target = keys[alt]?.apiKey ? alt : keys[st.current]?.apiKey ? st.current : null
+  if (!target) return null
+  writeStore(siteId, account, { ...st, current: target, keys })
+  return keys[target]
+}
+
 // ── 续期串行化 ────────────────────────────────────────────────────────
 //
-// 多个请求同时发现 key 不新鲜时会一起续 —— 每续一次吊销一次，最后只剩一把能活。
-// 用一个进程内的 promise 把同一站点的续期合成一次。
+// refresh_token 一次性。多个请求同时发现 key 不新鲜会一起续，除第一个外全失败。
+// 按「站点 + 账号」把续期合成一次。
 
 const inflight = new Map()
 
-/**
- * 续期：拿 refresh_token 换一把新的并落盘。同一站点同时只跑一个。
- * @returns {Promise<{apiKey,refreshToken,expiresAt} | null>} 失败返回 null，不抛
- */
-export function renewOnce(siteId, doRenew) {
-  const running = inflight.get(siteId)
+export function renewOnce(siteId, account, doRenew) {
+  const k = `${siteId}__${safeAccount(account)}`
+  const running = inflight.get(k)
   if (running) return running
   const p = (async () => {
     try {
@@ -109,9 +180,9 @@ export function renewOnce(siteId, doRenew) {
     } catch {
       return null
     } finally {
-      inflight.delete(siteId)
+      inflight.delete(k)
     }
   })()
-  inflight.set(siteId, p)
+  inflight.set(k, p)
   return p
 }
