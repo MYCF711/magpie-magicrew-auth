@@ -17,6 +17,7 @@ import {
   fetchPoints,
   fetchWho,
   fetchOwnInviteCode,
+  fetchFirstWorkspaceId,
 } from "../api.mjs"
 import { inviteToUse, readSession, writeSession, noteLoginFailure, noteOrg, readKnownOrgs, rollInvite } from "../store.mjs"
 import { readLocalCreds } from "../local-browser.mjs"

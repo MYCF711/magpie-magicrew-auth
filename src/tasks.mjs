@@ -20,7 +20,13 @@
 //
 // 每天跑一次，两步都做，任一步失败不影响另一步。
 
-import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask } from "./api.mjs"
+import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId } from "./api.mjs"
+import { sentToday, noteAutoChat } from "./store.mjs"
+
+/** 站点 id —— 去重标记按站点分文件存 */
+function siteIdOf(host) {
+  return host.includes("magicrew") ? "magicrew-intl" : "magicrew"
+}
 
 /** 已知不支持手动完成的任务，别再白试 */
 const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
@@ -74,8 +80,25 @@ export async function runCheckin(auth) {
     failed = true
     parts.push(`新手任务读取失败：${tasksErr?.message ?? tasksErr}`)
   } else if (!tasks.length) {
-    // ⚠ 空列表 ≠ 已完成。国际站这个接口对未登记账号恒返回空数组。
-    parts.push("本站无新手福利任务")
+    // 国际站：onboarding 接口恒返回空数组，没有「新手福利」这套任务。
+    // 但**邀请奖励的判据是一样的** —— 官方 locale 原文「被邀请人完成首个任务
+    // 或对话后，即可获得 {{points}} 积分奖励」，而国际站没有任务清单，
+    // 所以那条判据在这边就等于「发过一条消息」。
+    //
+    // 实测（2026-10-28）：新号发一条消息后，邀请人立刻 +200。
+    //
+    // 怎么判断「要不要发」：看这个账号有没有工作台项目 ——
+    //   一个项目都没有 = 从没发过消息 → 建项目 + 发一条
+    //   已经有项目     = 用过 → 跳过（别每天签到都发，白烧积分）
+    const r = await autoFirstChat(h)
+    if (r.ok) {
+      claimedAnything = true
+      parts.push(`首对话：已自动完成（${r.topicName}，模型 ${r.model}）`)
+    } else if (r.skipped) {
+      parts.push("首对话：此前已用过，跳过")
+    } else {
+      parts.push(`首对话：${r.reason}`)
+    }
   } else {
     const pending = tasks.filter((t) => t.status !== "COMPLETED" && t.rewardStatus !== "GRANTED")
 
@@ -87,8 +110,21 @@ export async function runCheckin(auth) {
       const taskFailed = []
 
       for (const t of pending) {
-        if (NOT_MANUALLY_COMPLETABLE.has(t.code)) {
-          skipped.push(`${t.title}（${t.points} 分，要真跑一次 AI 任务）`)
+        // 「完成第一次 AI 工作」是唯一 PUT 不掉的：服务端认死必须是产品内
+        // 真的跑完过一次对话（PUT 回 9303）。所以改成**替它发一条消息** ——
+        // 走 chat-task 的纯协议通道，不开浏览器。
+        // 这也是邀请奖励的触发条件：被邀请人完成首个任务后，邀请人才拿到分。
+        if (t.code === "first_ai_work") {
+          const r = await autoFirstWork(h)
+          if (r.ok) {
+            claimed.push({ code: t.code, title: t.title, points: t.points })
+            if (r.pending) parts.push("首任务：消息已发出，等结算")
+          } else if (r.skipped) {
+            // 今天已经补过 —— 不是失败，只是不再重复发
+            parts.push(`首任务：${r.reason}`)
+          } else {
+            skipped.push(`${t.title}（${t.points} 分）：${r.reason}`)
+          }
           continue
         }
         try {
@@ -131,6 +167,95 @@ export async function runCheckin(auth) {
     outcome: claimedAnything ? "claimed" : failed ? "failed" : "done",
     credit: gained > 0 ? gained : undefined,
     message: msg,
+  }
+}
+
+/**
+ * 替账号完成「第一次 AI 工作」：建个话题、发一条消息、等结算。
+ *
+ * 为什么不能 PUT：`PUT /onboarding/tasks/first_ai_work/completion` 回 9303
+ * 「该新人引导任务不支持手动完成」—— 服务端只认产品内真的有一次对话。
+ *
+ * 为什么不用浏览器：消息走 Socket.IO，协议已经摸清（见 chat-task.mjs），
+ * 纯 Node 发得出去，比拉一个 Chrome 再点输入框可靠得多。
+ *
+ * @returns {{ok:boolean, pending?:boolean, reason?:string}}
+ */
+async function autoFirstWork(h) {
+  const siteId = siteIdOf(h.host)
+  // 闸门：每个账号每天最多补一次。结算慢 / checkin 重试 / 判定不到，
+  // 都不会让它反复往外发消息。
+  if (sentToday(siteId, h.org)) {
+    return { ok: false, skipped: true, reason: "今天已经补过一次，不再重复发送" }
+  }
+
+  try {
+    const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
+    if (!wsId) {
+      return { ok: false, reason: "这个账号还没有工作台项目 —— 先在网页里进一次工作台" }
+    }
+
+    // 重模块按需加载：WebSocket 那套挂了不该拖累整个签到
+    const { runChatTask } = await import("./chat-task.mjs")
+    const r = await runChatTask({
+      jwt: h.jwt,
+      org: h.org,
+      host: h.host,
+      workspaceId: wsId,
+    })
+    if (!r.ok) return { ok: false, reason: r.reason || "发送失败" }
+
+    // 消息确实发出去了 —— 立刻落标记，之后不管结算成不成功都不再发第二条
+    noteAutoChat(siteId, h.org)
+
+    // 等结算：服务端是异步判定，实测通常 5～40 秒内变成 COMPLETED。
+    // 拿不到就算了，标记已经写了，别把这次签到判成失败。
+    for (let i = 0; i < 12; i++) {
+      await new Promise((res) => setTimeout(res, 5000))
+      const list = await fetchOnboardingTasks(h.jwt, h.org, h.host).catch(() => null)
+      if (!list) continue
+      const fw = list.find((x) => x.code === "first_ai_work")
+      if (fw && (fw.status === "COMPLETED" || fw.rewardStatus === "GRANTED")) {
+        return { ok: true }
+      }
+    }
+    return { ok: true, pending: true }
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e) }
+  }
+}
+
+/**
+ * 国际站的「首个对话」：没有任务清单可依，只能看它用没用过。
+ *
+ * 判据是**有没有工作台项目**：项目是发第一条消息时前端顺带建的，
+ * 一个都没有基本等于从没说过话。已经有项目就跳过，免得每天签到都发一条。
+ *
+ * @returns {{ok?:boolean, skipped?:boolean, reason?:string, topicName?:string, model?:string}}
+ */
+async function autoFirstChat(h) {
+  const siteId = siteIdOf(h.host)
+  // 同一道闸门：每账号每天最多一条
+  if (sentToday(siteId, h.org)) {
+    return { skipped: true, reason: "今天已经补过一次" }
+  }
+
+  try {
+    const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
+    if (!wsId) return { reason: "这个账号还没有工作区，先在网页里进一次" }
+
+    const { findProjectId, runChatTask } = await import("./chat-task.mjs")
+    const existing = await findProjectId(h.jwt, h.org, h.host, wsId).catch(() => "")
+    if (existing) return { skipped: true }
+
+    const r = await runChatTask({ jwt: h.jwt, org: h.org, host: h.host, workspaceId: wsId })
+    if (!r.ok) return { reason: r.reason || "发送失败" }
+
+    // 发出去了才落标记；失败的不写，留给下一次（明天）重试
+    noteAutoChat(siteId, h.org)
+    return { ok: true, topicName: r.topicName, model: r.model }
+  } catch (e) {
+    return { reason: String(e?.message ?? e) }
   }
 }
 
