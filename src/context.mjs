@@ -38,13 +38,16 @@ export function siteCtx(SITE) {
 }
 
 /** 把一条 flows/models 变成一个 magpie 模型条目 */
-export function modelEntry(c, id, name, vision) {
+export function modelEntry(c, id, name, vision, cost) {
   return {
     id,
     name,
     api: { id, url: c.BASE, npm: SDK },
     status: "active",
-    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    // cost 用「倍率」口径填（input_points / 2000），不是美元 —— magpie 会把
+    // 非零 cost 渲染成模型名后面的胶囊，这正是我们要的那个 0.01× 效果。
+    // 全零时宿主显示「免费」，那也是它自己的判断，别硬填假值去伪造成「免费」。
+    cost: cost || { input: 0, output: 0, cache: { read: 0, write: 0 } },
     // 上下文窗口向 magpie 的模型库查 —— 两个模型接口都不返回它，
     // 早前一律填 256K，结果 agent 拿 256K 判断"放不下"，而实际是 1M
     limit: { context: contextOf(id), output: 64_000 },
