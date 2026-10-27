@@ -476,6 +476,31 @@ export async function fetchFirstWorkspaceId(token, org, host = SITES.cn.host) {
   return String(w?.id ?? w?.workspace_id ?? w?.workspaceId ?? "")
 }
 
+// ── ④e 某个项目下的话题 ──────────────────────────────────────────────
+//
+//   GET /api/v1/super-agent/projects/{id}/topics
+//   → { total, list:[{ id, chat_topic_id, chat_conversation_id, topic_name, task_status, … }] }
+//
+// 判断「这个账号到底发没发过消息」看的是它，**不是「有没有项目」** ——
+// 项目在打开工作台时就会自动建，「有项目、没话题」的新号很常见。
+// 实测（2026-10-28）：国内站 magicrew / 国际站 magicrew-intl 两站同构，
+// 同一个 workspace 下都返回 { code:1000, data:{ total, list } }。
+export async function fetchProjectTopics(token, org, projectId, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/super-agent/projects/${projectId}/topics`, {
+    headers: headersFor(token, org, host),
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = Array.isArray(d.list) ? d.list : []
+  return list.map((t) => ({
+    id: String(t.id ?? ""),
+    chatTopicId: String(t.chat_topic_id ?? ""),
+    chatConversationId: String(t.chat_conversation_id ?? ""),
+    name: String(t.topic_name ?? ""),
+    status: String(t.task_status ?? ""),
+  }))
+}
+
 // ── ④c 这个登录态是谁 ────────────────────────────────────────────────
 //
 // 卡片上原来显示组织码（orgcode67890 / orgcode12345），那是随机串，用户认不出是谁。
