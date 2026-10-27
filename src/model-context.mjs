@@ -20,8 +20,19 @@ import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-/** 查不到时的兜底 */
-const FALLBACK_CONTEXT = 256_000
+/**
+ * 查不到时的兜底：**1M**。
+ *
+ * 优先级从高到低：
+ *   ① 用户在 magpie GUI 里手选的（「上下文窗口」那一行）—— magpie 直接用它，插件的值只是默认
+ *   ② 本文件从 magpie 模型库查到的真实值（models.dev 数据）
+ *   ③ 这个兜底
+ *
+ * ⚠ 兜底故意给大的：给 1M 而实际只有 128K 时，上游会在超限时报错，用户看得到；
+ *   给 256K 而实际有 1M 时，agent 会主动拒绝一段本可以处理的对话 —— 那是静默的能力损失，
+ *   比报错更难查（`pi-ai detected context overflow` 就是这么来的）。
+ */
+const FALLBACK_CONTEXT = 1_048_576
 
 let cache = null
 let cacheAt = 0
