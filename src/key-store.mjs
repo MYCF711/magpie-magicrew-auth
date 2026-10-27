@@ -51,7 +51,9 @@ export function writeKey(siteId, k) {
     expiresAt: Number(k.expiresAt) || 0,
     at: new Date().toISOString(),
   }
-  if (!rec.apiKey) return ""
+  // ⚠ 只接受看起来像真的 key。测试/占位值（"mgw_test_key"、空串、随便写的）不许落盘 ——
+  //   曾经因此把国际站那把真 key 顶成了 mgw_test_key。
+  if (!/^mgw_[A-Za-z0-9_-]{20,}$/.test(rec.apiKey)) return ""
   try {
     const f = keyPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
