@@ -680,31 +680,60 @@ mgw_8f9a…（18:14 又一次续期换的）       → 网关请求 HTTP 200 正
 不管吊销机制是什么，**只留一把、只有一个出口**这个设计依然成立 ——
 理由从「否则互相吊销」改成「否则本地会分叉，说不清手里那把是不是服务端认的」。
 
-### 保活链路（0.3.2 起）
+### 保活链路（2026-10-27 逐版本核对后的实况）
 
 ```
-每次请求前   ensureKey(c, getAuth)
+每次请求前   ensureKey(c, getAuth)          ← src/hooks/loader.mjs
                ├─ 文件里的 key 还能用（剩余 > 10 分钟）→ 直接用
                └─ 不够了 → renewOnce（同站点串行）
                             ├─ 有 refresh_token → PUT 换新的 → 覆盖落盘
                             └─ 没有 / 失败     → 退回 magpie 存的那把
 
-每天一次     checkin 里 ensureKey(c, getAuth, { leadMs: 24h })
-               └─ 用 24 小时提前量 → 保证每天真的续一次
-                  refresh_token 因此一直新鲜，不会因闲置 7 天失效
+到期前 10 分钟 auth.refresh(auth)           ← magpie 按 refreshLead 主动调度
+               └─ src/hooks/refresh.mjs 直接调 api.refreshGatewayKey(auth.refresh)
+                  ⚠ 不经过 keys.mjs，也不读 key-store
+
+每天一次     checkin → runCheckin()         ← 只领积分 / 任务，**不碰 key**
 ```
 
-**为什么 checkin 要强制续**：api_key 只活 2 小时，`ensureKey` 的默认提前量是 10 分钟 ——
-一整天没有请求的话，key 会静静过期；更麻烦的是 refresh_token 只活 7 天且**用一次才轮换**，
-长期不用就会闲置到期。挂在 checkin 上（magpie 保证每账号每天跑一次）正好补这个洞。
+### ⚠ 更正（2026-10-27）：checkin 并不续 key
 
-**落盘**：`~/.cache/magpie/magicrew-key-<siteId>.json`，只保留最新一把：
+早前这里写着「每天一次 `checkin` 里 `ensureKey(c, getAuth, { leadMs: 24h })`，
+用 24 小时提前量保证每天真的续一次」。核对 0.3.0 / 0.3.2 / 0.3.7 三个版本：
+**checkin 路径（`src/hooks/checkin.mjs` → `src/tasks.mjs`）从未 import 过 `ensureKey`**，
+全仓 `leadMs` 只出现在 `src/keys.mjs` 自身。这条链路只存在于文档里。
+
+而且它本来也不需要存在 —— 原来那段论证有个漏洞：
+
+- **「一整天没有请求，key 会静静过期」不成立**：续期不靠请求触发，是 magpie 按
+  `refreshLead`（10 分钟）主动调 `auth.refresh`。只要 magpie 在跑，有没有请求都会续。
+- **「挂在 checkin 上补洞」也补不了**：真会让 refresh_token 闲置到 7 天失效的场景，
+  是 magpie 整整 7 天没开 —— 那时 checkin 同样不跑。
+
+所以 checkin 续 key 的实际收益是 0，而**补上它反而有害**：`src/hooks/refresh.mjs`
+绕过了唯一出口（见 `src/keys.mjs` 顶部注释），两处各持一份 refresh_token 会分叉 ——
+补上 `ensureKey` 就会把 key-store 写起来，进而抢轮换，结果是「用户莫名被要求重新登录」。
+
+真要补这个能力，前提是先把 `auth.refresh` 收敛进 `ensureKey`。在那之前，
+如实描述现状，比圆一个不存在的承诺安全。
+
+**落盘**：`~/.cache/magpie/magicrew-key-<siteId>__<account>.json`（0.3.3 起按账号隔离、
+且改成 A/B 双槽；早前这里写的是不带账号后缀的单槽格式 `{apiKey, refreshToken, expiresAt}`，
+读的时候有 `normalize()` 负责迁移）：
 
 ```json
-{ "apiKey": "mgw_…", "refreshToken": "…", "expiresAt": 1793102896000, "at": "2026-10-27T18:20:00.000Z" }
+{
+  "current": "b",
+  "refreshToken": "…",
+  "keys": {
+    "a": { "apiKey": "mgw_…", "expiresAt": 1793102896000 },
+    "b": { "apiKey": "mgw_…", "expiresAt": 1793109996000 }
+  },
+  "at": "2026-10-27T18:20:00.000Z"
+}
 ```
 
-旧的一旦被覆盖就删了 —— 服务端那边它也已经失效，留着只会让下一个读的人用错。
+`current` 指向正在用的那一槽，另一槽是上一次的、留作 403 时回退。
 
 ### 首次运行怎么自举
 

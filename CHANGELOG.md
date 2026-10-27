@@ -87,6 +87,32 @@ async function rollInvite(siteId, jwt, org, host) {
 > 网页 JWT、`device_id` 全为空，接口全部返回 200 并正常给出邀请码 ——
 > 上游已经放宽了这个限制，滚动现在是通的，只是以前的 import 缺失挡住了它。
 
+---
+
+**文档更正：checkin 从来没有「顺带续 key」，那条保活链路只存在于文档里**
+
+`docs/internals.md` 第十四节和本文件 0.3.2 那条都写着「checkin 每天用 24 小时
+提前量强制续一次 key，防止 refresh_token 闲置 7 天失效」。逐版本核对
+0.3.0 / 0.3.2 / 0.3.7：**checkin 路径（`src/hooks/checkin.mjs` → `src/tasks.mjs`）
+从未 import 过 `ensureKey`**，全仓 `leadMs` 只出现在 `src/keys.mjs` 自身。
+
+它本来也不需要存在 —— 原来那段论证有个漏洞：
+
+- 「一整天没有请求，key 会静静过期」不成立：续期不靠请求触发，是 magpie 按
+  `refreshLead`（10 分钟）主动调 `auth.refresh`。只要 magpie 在跑，有没有请求都会续
+- 「挂在 checkin 上补洞」也补不了：真会让 refresh_token 闲置到 7 天失效的场景，
+  是 magpie 整整 7 天没开 —— 那时 checkin 同样不跑
+
+**所以没有去补这个功能，而是把文档改回实况**：`src/hooks/refresh.mjs` 绕过了
+`keys.mjs` 这个「唯一出口」（它直接调 `api.refreshGatewayKey(auth.refresh)`），
+两处各持一份 refresh_token 会分叉。补上 `ensureKey` 会把 key-store 写起来、
+进而抢轮换，结果是用户莫名被要求重新登录。真要补，得先把 `auth.refresh`
+收敛进 `ensureKey` —— 那是另一件事，不在本 PR 范围。
+
+顺带修正 `internals` 里过时的落盘路径：单槽 `magicrew-key-<siteId>.json`
+→ 0.3.3 起的 `<siteId>__<account>` A/B 双槽。并在 `src/keys.mjs` 顶部注释里
+标明「refresh 不经过本模块」这处未收敛的口子，避免后人照旧注释误判。
+
 ## 0.3.7
 
 **登录先看本机浏览器：你在自己浏览器里登过，插件直接认，不再开窗让你重登**
