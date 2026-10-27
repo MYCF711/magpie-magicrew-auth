@@ -178,16 +178,35 @@ export async function sendSms(site, { phone, stateCode = "+86", businessToken, t
  *     { device_id }    → 「id 字段是必须的」
  *     { id, name }     → 放行，返回 2168「验证码错误」
  *   ⇒ { id: 64 位 hex, name: "web" } 就够。
+ *
+ * ⚠ `auto_register` / `redirect` 一个都不能省（这是网页表单的初始值，抠出来的）：
+ *
+ *     { phone, state_code, code, auto_register: true,
+ *       type: "phone_captcha", redirect: window.location.href }
+ *
+ *   · `auto_register: true` —— 否则新号登不进来（只会报账号不存在）
+ *   · `redirect` 是**当前页面的 URL**，服务端从它上面取 `?invitation=<码>`。
+ *     ⇒ **邀请码是靠 redirect 传的，不是独立字段**。这就是为什么浏览器登录的
+ *       URL 必须带 `?invitation=`：不带，新注册的号就没有邀请关系。
  */
-export async function loginBySmsCode(site, { phone, stateCode = "+86", code, device }) {
+export async function loginBySmsCode(
+  site,
+  { phone, stateCode = "+86", code, device, autoRegister = true, redirect },
+) {
   const host = keewoodOf(site)
-  const { json, status, text } = await postJSON(`${host}/v4/user/login`, {
+  const body = {
     type: "phone_captcha",
     phone,
     state_code: stateCode,
     code,
+    auto_register: autoRegister,
     device: device ?? { id: makeDeviceId(), name: "web" },
-  }, { headers: { origin: site.web } })
+  }
+  if (redirect) body.redirect = redirect
+
+  const { json, status, text } = await postJSON(`${host}/v4/user/login`, body, {
+    headers: { origin: site.web },
+  })
 
   return { json, status, text }
 }

@@ -79,6 +79,20 @@ angle = String(d & 0xFFFFFFFF) + String(n)
    `{device_id}` → 「id 字段是必须的」；`{id, name}` → 放行。
    ⇒ `{id: 64 位 hex, name: "web"}`。
 
+### 另外两个更贵的修正（第一版发出去就踩了）
+
+1. **`opened` 必须是 `true`。** 这条链路全在后台走完，不需要任何浏览器；写成 `false`
+   会让 magpie 拿 `url` 去开**系统默认浏览器** —— 而那个浏览器里往往本来就登着这个站，
+   用户看到的是已登录界面，进不了「添加新号」，还以为插件把他登进了旧账号。
+   这正是浏览器登录那条路修过的坑，这次在新方法里又踩了一遍。
+2. **新号注册要带 `auto_register: true` 和 `redirect`，而邀请码是靠 `redirect` 传的。**
+   网页表单的初始值就是
+   `{ phone, state_code, code, auto_register: true, type: "phone_captcha", redirect: window.location.href }` —
+   服务端从 `redirect` 上取 `?invitation=<码>`，`invite_code` 不是独立字段。
+   ⇒ 无头这条路没有「打开带邀请码的页面」这一步，所以必须自己拼出带邀请码的
+   `redirect: ${web}/login?invitation=<码>`。少了它，新注册的号就没有邀请关系。
+
+
 ### 没配识图模型时
 
 **不瞎猜。** 容差 ±10° 意味着瞎猜命中率只有约 5.6%（20/360），平均要试十几次，
