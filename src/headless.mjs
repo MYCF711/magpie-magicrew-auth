@@ -131,8 +131,8 @@ export async function finishSmsLogin(site, { mobile, stateCode = "+86", code, de
       new Error(
         `登录成功但拿不到组织码。\n` +
           `  · 登录响应结构：${describeShape(json)}\n` +
-          `  · 用该令牌调 login-data 也返回不了组织列表\n` +
-          `  （多半是令牌字段取错了 —— 前端用的是响应里的 access_token）`,
+          `  · 用该令牌调 login-data 的探测结果：${orgProbeErrors().join(" / ") || "（没探）"}\n` +
+          `  （前端拿 access_token 直接 setAuthorization 后就用它调这个接口）`,
       ),
       { raw: json },
     )
@@ -192,22 +192,80 @@ function extractLoginCreds(json) {
  *
  * ⚠ 浏览器登录能直接读到用户**当前选中**的组织（localStorage 里的
  *   `MAGIC:user:organizationCode`），无头这条路没有那个信息 —— 所以只能把候选
- *   全拿回来，让调用方逐个验，验不过再换下一个。单组织账号没有区别；
- *   多组织账号靠这一步才不会落错地方。
+ *   全拿回来，让调用方逐个验，验不过再换下一个。
+ *
+ * ⚠ `authorization` 头**两种写法都要试**：前端这个接口是
+ *   `h.set("authorization", authorization)` —— 直接放 token，**没有 `Bearer ` 前缀**；
+ *   但平台其它接口（`/api/v1/flows/models` 等）走的是 `Bearer <jwt>` 并且能通。
+ *   登录拿到的是 438 字符的 `access_token`，和网页 localStorage 里那把 354 字符的不是
+ *   同一个东西，所以不能想当然 —— 两种都打，先成的算。
+ *   全失败时把每一步的真实原因记在模块变量里，供上层错误信息引用。
  */
-export async function fetchOrgs(site, jwt) {
-  const res = await fetch(`${site.host}/api/v1/aggregation/login-data?teamshare_login_code=`, {
-    headers: {
-      authorization: `Bearer ${jwt}`,
-      "user-agent": "magpie-magicrew-auth",
-    },
-    signal: AbortSignal.timeout(20_000),
-  }).catch(() => null)
-  if (!res?.ok) return []
-  const j = await res.json().catch(() => null)
-  const list = j?.data?.auth_status ?? j?.auth_status ?? []
-  if (!Array.isArray(list)) return []
+let lastOrgProbeErrors = []
+export function orgProbeErrors() {
+  return lastOrgProbeErrors.slice()
+}
 
+export async function fetchOrgs(site, jwt) {
+  lastOrgProbeErrors = []
+
+  // 三个端点 × 两种 authorization 写法，全试一遍 —— 它们对令牌形态的宽容度不一样：
+  //   · login-data       前端是 h.set("authorization", token)（无 Bearer），但它同时
+  //                      接受 `Bearer <网页版 JWT>`（用本机 354 字符 JWT 实测通过）
+  //   · me/organizations 实测连 organization-code 头都不要，只认令牌
+  //   · auth/status      前端 bindMagicAuthorization 用它，返回 Array<MagicOrganization>
+  // 登录拿到的是 438 字符的 access_token，和网页 localStorage 那把 354 的不同，
+  // 所以不能想当然只打一个。
+  const probes = [
+    { tag: "login-data/Bearer", url: `${site.host}/api/v1/aggregation/login-data?teamshare_login_code=`, auth: `Bearer ${jwt}`, pick: (j) => j?.data?.auth_status ?? j?.auth_status },
+    { tag: "login-data/裸", url: `${site.host}/api/v1/aggregation/login-data?teamshare_login_code=`, auth: jwt, pick: (j) => j?.data?.auth_status ?? j?.auth_status },
+    { tag: "auth-status/Bearer", url: `${site.host}/api/v1/auth/status?login_code=`, auth: `Bearer ${jwt}`, pick: (j) => j?.data ?? j },
+    { tag: "auth-status/裸", url: `${site.host}/api/v1/auth/status?login_code=`, auth: jwt, pick: (j) => j?.data ?? j },
+    { tag: "me-organizations/Bearer", url: `${site.host}/api/v1/contact/accounts/me/organizations`, auth: `Bearer ${jwt}`, pick: (j) => j?.data?.items ?? j?.items },
+    { tag: "me-organizations/裸", url: `${site.host}/api/v1/contact/accounts/me/organizations`, auth: jwt, pick: (j) => j?.data?.items ?? j?.items },
+  ]
+
+  for (const p of probes) {
+    let res = null
+    try {
+      res = await fetch(p.url, {
+        headers: { authorization: p.auth, "user-agent": "magpie-magicrew-auth" },
+        signal: AbortSignal.timeout(20_000),
+      })
+    } catch (e) {
+      lastOrgProbeErrors.push(`${p.tag}：网络失败 ${String(e?.message ?? e).slice(0, 60)}`)
+      continue
+    }
+
+    const text = await res.text().catch(() => "")
+    if (!res.ok) {
+      lastOrgProbeErrors.push(`${p.tag}：HTTP ${res.status} ${text.slice(0, 70)}`)
+      continue
+    }
+    let j = null
+    try {
+      j = JSON.parse(text)
+    } catch {
+      lastOrgProbeErrors.push(`${p.tag}：非 JSON ${text.slice(0, 70)}`)
+      continue
+    }
+    if (j?.code !== 1000) {
+      lastOrgProbeErrors.push(`${p.tag}：code ${j?.code} ${j?.message ?? ""}`.trim())
+      continue
+    }
+    const list = p.pick(j)
+    if (!Array.isArray(list) || !list.length) {
+      lastOrgProbeErrors.push(`${p.tag}：200 但列表为空`)
+      continue
+    }
+    const orgs = parseOrgs(list)
+    if (orgs.length) return orgs
+    lastOrgProbeErrors.push(`${p.tag}：有 ${list.length} 项但取不到组织码`)
+  }
+  return []
+}
+
+function parseOrgs(list) {
   // ⚠ 字段名是 `magic_organization_code`（实测）。`organization_code` 只在**外层**存在，
   //   而且是空串 —— 认它就会拿到 ""。每项里另有 third_platform_ / teamshare_ 两份同值码。
   const KEYS = [
