@@ -66,7 +66,9 @@ export function makeMethods(c) {
               }
               writeSession(c.id, local.jwt, local.org)
               noteOrg(c.id, local.org)
-              rollInvite(c.id, local.jwt, local.org, c.host).catch(() => {})
+              // 等它落盘再返回：这条以前是 .catch(()=>{}) 发射后不管，
+              // 一旦 host 进程在 callback 之后被回收，滚动就永远不生效
+              await rollInvite(c.id, local.jwt, local.org, c.host)
               const who = await fetchWho(local.jwt, local.org, c.host).catch(() => null)
               return {
                 type: "success",
@@ -146,8 +148,8 @@ export function makeMethods(c) {
               const key = await issueGatewayKey(got.jwt, got.org, c.host)
               writeSession(c.id, got.jwt, got.org)
               noteOrg(c.id, got.org)
-              // 滚邀请码：把这个账号自己的码存成下一次用的
-              rollInvite(c.id, got.jwt, got.org, c.host).catch(() => {})
+              // 滚邀请码：把这个账号自己的码存成下一次用的（等落盘再返回）
+              await rollInvite(c.id, got.jwt, got.org, c.host)
               return {
                 type: "success",
                 access: key.apiKey,
@@ -220,7 +222,7 @@ export function makeMethods(c) {
             }
             writeSession(c.id, jwt, org)
             noteOrg(c.id, org)
-            rollInvite(c.id, jwt, org, c.host).catch(() => {})
+            await rollInvite(c.id, jwt, org, c.host)
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)
             return {

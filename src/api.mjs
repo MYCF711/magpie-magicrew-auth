@@ -397,11 +397,12 @@ export async function fetchPointRecords(token, org, { page = 1, pageSize = 20, h
 //   GET /api/v1/invitations/activity              → 活动配置
 //   GET /api/v1/invitations/rewards/total-points  → 已赚积分
 //
-// ⚠ 这三个接口只认**客户端登录**的那把 JWT（438 字符），网页版那把
-//   localstorage 里的 JWT（354 字符）调过去回 {"code":2155,"message":"用户不存在"}。
-//   两把都是同一账号签的，差别在 payload 里的用户字段 —— 网页版不带。
-//   ⇒ 所以「用我自己的邀请码」只能拿**本插件上次登录成功时存下的**那把 JWT，
-//     没登录过就没得用（报错，不猜）。
+// ⚠ 早前这里写着「这三个接口只认客户端那把 JWT（438 字符），网页版那把 354 字符的
+//   调过去回 2155 用户不存在」—— **2026-10-27 复核，这条已经不成立**：
+//   四个账号（两站各两个）全是 354 字符的网页 JWT、cus.device_id 全为空，
+//   `/api/v1/invitations/info` 全部返回 200 并正常给出 invite_code。
+//   上游放宽了这个限制。所以「用我自己的邀请码」不再受 JWT 来源限制，
+//   只要手里有登录态就能换成自己的码。
 export const INVITE_CODE_PATH = "/api/v1/invitations/info"
 
 /** 拿不到就抛错 —— 调用方要的是「真实结果」，不是静默降级 */
