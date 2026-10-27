@@ -36,19 +36,21 @@
 
 登录后按账号实时拉 `/api/v1/flows/models`，账户能选什么就显示什么 —— 下表只列各家**最新**和**热门**的那几款：
 
-| 发行商 | 最新 / 热门 | 上下文 | 国内 | 国际 |
-|---|---|---|---|---|
-| GLM（智谱） | `glm-5.3` · `glm-5.3-flash` | 1M · 256K | ✓ | ✓ |
-| DeepSeek | `deepseek-v4.1-flash` | 1M | ✓ | ✓ |
-| DeepSeek | `deepseek-v4-pro` | 128K | — | ✓ |
-| Qwen（阿里） | `qwen3.8-max` · `qwen3.7-plus` | 1M | ✓ | ✓ |
-| Kimi（月之暗面） | `kimi-k3.1-pro` | 1M | ✓ | ✓ |
-| MiniMax | `minimax-m3` · `minimax-m3.1-flash` | 1M | ✓ | ✓ |
-| MiMo（小米） | `mimo-v2.6-pro` · `mimo-v2.6-flash` | 1M | ✓ | ✓ |
-| 豆包 Seed（字节） | `doubao-seed-2.0-pro` · `doubao-seed-2.0-code` | 256K | ✓ | ✓ |
-| Claude（Anthropic） | `claude-haiku-5.5` | 1M | — | ✓ |
-| GPT（OpenAI） | `gpt-6-luna` · `gpt-5.4-mini` | 1.05M · 400K | — | ✓ |
-| Gemini（Google） | `gemini-3.7-flash` | 1M | — | ✓ |
+| 发行商 | 最新 / 热门 | 上下文 | 倍率 | 国内 | 国际 |
+|---|---|---|---|---|---|
+| GLM（智谱） | `glm-5.3` · `glm-5.3-flash` | 1M · 256K | 0.47× · 0.04× | ✓ | ✓ |
+| DeepSeek | `deepseek-v4.1-flash` | 1M | 0.10× | ✓ | ✓ |
+| DeepSeek | `deepseek-v4-pro` | 128K | — | — | ✓ |
+| Qwen（阿里） | `qwen3.8-max` · `qwen3.5-flash` | 1M | 0.60× · 0.01× | ✓ | ✓ |
+| Kimi（月之暗面） | `kimi-k3.1-pro` | 1M | 0.65× | ✓ | ✓ |
+| MiniMax | `minimax-m3` · `minimax-m3.1-flash` | 1M | 0.42× · 0.05× | ✓ | ✓ |
+| MiMo（小米） | `mimo-v2.6-pro` · `mimo-v2.6-flash` | 1M | 0.15× · 0.05× | ✓ | ✓ |
+| 豆包 Seed（字节） | `doubao-seed-2.0-pro` · `doubao-seed-2.0-code` | 256K | 0.24× | ✓ | ✓ |
+| Claude（Anthropic） | `claude-haiku-5.5` | 1M | — | — | ✓ |
+| GPT（OpenAI） | `gpt-6-luna` · `gpt-5.4-mini` | 1.05M · 400K | — | — | ✓ |
+| Gemini（Google） | `gemini-3.7-flash` | 1M | — | — | ✓ |
+
+倍率来自 `/api/v1/products/model-points` 的 `input_points / 2000`，填进模型条目的 `rate` 字段，由 magpie 渲染成名字后面那个灰色胶囊（和网站模型选择器上的「消耗系数」同口径）。拿不到计费数据的模型不列 —— 不猜价格，也不谎标免费。
 
 全量（含生图、向量、各家历史版本）不进 README —— 装好以后模型选择器里看到的才是账号真实的全部。
 
@@ -62,13 +64,25 @@
 
 ---
 
-## 新手奖励
+## 签到
 
-国内站 8 项任务合计 500 积分，7 项 PUT 一次就完成（实测 1240 → 1540，+300，六项当场入账）。只有「完成第一次 AI 工作」那项服务端认死必须真的跑过一次，PUT 回 `9303`。
+**每天一次（北京时间 0 点），领每日登录积分 + 自动补完首次任务。幂等，失败不影响已经拿到的分。**
 
-国际站 `/api/v1/onboarding/tasks` 现在返回空列表 —— 接口在，这个账号没东西可领。
+一次签到做四件事：
 
-每天跑一次，幂等。
+1. 领每日登录积分（国内 +200/天，国际 +50/天）—— 当天已领会返回「今日已领取」，不是错误
+2. 首任务没做 → 自动发一条消息完成它（国内站 `first_ai_work` 100 分；国际站没有任务清单，但邀请奖励同样要求「完成首个对话」）
+3. 其余新手福利 PUT 完成
+4. 报积分变化
+
+两条边界：
+
+- **每账号每天最多自动发一条消息**（按 org + 北京日期落盘去重）。结算慢、签到重试、判定不到，都不会让它反复烧积分。
+- 发消息用最便宜的模型（`qwen3.5-flash`，0.01×），一条几分钱。
+
+国内站 8 项任务合计 500 积分，7 项 PUT 一次就完成。只有「完成第一次 AI 工作」服务端认死必须真的跑过一次，PUT 回 `9303` —— 那条由插件替它发一条消息（纯协议，不开浏览器）。
+
+国际站 `/api/v1/onboarding/tasks` 恒返回空列表，所以改用「有没有话题」判断说没说过话。
 
 ---
 
@@ -196,6 +210,8 @@ magpie plugin list
 | [@magpie-community/opencode-workbuddy-auth](https://github.com/magpie-community/plugins/tree/main/packages/workbuddy)（MIT） | 「一个包导出多个 `XxxAuthPlugin`」的写法：每个站点一个具名导出，各成一个供应商 |
 | [@magpie-community/opencode-qoder-auth](https://github.com/magpie-community/plugins/tree/main/packages/qoder)（MIT） | 同上，四站点四导出的对照例 |
 | [magpie-plugin-template](https://github.com/MYCF711/magpie-plugin-template)（MIT） | README / CHANGELOG / NOTICE 的骨架与硬规则 |
+| [@magpie-community/codearts](https://github.com/magpie-community/plugins/tree/main/packages/codearts)（MIT） | 模型条目的 `rate` / `free` 两个字段的用法 —— 倍率胶囊是它那里的 `creditRateOf()` + `modelOf()` 看出来的 |
+| [magpie-plugin-scaffold](https://github.com/MYCF711/magpie-plugin-scaffold)（MIT） | `HOOKS.md` 的 `auth.checkin` 契约（北京时间口径、outcome 取值）与 `free` 的判据 |
 
 本插件不复制上游代码，只调它的公开 HTTP 接口。完整版权声明见 [`NOTICE.md`](./NOTICE.md)。
 
