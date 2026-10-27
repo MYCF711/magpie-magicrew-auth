@@ -118,24 +118,73 @@ export async function finishSmsLogin(site, { mobile, stateCode = "+86", code, de
 
   const { jwt, org } = extractLoginCreds(json)
   if (!jwt) {
-    throw Object.assign(new Error("登录成功但响应里没找到 JWT —— 请把这条原始响应反馈给插件作者"), {
-      raw: json,
-    })
+    throw Object.assign(
+      new Error(`登录成功但响应里没找到可用令牌。响应结构：${describeShape(json)}`),
+      { raw: json },
+    )
   }
   // 响应里给了组织码就用它；没给就把该账号的组织**全列出来**，
-  // 由调用方逐个拿 fetchPoints 验（见 methods.mjs 的 completeSignIn）——
-  // 只取第一个是不够的：多组织账号会落到「列表第一个」而不是用户平时用的那个。
+  // 由调用方逐个拿 fetchPoints 验（见 methods.mjs 的 completeSignIn）。
   const orgs = org ? [org] : await fetchOrgs(site, jwt)
   if (!orgs.length) {
-    throw Object.assign(new Error("登录成功但拿不到组织码（该账号没有任何组织？）"), { raw: json })
+    throw Object.assign(
+      new Error(
+        `登录成功但拿不到组织码。\n` +
+          `  · 登录响应结构：${describeShape(json)}\n` +
+          `  · 用该令牌调 login-data 也返回不了组织列表\n` +
+          `  （多半是令牌字段取错了 —— 前端用的是响应里的 access_token）`,
+      ),
+      { raw: json },
+    )
   }
   return { jwt, org: orgs[0], orgs, raw: json }
 }
 
+/**
+ * 把一段 JSON 的形状描述出来：**只有键名和类型，没有任何值**。
+ *
+ * 用来让真机上的报错自带诊断信息 —— 用户截一张图，就能看出服务端到底回了什么结构，
+ * 不用反复试。token 之类的东西一律不会出现在这里。
+ */
+export function describeShape(o, depth = 0) {
+  if (o === null) return "null"
+  if (o === undefined) return "undefined"
+  const t = typeof o
+  if (t !== "object") return t === "string" ? `str(${String(o).length})` : t
+  if (depth >= 3) return "…"
+  if (Array.isArray(o)) {
+    return `[${o.length}]` + (o.length ? describeShape(o[0], depth + 1) : "")
+  }
+  const keys = Object.keys(o).slice(0, 24)
+  return "{" + keys.map((k) => `${k}:${describeShape(o[k], depth + 1)}`).join(", ") + "}"
+}
+
+/**
+ * 从登录响应里取「授权令牌」和「组织码」。
+ *
+ * ⚠ 登录返回的**不是 JWT，是 `access_token`** —— 前端拿到之后立刻
+ *   `setAuthorization(access_token)` 并用它调 `getUserProfile`。
+ *   早先这里只按 `eyJ` 前缀找 JWT，结果在响应里挑到了别的字段，
+ *   拿去调 `login-data` 自然拿不到组织（真机表现就是
+ *   「登录成功但拿不到组织码」）。
+ */
 function extractLoginCreds(json) {
-  // 只认 eyJ 三段式当 JWT；组织码优先取键名带 org 的那个
-  const { jwt, org } = extractCreds(json)
-  return { jwt, org }
+  const d = json?.data ?? json ?? {}
+  const pick = (...keys) => {
+    for (const k of keys) {
+      const v = d?.[k]
+      if (typeof v === "string" && v.trim()) return v.trim()
+    }
+    return null
+  }
+  // 优先认登录接口自己给的字段名
+  const token =
+    pick("access_token", "accessToken", "token", "authorization", "teamshare_token") ??
+    extractCreds(json).jwt
+  const org =
+    pick("organization_code", "organizationCode", "magic_organization_code") ??
+    extractCreds(json).org
+  return { jwt: token, org }
 }
 
 /**
