@@ -761,3 +761,24 @@ GET /v1/models            → id / object / created_at / owner_by
 ⚠ 保守值的方向要想清楚：**填小了会让 agent 过早拒绝（这次就是这个）**，
 填大了会让 agent 以为有余量、请求超了上游才报错。有权威来源时用权威来源，
 没有时才选保守 —— 而"保守"在两者之间是矛盾的，得看哪个代价更小。
+
+### 上下文窗口的优先级（0.3.5 起）
+
+```
+① magpie GUI 里「上下文窗口」那一行手选的     ← 最优先，magpie 直接采用
+② ~/.cache/magpie/models.json 的 limit.context  ← 插件查到的真实值
+③ 兜底 1_048_576
+```
+
+**兜底为什么给大不给小**：
+- 给 1M 而实际只有 128K → 上游超限报错，**用户看得见**
+- 给 256K 而实际有 1M → agent 主动拒绝本可以处理的对话，**静默损失能力**，
+  表现成 `pi-ai detected context overflow`，比报错难查得多
+
+参照官方社区插件：
+- **Qoder** 纯硬编码（`{ id: "ultimate", context: 1_000_000 }`）
+- **WorkBuddy** 硬编码一张 `[id, name, context, efforts]` 表，再从自家 `/v3/config`
+  的 `maxInputTokens` 覆盖（`m.context = d.maxInputTokens`）
+
+magicrew 既不返回 `maxInputTokens`（`flows/models` 的 `configs` 只有 temperature），
+`/v1/models` 也只有 `id / object / created_at / owner_by` —— 所以走模型库这条路。

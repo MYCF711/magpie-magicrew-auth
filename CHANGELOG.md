@@ -1,5 +1,33 @@
 # 更新记录
 
+## 0.3.5
+
+**卡片上多一个「承载」徽章：`magpie.carries`**
+
+- 症状：Qoder 插件的卡片有「承载 Qoder 国际版 (qoder.com)、Qoder CN」，Magicrew 没有
+- 成因：那个徽章的数据源是 `provider.MovedOnto`，只认 **magpie 内置订阅被迁移到插件上**。
+  Magicrew 从来不是内置订阅（`internal/provider/migrate.go` 的 `movers` 表），所以永远是空
+- 修法：magpie 加 `magpie.carries` —— 插件在 `package.json` 里自己声明它承载哪些供应商，
+  后端读进 `pluginEntryJSON.Served`，前端照样画同一个 `pm-chip moved`
+- 本插件声明：`["超级麦吉 (letsmagic.cn)", "MagiCrew (magicrew.ai)"]`
+- 兼容性：**旧 magpie 不认这个字段，直接忽略**；只有带 `carries` 能力的 magpie 才画这个徽章
+
+## 0.3.5
+
+**上下文窗口的三档优先级，兜底从 256K 提到 1M**
+
+```
+① 用户在 magpie GUI 里手选的「上下文窗口」   ← 最优先，magpie 直接用
+② 模型库（~/.cache/magpie/models.json）查到的真实值
+③ 兜底 1M
+```
+
+- 兜底从 `256_000` 改成 `1_048_576`：给 1M 而实际只有 128K，上游会在超限时报错、用户看得见；
+  给 256K 而实际有 1M，agent 会主动拒绝一段本可以处理的对话 —— 那是静默的能力损失，
+  比报错更难查（`pi-ai detected context overflow` 就是这么来的）
+- 对照官方社区插件：Qoder 纯硬编码（`context: 1_000_000`）；WorkBuddy 硬编码一张表，
+  再从自家 `/v3/config` 的 `maxInputTokens` 覆盖。magicrew 不提供后者，所以查模型库更省事
+
 ## 0.3.4
 
 **上下文窗口向 magpie 的模型库查，不再一律填 256K**
