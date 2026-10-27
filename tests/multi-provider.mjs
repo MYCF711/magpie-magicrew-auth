@@ -102,7 +102,7 @@ for (const [label, factory, siteId] of cases) {
     type: "oauth",
     access: "mgw_test_key",
     jwt: "x",
-    org: "67u4oe6fbenj",
+    org: "orgcode67890",
   }
   let captured = null
   const realFetch = globalThis.fetch

@@ -80,7 +80,7 @@ function writeSnapshot(siteId, models) {
 //   国内      1,000      3,000       60,000      300,000
 //   国际        200        500       10,000       30,000
 const AUTHOR_INVITE = {
-  // 国内站（2026-10-27 用作者账号 h97gkbu8bruj 从 /api/v1/invitations/info 复核）
+  // 国内站（2026-10-27 用作者账号 orgcode12345 从 /api/v1/invitations/info 复核）
   magicrew: "IVC8BAWYXRY1",
   // 国际站
   "magicrew-intl": "IV75F0ZKVKXG",
