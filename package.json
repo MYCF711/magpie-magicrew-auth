@@ -5,6 +5,9 @@
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
+  "scripts": {
+    "publish:npm": "node publish-npm.mjs"
+  },
   "files": [
     "index.mjs",
     "src",
