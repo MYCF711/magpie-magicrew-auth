@@ -3,10 +3,12 @@
 //   MAGICREW_JWT=... MAGICREW_ORG=... node tools/onboarding-status.mjs
 //   node tools/onboarding-status.mjs --intl
 
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { readFileSync, readdirSync } from "node:fs"
 import { SITES, fetchOnboardingTasks, fetchPoints } from "../src/api.mjs"
 
-const EDGE_DIR = "C:/Users/Administrator/AppData/Local/Microsoft/Edge/User Data/Default/Local Storage/leveldb"
+const EDGE_DIR = join(homedir(), "AppData/Local/Microsoft/Edge/User Data/Default/Local Storage/leveldb")
 
 function fromEdge() {
   let jwt = "", org = "", best = 0
