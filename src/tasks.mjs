@@ -20,7 +20,7 @@
 //
 // 每天跑一次，两步都做，任一步失败不影响另一步。
 
-import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId } from "./api.mjs"
+import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId, fetchProjectTopics } from "./api.mjs"
 import { isAutoChatSettled, noteAutoChat, noteAutoChatFailure } from "./store.mjs"
 
 /** 站点 id —— 去重标记按站点分文件存 */
@@ -236,9 +236,9 @@ async function autoFirstWork(h) {
 /**
  * 国际站的「首个对话」：没有任务清单可依，只能看它用没用过。
  *
- * 判据是**有没有工作台项目**：项目是发第一条消息时前端顺带建的，
- * 一个都没有基本等于从没说过话。已经有项目 = 用过 → 直接记成已补过
- * （一次性），以后再也不用查。
+ * 判据是**有没有话题**，不是有没有工作台项目 —— 项目在打开工作台时就会
+ * 自动建，「建了项目、一句话没说」的新号很常见，而那种号正是需要补一条的。
+ * 话题才是「真的发过消息」的证据。
  *
  * @returns {{ok?:boolean, settled?:boolean, reason?:string, topicName?:string, model?:string}}
  */
@@ -254,11 +254,23 @@ async function autoFirstChat(h) {
     if (!wsId) return { reason: "这个账号还没有工作区，先在网页里进一次" }
 
     const { findProjectId, runChatTask } = await import("./chat-task.mjs")
-    const existing = await findProjectId(h.jwt, h.org, h.host, wsId).catch(() => "")
-    if (existing) {
-      // 已有项目 = 早就说过话。直接落一次性标记，省得以后每次登录都查一遍。
-      noteAutoChat(siteId, h.org, { reason: "已有工作台项目，视为用过" })
-      return { settled: true, reason: "此前已用过（已有工作台项目）" }
+    const pid = await findProjectId(h.jwt, h.org, h.host, wsId).catch(() => "")
+    if (pid) {
+      let topics
+      try {
+        topics = await fetchProjectTopics(h.jwt, h.org, pid, h.host)
+      } catch (e) {
+        // 查不到判据就**这次不发**：宁可漏一轮（下次登录 / 签到还会来），
+        // 也不要把「接口抖了一下」当成「没说过话」白花一次积分。
+        // 不落标记、不计数 —— 这不是失败，是没拿到判据。
+        return { reason: `话题清单查不到（${String(e?.message ?? e)}），这次不发` }
+      }
+      if (topics.length > 0) {
+        // 有话题 = 真的发过消息 → 落一次性标记，以后连查都不查
+        noteAutoChat(siteId, h.org, { reason: `已有 ${topics.length} 个话题，视为用过` })
+        return { settled: true, reason: `此前已用过（已有 ${topics.length} 个话题）` }
+      }
+      // 有项目、没话题：项目多半是打开工作台时自动建的，一句话没说 —— 往下补。
     }
 
     const r = await runChatTask({ jwt: h.jwt, org: h.org, host: h.host, workspaceId: wsId })
@@ -307,7 +319,7 @@ export async function ensureFirstTaskOnce(h) {
     return autoFirstWork(h)
   }
 
-  // 国际站：没有任务清单 → 看有没有工作台项目
+  // 国际站：没有任务清单 → 看有没有话题（不是有没有项目）
   return autoFirstChat(h)
 }
 
