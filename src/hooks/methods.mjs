@@ -44,8 +44,15 @@ function kickoffFirstTask(c, jwt, org) {
  * 记组织 / 滚邀请码 / 补首任务 / 取昵称」这一串只有一份实现。
  *
  * `orgs` 是候选组织列表（无头那条路拿不到「用户当前选中的组织」，只能猜）。
- * 按顺序用 `fetchPoints` 真验一遍，第一个验得过才算 —— 多组织账号靠这个
- * 才不会落错地方。浏览器登录只有一个候选，行为不变。
+ * 按顺序用 `fetchPoints` 真验一遍，第一个验得过才算。
+ *
+ * ⚠ 别说这解决了「多组织选哪个」—— **它没解决，只是容错**：
+ *   账号所属的任何一个组织都能通过 `fetchPoints`（只要 JWT 有效），
+ *   所以「第一个验得过的」实际就是「列表第一个」。
+ *   真正的区别在浏览器登录那条路：它直接读 localStorage 里用户**当前选中**的那个。
+ *   服务端虽然给了 `is_current` 字段，但实测恒为 false（带不带 organization-code
+ *   头都一样），不能拿来判断。⇒ 多组织账号在无头这条路上会落到列表第一个组织，
+ *   这是已知限制，不是 bug。
  */
 async function completeSignIn(c, jwt, org, orgs = []) {
   const candidates = [org, ...orgs.filter((o) => o && o !== org)]
