@@ -9,6 +9,7 @@
 
 import { SITES } from "./api.mjs"
 import { ICON_BY_SITE } from "./icons.mjs"
+import { contextOf } from "./model-context.mjs"
 
 export { SITES }
 
@@ -44,7 +45,9 @@ export function modelEntry(c, id, name, vision) {
     api: { id, url: c.BASE, npm: SDK },
     status: "active",
     cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-    limit: { context: 256_000, output: 64_000 },
+    // 上下文窗口向 magpie 的模型库查 —— 两个模型接口都不返回它，
+    // 早前一律填 256K，结果 agent 拿 256K 判断"放不下"，而实际是 1M
+    limit: { context: contextOf(id), output: 64_000 },
     capabilities: {
       temperature: true,
       reasoning: true,

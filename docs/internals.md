@@ -719,3 +719,45 @@ b 槽 ← 上一次的，还活着（回退用）
 magpie 刚起来时 `getAuth()` 可能还返回 null（账号未加载完），此时
 `accountOf(auth)` 会退成 `default`，读不到该账号的文件 → 用 magpie 暂存那把（可能死）→ 403。
 几次请求后账号加载完就正常。**排查时若看到 `__default.json`，就是这个时序。**
+
+---
+
+## 十六、上下文窗口必须查库，不能填保守值
+
+**症状**：`pi-ai detected context overflow for model "magicrew/deepseek-v4.1-flash"`，
+而会话实际还没到模型的真实上限。
+
+**根因**：magicrew 这两个接口**都不返回上下文窗口**：
+
+```
+GET /api/v1/flows/models  → value / label / vision / tags / configs
+GET /v1/models            → id / object / created_at / owner_by
+```
+
+（早前记的「/v1/models 有 context_length」是看错了 —— 那是 magpie 网关自己补的，
+不是上游给的。）
+
+于是插件一律填 `256_000` 当保守值。对 `deepseek-v4.1-flash` 来说这是错的：
+它真实窗口 **1,048,576**，填 256K 等于把容量砍掉四分之三，agent 拿这个数判断"放不下"
+就拒绝了 —— 保守值在这里反而变成了故障源。
+
+**修法**（0.3.4）：向 magpie 自己的模型库查 —— `~/.cache/magpie/models.json`，
+每条带 `limit.context`，magpie 自己会更新它。
+
+匹配顺序：全名 → 尾段（`deepseek-ai/deepseek-v4.1-flash` ↔ `deepseek-v4.1-flash`）→
+同尾段取最大（同一个模型挂多个厂商前缀时，取真能收的那个）。查不到才退回 256K。
+
+实测值（2026-10-27）：
+
+| 模型 | context |
+|---|---|
+| deepseek-v4.1-flash | 1,048,576 |
+| deepseek-v4-flash | 1,048,576 |
+| qwen3.5-flash | 1,000,000 |
+| kimi-k3.1-pro | 1,048,576 |
+| mimo-v2.6-flash | 1,048,576 |
+| glm-5.3-flash | 262,144 |
+
+⚠ 保守值的方向要想清楚：**填小了会让 agent 过早拒绝（这次就是这个）**，
+填大了会让 agent 以为有余量、请求超了上游才报错。有权威来源时用权威来源，
+没有时才选保守 —— 而"保守"在两者之间是矛盾的，得看哪个代价更小。
