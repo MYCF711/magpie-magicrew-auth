@@ -1,5 +1,36 @@
 # 更新记录
 
+## 0.3.9
+
+**「承载」徽章由 magpie 自己派生：删掉从没被读过的 `magpie.carries`**
+
+0.3.5 为了卡片上那个「承载 X、Y」的徽章，在 `package.json` 里加了 `magpie.carries`。
+那是我方提的方案（[#3902](https://github.com/yetone/magpie/issues/3902) 里的 option 1），
+magpie 侧**从未发布过读它的版本** —— 上游选了另一条路：
+
+- `766356c`，v0.1.1744 起，`/api/plugins` 每个插件多一个 `serves` 字段：插件**注册的
+  provider 名**，每个一次，内置订阅迁到插件上的那些不重复列（页面按内置名字画）。
+- 徽章出现条件：有内置订阅迁到这个插件 **或** 注册了两个及以上 provider。单 provider 不出现
+  —— 行的标题本来就说了它是谁。
+- 「… 正由此插件代替内置运行」那句 tooltip 只留在「名字里有内置订阅」的徽章上。
+- 名字就是 `cfg.provider[id].name`，所以想让它读起来清楚，改的是**供应商名**，不是 package.json。
+
+实测（v0.1.1744，windows/amd64，独立 data 目录，本包 0.3.8 以文件夹方式安装）：
+
+```
+$ curl /api/plugins
+{"spec":"...\\magpie-magicrew-auth","providers":["超级麦吉","MagiCrew"],
+ "moved":[],"serves":["超级麦吉","MagiCrew"]}
+
+卡片：承载 超级麦吉、MagiCrew      （一个 pm-chip moved）
+title: null                      （没有内置订阅 → 没有「代替内置」那句）
+```
+
+修法：删掉 `magpie.carries`。宿主不读它，留着只会让下一个人以为它有用。
+
+判据：装 magpie ≥ 0.1.1744，本包注册 2 个 provider ⇒ 卡片上必然有「承载 超级麦吉、MagiCrew」，
+package.json 里不需要任何字段。
+
 ## 0.3.8
 
 **签到补上「每日登录积分」—— 国际站一直领不到，根因是它压根不在 onboarding 任务里**
