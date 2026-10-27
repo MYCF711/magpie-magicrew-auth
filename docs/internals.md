@@ -385,21 +385,39 @@ linux   xclip -selection clipboard -o
 
 ⚠ callback 里要拿「打开页面前的剪贴板内容」当 `skip` —— 否则用户上一次复制的东西会被当成结果。
 
-## 十、两把 JWT 的差别（决定邀请码能不能滚）
+## 十、两把 JWT 的差别（**不构成权限差别**）
 
-同一账号、几乎同一时刻签的两把，段数都是 3、header 都是 `{"alg":"HS256","type":"JWT"}`，
-签名段都是 64 位 hex。唯一的差别是 `cus.device_id`：
+同一账号签的两把，段数都是 3、header 都是 `{"alg":"HS256","type":"JWT"}`，签名段都是 64 位 hex。
+唯一的差别是 `cus.device_id`：
 
-| 来源 | 长度 | 各段 | `cus.device_id` | `/api/v1/invitations/info` |
-|---|---|---|---|---|
-| 桌面客户端 | 438 | 40 / 332 / 64 | 64 位 hex | `200 {"code":1000,"data":{"invite_code":"..."}}` |
-| 网页 localStorage | 350 | 40 / 244 / 64 | `""` | `{"code":2155,"message":"用户不存在"}` |
+| 来源 | 长度 | 各段 | `cus.device_id` |
+|---|---|---|---|
+| 桌面客户端 / `POST /api/v1/sessions` 带 `device` | 438 | 40 / 332 / 64 | 64 位 hex |
+| 网页 localStorage | 354 | 40 / 244 / 64 | `""` |
 
-`POST /api/v1/sessions` 的 body 带 `device` 字段（`LoginFormCommonValues.device`，
-来自 `getDeviceInfo()` 的浏览器指纹），签出来的就是带 `device_id` 的那把。
+### ⚠ 更正（2026-10-27，实测推翻前一条结论）
 
-所以「登录后把自己的邀请码滚上去」这件事：密码登录滚得动，浏览器登录（剪贴板拿到的是网页那把）滚不动。
-实现上滚不动就安静保留旧值 —— 不报错、不挡登录。
+**这里原先写着「网页那把不被网关接受，一律 2155 用户不存在」—— 那是错的。**
+
+错因：当时手里那把网页 JWT 已经过期（`iat` 是几小时前，中途在同一账号上登录过多次，
+服务端按 `jti` 只认最新会话）。换一把新鲜的重新测：
+
+```
+网页 token（354 字符，cus.device_id 为空）
+  /api/v1/quota/points/total        → 1000 ok, total_points 1538
+  /api/v1/invitations/info          → 1000 ok, invite_code IVC8BAWYXRY1
+  /api/v1/flows/models              → 1000 ok, 27 个
+  /api/v1/model-gateway/tokens      → 1000 ok, 签出 mgw_ key
+```
+
+四条全通。**`device_id` 为空不构成任何限制**，两种 token 权限完全一样。
+
+⇒ 「登录后把自己的邀请码滚上去」这件事，网页登录也滚得动。实现里那句
+「滚不动就保留旧值」的兜底仍然留着（网络抖动、token 过期都会让那一次失败），
+但不再是常态。
+
+教训：**判断 token 失效要看 `iat` / `jti`，不要只看一个字段就下结论。**
+`2155 用户不存在` 同时可能是「token 过期」和「组织码不对得上」，先确认手里这把是不是新的。
 
 ---
 
@@ -478,5 +496,8 @@ JSON.stringify({ jwt: pick("MAGIC:user:authorization"), org: pick("MAGIC:user:or
 ```
 找到浏览器 → 自己拉 + CDP 读          全自动
 找不到     → magpie 开系统浏览器 + 剪贴板   用户粘一行
-都没有     → 报错，建议改用密码登录
+都没有     → 报错，让用户改用「登录态（JWT + 组织码）」
 ```
+
+> 0.2.0 里那条「密码登录」方法已经删掉了：网页登录拿到的 token 一样能签发
+> `mgw_` key（见第十节的更正），再让用户在小窗里输手机号密码是多余的一步。

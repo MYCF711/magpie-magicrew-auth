@@ -31,12 +31,12 @@ import { startSelfRegister } from "./src/self-register.mjs"
 import {
   SITES,
   site as siteOf,
-  login,
   issueGatewayKey,
   refreshGatewayKey,
   fetchModels,
   fetchPoints,
   fetchOwnInviteCode,
+  fetchWho,
 } from "./src/api.mjs"
 import { runCheckin } from "./src/tasks.mjs"
 import { ICON_BY_SITE } from "./src/icons.mjs"
@@ -50,7 +50,7 @@ import { promisify } from "node:util"
 const execFile = promisify(execFileCb)
 
 const COMMUNITY_ENTRY = {
-  package: "magpie-magicrew-auth",
+  package: "Magicrew",
   name: "超级麦吉 / MagiCrew",
   providers: ["magicrew", "magicrew-intl"],
   community: true,
@@ -128,8 +128,8 @@ function writeSnapshot(siteId, models) {
 //   国内      1,000      3,000       60,000      300,000
 //   国际        200        500       10,000       30,000
 const AUTHOR_INVITE = {
-  // 国内站的作者码 —— 待作者提供（他没给过国内的）
-  magicrew: "",
+  // 国内站（2026-10-27 用作者账号 h97gkbu8bruj 从 /api/v1/invitations/info 复核）
+  magicrew: "IVC8BAWYXRY1",
   // 国际站
   "magicrew-intl": "IV75F0ZKVKXG",
 }
@@ -187,6 +187,20 @@ function readSession(siteId) {
   } catch {
     return null
   }
+}
+
+/** 登录链路的失败原因落盘，排障用；不影响任何正常流程 */
+function loginLogPath(siteId) {
+  return join(homedir(), ".cache", "magpie", `magicrew-login-${siteId}.log`)
+}
+
+function noteLoginFailure(siteId, msg) {
+  try {
+    const f = loginLogPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, `[${new Date().toISOString()}] ${msg}
+`, { flag: "a" })
+  } catch {}
 }
 
 function writeSession(siteId, jwt, org) {
@@ -291,8 +305,8 @@ async function pollClipboard({ skip = "", timeout = 300_000, interval = 1500 } =
 
 // ═══ 站点差异 ═════════════════════════════════════════════════════════
 
-/** 国际站的登录页有 Google / Password / Email / Private Service 四种 */
-const INTL_STATE_CODES = [
+// （密码登录已成历史：两站都只走浏览器登录 + 登录态两条路）
+const _UNUSED_INTL_STATE_CODES = [
   { label: "+1 美国 / 加拿大", value: "+1" },
   { label: "+44 英国", value: "+44" },
   { label: "+81 日本", value: "+81" },
@@ -302,7 +316,7 @@ const INTL_STATE_CODES = [
   { label: "+86 中国", value: "+86" },
 ]
 
-const CN_STATE_CODES = [
+const _UNUSED_CN_STATE_CODES = [
   { label: "+86 中国", value: "+86" },
   { label: "+852 香港", value: "+852" },
   { label: "+886 台湾", value: "+886" },
@@ -318,7 +332,6 @@ function makePlugin(SITE) {
   const PROVIDER = SITE.id // = magpie 的供应商 id
   const SHORT = SITE.id === "magicrew" ? "超级麦吉" : "MagiCrew"
   const BASE = `${SITE.host}/v1`
-  const STATE_CODES = SITE.id === "magicrew" ? CN_STATE_CODES : INTL_STATE_CODES
   // 两个站点的品牌图各用各的（见 src/icons.mjs），在 GUI 里一眼分得开
   const ICON = SITE.id === "magicrew" ? ICON_BY_SITE.cn : ICON_BY_SITE.intl
 
@@ -390,11 +403,23 @@ function makePlugin(SITE) {
             type: "oauth",
             label: `${SHORT} 浏览器登录`,
             async authorize() {
-              const url = `${SITE.web}/login`
+              // 邀请码两条路都要出现：API 的 body（密码登录）和登录页的 URL。
+              // 只带 body 的话，用户在网页里注册就丢了 —— 服务端是看建组织那一下的。
+              const inviteCode = inviteToUse(SITE.id)
+              const url = inviteCode
+                ? `${SITE.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+                : `${SITE.web}/login`
               const hostFragment = new URL(SITE.web).hostname
 
               // 自己拉一个能被 CDP 看进去的浏览器
-              const session = await launchLoginBrowser(url).catch(() => null)
+              // ⚠ 失败原因必须留下 —— 静默降级会让用户以为「本机没装 Chrome」，
+              //   而实际可能是 spawn 被拦、端口文件没写出来之类。
+              let why = ""
+              const session = await launchLoginBrowser(url).catch((e) => {
+                why = String(e?.message ?? e).slice(0, 300)
+                noteLoginFailure(SITE.id, `launch: ${why}`)
+                return null
+              })
 
               // 降级路径要用的「打开前剪贴板」（不 await：起 powershell 要几百毫秒）
               const skipPromise = session ? null : clipboardText()
@@ -404,7 +429,7 @@ function makePlugin(SITE) {
                 ...(session ? { opened: true } : {}),
                 instructions: session
                   ? "浏览器已打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。"
-                  : `没在本机找到 Chrome / Edge，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
+                  : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chrome / Edge）"}，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
                 method: "auto",
                 async callback() {
                   let got = null
@@ -435,7 +460,15 @@ function makePlugin(SITE) {
 
                   try {
                     if (!got.org) throw new Error("只拿到 JWT，没有组织码")
-                    // 真的验一次：读积分能过，说明 JWT + 组织码都对
+                    // 真的验一次：读积分能过，说明 JWT + 组织码都对。
+                    //
+                    // 记一笔容易误判的事（2026-10-27 实测更正）：
+                    //   网页版签的 JWT（354 字符，cus.device_id 为空）**完全能用** ——
+                    //   invitations/info、flows/models、model-gateway/tokens 三条都通。
+                    //   桌面端/API 签的那把是 438 字符（device_id 为 64 位 hex），
+                    //   两者只差这一个字段，**不构成任何权限差别**。
+                    //   之前「网页那把不被网关接受」的结论是错的：那次用的是过期 token，
+                    //   报 2155「用户不存在」，与 device_id 无关。
                     await fetchPoints(got.jwt, got.org, SITE.host)
                     const key = await issueGatewayKey(got.jwt, got.org, SITE.host)
                     writeSession(SITE.id, got.jwt, got.org)
@@ -446,93 +479,14 @@ function makePlugin(SITE) {
                       access: key.apiKey,
                       refresh: key.refreshToken,
                       expires: Date.now() + 2 * 3600_000,
-                      accountId: got.org,
+                      // 卡片显示能认的名字（昵称/真名/手机号），不是随机组织码
+                      accountId: got.name || got.org,
                       uid: got.org,
                       jwt: got.jwt,
                       org: got.org,
                     }
                   } catch (e) {
                     return { type: "failed", error: String(e?.message ?? e) }
-                  }
-                },
-              }
-            },
-          },
-          {
-            type: "oauth",
-            label: `${SHORT} 密码登录`,
-            prompts: [
-              {
-                type: "text",
-                key: "phone",
-                message: "手机号",
-                placeholder: "13800138000",
-                validate: (v) =>
-                  /^\d{6,15}$/.test(String(v || "").replace(/\D/g, "")) ? undefined : "只要数字",
-              },
-              {
-                type: "password",
-                key: "password",
-                message: "密码（网页「密码登录」那个，不是验证码）",
-              },
-              {
-                type: "select",
-                key: "stateCode",
-                message: "区号",
-                options: STATE_CODES,
-              },
-            ],
-
-            async authorize(inputs) {
-              // ⚠ 这里必须立刻返回，真正等结果的是 callback
-              const phone = String(inputs?.phone || "").replace(/\D/g, "")
-              const password = String(inputs?.password || "")
-              const stateCode = String(inputs?.stateCode || (SITE.id === "magicrew" ? "+86" : "+1"))
-              // 滚动的邀请码：上一次登录记下的那个，没有就用作者码
-              const inviteCode = inviteToUse(SITE.id)
-
-              const result = (async () => {
-                const { token, organizationCode, raw } = await login({
-                  phone,
-                  password,
-                  stateCode,
-                  host: SITE.host,
-                  inviteCode,
-                })
-                const key = await issueGatewayKey(token, organizationCode, SITE.host)
-                return { token, organizationCode, key, raw, inviteCode }
-              })()
-
-              return {
-                url: inviteCode
-                  ? `${SITE.web}/login?invitation=${encodeURIComponent(inviteCode)}`
-                  : `${SITE.web}/login`,
-                instructions: `正在用手机号+密码登录…${inviteCode ? `（邀请码 ${inviteCode}）` : ""}`,
-                method: "auto",
-                // ⚠ 不传 opened：这个页面是 magpie 去开的。传 true = 「我已经开过了，你别开」，
-                //   结果就是「点了登录没弹网页」。HOOKS.md 陷阱 3。
-                async callback() {
-                  let r
-                  try {
-                    r = await result
-                  } catch (e) {
-                    return { type: "failed", error: String(e?.message ?? e) }
-                  }
-                  if (!r) return { type: "failed", error: "登录超时" }
-                  writeSession(SITE.id, r.token, r.organizationCode)
-                  // 把这个账号自己的邀请码滚上去，下次登录就用它。
-                  // 拿不到不算错（网页那把 JWT 调不了这个接口）—— 保留旧值，不挡登录。
-                  rollInvite(SITE.id, r.token, r.organizationCode, SITE.host).catch(() => {})
-                  return {
-                    type: "success",
-                    access: r.key.apiKey,
-                    refresh: r.key.refreshToken,
-                    expires: Date.now() + 2 * 3600_000,
-                    accountId: phone,
-                    uid: String(r.raw?.magic_id || r.raw?.userId || r.raw?.user_id || phone),
-                    // 额外字段：models / usage / checkin 要用网页 JWT，mgw key 调不动业务接口
-                    jwt: r.token,
-                    org: r.organizationCode,
                   }
                 },
               }
@@ -604,12 +558,14 @@ function makePlugin(SITE) {
                   writeSession(SITE.id, jwt, org)
                   // 滚邀请码（网页那把 JWT 多半滚不动，滚不动就保留旧值）
                   rollInvite(SITE.id, jwt, org, SITE.host).catch(() => {})
+                  // 卡片上显示昵称而不是组织码；取不到就退回组织码
+                  const who = await fetchWho(jwt, org, SITE.host).catch(() => null)
                   return {
                     type: "success",
                     access: r.apiKey,
                     refresh: r.refreshToken,
                     expires: Date.now() + 2 * 3600_000,
-                    accountId: org,
+                    accountId: who?.name || org,
                     uid: org,
                     jwt,
                     org,
