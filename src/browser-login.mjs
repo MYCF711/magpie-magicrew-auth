@@ -76,36 +76,139 @@ export function sweepProfiles({ maxAgeMs = 2 * 3600_000 } = {}) {
   return removed
 }
 
-/** 按平台找浏览器；找不到返回 null，调用方降级 */
-export function findBrowser() {
-  const plat = process.platform
-  const candidates =
-    plat === "win32"
-      ? [
-          "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-          "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-          "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-          join(process.env.LOCALAPPDATA || "", "Google\\Chrome\\Application\\chrome.exe"),
-          "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-        ]
-      : plat === "darwin"
-        ? [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-          ]
-        : [
-            "/usr/bin/google-chrome",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/microsoft-edge",
-            "/snap/bin/chromium",
-          ]
-  for (const p of candidates) {
+/**
+ * 候选浏览器表 —— 按平台给，**按优先级排**。
+ *
+ * ⚠ 顺序有意义：靠前的先试。选序的道理不是「谁更有名」，而是
+ *   **谁更干净、更不会被系统策略拦住调试端口**：
+ *
+ *     ① Chrome / Chromium   自己装的，没有企业策略、没有强制登录、没有侧边栏
+ *     ② 国产 Chromium 系    用户日常在用的那个，CDP 实测一样能用
+ *     ③ Edge                Windows 自带，**放最后**：
+ *                          · 企业/组策略常禁用远程调试，起不来的概率最高
+ *                          · 会被系统账号强制接管、带侧边栏与首次运行引导
+ *                          · 用户明确反馈「讨厌 Edge」，没有理由优先选它
+ *
+ *   实测（2026-10-28，本机）：
+ *     Chromium 154.0.8037.93 (scoop)  起 CDP 650ms，页面就绪 ~2s，读凭据正常
+ *     Edge     122.0.2365.106         同上可用，但按上面的理由排在后面
+ *     360ChromeX (Chrome 132 内核)    同上可用
+ *
+ * ⚠⚠ Edge 这里曾经还有一个真 bug：写死的文件名是 `msedge.exe`，
+ *   而微软在 Windows 上实际落盘的是 **`Microsoft Edge.exe`**（带空格、带大写）。
+ *   于是 existsSync 一路 miss → findBrowser() 返回 null → 永远走「降级」：
+ *   系统浏览器打开 + 让用户去 Console 粘一行。用户看到的现象就是
+ *   **「网页已经登好、跳到 agent 界面了，magpie 里还在转圈等」**。
+ *   判据在 ~/.cache/magpie/magicrew-login-<site>.log：
+ *       launch: 本机没找到 Chrome / Edge / Bravo / Chromium
+ *
+ *   ⇒ 两个名字都留着（不同安装方式/版本落盘的名字不一样），谁在就用谁。
+ *
+ * @param {string} [platform] 默认 process.platform（测试注入用）
+ * @param {Record<string,string>} [env] 默认 process.env（测试注入用）
+ * @returns {{name:string, path:string}[]}
+ */
+export function browserCandidates(platform = process.platform, env = process.env) {
+  const e = env || {}
+  if (platform === "win32") {
+    const local = e.LOCALAPPDATA || ""
+    const roaming = e.APPDATA || ""
+    const home = e.USERPROFILE || e.HOME || ""
+    const pf = e.PROGRAMFILES || "C:\\Program Files"
+    const pf86 = e["PROGRAMFILES(X86)"] || e["ProgramFiles(x86)"] || "C:\\Program Files (x86)"
+    /** 一个浏览器常有 64/32 位两个安装根，按序都给 */
+    const under = (root, rest) => `${root}\\${rest}`
+
+    return [
+      // ═══ ① Chrome / Chromium —— 首选：纯净、没策略、没强制登录 ═══════
+      { name: "Chrome", path: under(pf, "Google\\Chrome\\Application\\chrome.exe") },
+      { name: "Chrome", path: under(pf86, "Google\\Chrome\\Application\\chrome.exe") },
+      { name: "Chrome", path: under(local, "Google\\Chrome\\Application\\chrome.exe") },
+
+      // Chromium：scoop 安装的（本机就是这个，154 版，实测最顺）
+      { name: "Chromium", path: under(home, "scoop\\apps\\chromium\\current\\chrome.exe") },
+      { name: "Chromium", path: under(local, "Chromium\\Application\\chrome.exe") },
+      { name: "Chromium", path: under(pf, "Chromium\\Application\\chrome.exe") },
+      { name: "Chromium", path: under(pf86, "Chromium\\Application\\chrome.exe") },
+      // 便携版常见的解压目录
+      { name: "Chromium", path: under(home, "Chromium\\chrome.exe") },
+
+      { name: "Brave", path: under(pf, "BraveSoftware\\Brave-Browser\\Application\\brave.exe") },
+      { name: "Brave", path: under(pf86, "BraveSoftware\\Brave-Browser\\Application\\brave.exe") },
+      { name: "Brave", path: under(local, "BraveSoftware\\Brave-Browser\\Application\\brave.exe") },
+
+      { name: "Vivaldi", path: under(local, "Vivaldi\\Application\\vivaldi.exe") },
+      { name: "Vivaldi", path: under(pf, "Vivaldi\\Application\\vivaldi.exe") },
+      { name: "Opera", path: under(local, "Programs\\Opera\\opera.exe") },
+      { name: "Opera", path: under(roaming, "Opera Software\\Opera Stable\\opera.exe") },
+
+      // ═══ ② 国产 Chromium 系（都是 Chromium 内核，CDP 一样能用）═════
+      // 360 极速浏览器 X —— 实测 Chrome 132 内核，CDP 完全可用
+      { name: "360极速浏览器X", path: under(local, "360ChromeX\\Chrome\\Application\\360ChromeX.exe") },
+      { name: "360浏览器", path: under(local, "360Chrome\\Chrome\\Application\\360chrome.exe") },
+      { name: "360浏览器", path: under(local, "360Chrome\\Chrome\\Application\\360Chrome.exe") },
+      { name: "360安全浏览器", path: under(roaming, "secoresdk\\360se6\\Application\\360se.exe") },
+      { name: "360安全浏览器", path: under(local, "360se\\Application\\360se.exe") },
+      { name: "QQ浏览器", path: under(local, "Tencent\\QQBrowser\\Application\\QQBrowser.exe") },
+      { name: "QQ浏览器", path: under(pf, "Tencent\\QQBrowser\\QQBrowser.exe") },
+      { name: "搜狗浏览器", path: under(local, "SogouExplorer\\SogouExplorer.exe") },
+      { name: "搜狗浏览器", path: under(pf, "SogouExplorer\\SogouExplorer.exe") },
+      { name: "2345浏览器", path: under(local, "2345Explorer\\2345Explorer.exe") },
+      { name: "猎豹浏览器", path: under(local, "liebao\\liebao.exe") },
+      { name: "傲游浏览器", path: under(roaming, "Maxthon3\\Bin\\Maxthon.exe") },
+      { name: "UC浏览器", path: under(local, "UCBrowser\\Application\\UCBrowser.exe") },
+      { name: "夸克浏览器", path: under(local, "Quark\\Quark.exe") },
+
+      // ═══ ③ Edge —— 最后：策略最多、最容易被拦住、用户也最不想用它 ═══
+      // ⚠ 真实文件名是 "Microsoft Edge.exe"；msedge.exe 也留着以防别的装法
+      { name: "Edge", path: under(pf86, "Microsoft\\Edge\\Application\\Microsoft Edge.exe") },
+      { name: "Edge", path: under(pf, "Microsoft\\Edge\\Application\\Microsoft Edge.exe") },
+      { name: "Edge", path: under(pf86, "Microsoft\\Edge\\Application\\msedge.exe") },
+      { name: "Edge", path: under(pf, "Microsoft\\Edge\\Application\\msedge.exe") },
+    ]
+  }
+
+  if (platform === "darwin") {
+    const h = e.HOME || ""
+    return [
+      { name: "Chrome", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" },
+      { name: "Chromium", path: "/Applications/Chromium.app/Contents/MacOS/Chromium" },
+      { name: "Brave", path: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser" },
+      { name: "Vivaldi", path: "/Applications/Vivaldi.app/Contents/MacOS/Vivaldi" },
+      { name: "Chrome", path: `${h}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` },
+      { name: "Chromium", path: `${h}/Applications/Chromium.app/Contents/MacOS/Chromium` },
+      { name: "Brave", path: `${h}/Applications/Brave Browser.app/Contents/MacOS/Brave Browser` },
+      // Edge 同样放最后
+      { name: "Edge", path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" },
+      { name: "Edge", path: `${h}/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge` },
+    ]
+  }
+
+  return [
+    { name: "Chrome", path: "/usr/bin/google-chrome" },
+    { name: "Chrome", path: "/usr/bin/google-chrome-stable" },
+    { name: "Chromium", path: "/usr/bin/chromium" },
+    { name: "Chromium", path: "/usr/bin/chromium-browser" },
+    { name: "Chromium", path: "/snap/bin/chromium" },
+    { name: "Brave", path: "/usr/bin/brave-browser" },
+    { name: "Vivaldi", path: "/usr/bin/vivaldi" },
+    // Edge 同样放最后
+    { name: "Edge", path: "/usr/bin/microsoft-edge" },
+    { name: "Edge", path: "/usr/bin/microsoft-edge-stable" },
+  ]
+}
+
+/**
+ * 挑一个**真实存在**的浏览器；一个都没有返回 null（调用方降级）。
+ *
+ * `candidates` 只在测试里注入；生产走 browserCandidates()。
+ * @returns {{name:string, path:string} | null}
+ */
+export function findBrowser({ candidates } = {}) {
+  const list = candidates ?? browserCandidates()
+  for (const c of list) {
     try {
-      if (p && existsSync(p)) return p
+      if (c?.path && existsSync(c.path)) return c
     } catch {}
   }
   return null
@@ -115,8 +218,11 @@ export function findBrowser() {
  * 等 Chromium 把 DevToolsActivePort 写出来。
  * 文件两行：第一行端口，第二行 ws 路径。`--remote-debugging-port=0` 让系统挑端口，
  * 避免和已有的调试端口撞车。
+ *
+ * @param {() => boolean} [aborted] 返回 true 就立刻放弃（比如进程已经退出了），
+ *        免得为一个死掉的进程白等满 8 秒
  */
-async function waitPort(dir, timeoutMs = 8_000) {
+async function waitPort(dir, timeoutMs = 8_000, aborted = null) {
   const f = join(dir, "DevToolsActivePort")
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -125,6 +231,16 @@ async function waitPort(dir, timeoutMs = 8_000) {
       const port = Number(line)
       if (port > 0) return port
     } catch {}
+    // 文件还没出现时先看进程是不是已经死了 —— 死了就没必要再等
+    if (aborted?.()) {
+      // 再给一次机会：进程退出瞬间可能刚好写完
+      try {
+        const line = readFileSync(f, "utf8").split("\n")[0].trim()
+        const port = Number(line)
+        if (port > 0) return port
+      } catch {}
+      return 0
+    }
     await new Promise((r) => setTimeout(r, 250))
   }
   return 0
@@ -132,15 +248,59 @@ async function waitPort(dir, timeoutMs = 8_000) {
 
 /**
  * 拉起浏览器并打开登录页。
- * @returns {Promise<{port:number, dir:string, child:import("node:child_process").ChildProcess} | null>}
+ *
+ * ⚠ **逐个候选试，不是找到第一个存在的就认定它能用。**
+ *
+ *   候选表里装了 ≠ 能起 CDP：可能是别的内核、可能被策略禁用调试端口、
+ *   可能启动就崩。老实现只挑「第一个 existsSync 为 true 的」，
+ *   一旦它起不来就是彻底失败（用户看到的还是「一直等」）。
+ *
+ *   现在：存在的一个个试，**第一个真写出 DevToolsActivePort 的**才算数。
+ *   全都不行才抛错 —— 抛的错里带上每个候选失败的原因，排障不用猜。
+ *
+ * @param {string} url
+ * @param {{candidates?: {name:string,path:string}[]}} [opts] 测试注入用
+ * @returns {Promise<{port:number, dir:string, child:import("node:child_process").ChildProcess, name:string, exe:string}>}
  */
-export async function launchLoginBrowser(url) {
-  const exe = findBrowser()
-  if (!exe) throw new Error("本机没找到 Chrome / Edge / Bravo / Chromium")
+export async function launchLoginBrowser(url, { candidates } = {}) {
+  const list = (candidates ?? browserCandidates()).filter((c) => {
+    try {
+      return c?.path && existsSync(c.path)
+    } catch {
+      return false
+    }
+  })
+  if (!list.length) {
+    throw new Error("本机没找到 Chrome / Edge / 360 / QQ 等 Chromium 内核浏览器")
+  }
 
-  // 先扫掉上一次登录留下的临时 profile（含历史复用目录），再开一个全新的
+  // 先扫掉上一次登录留下的临时 profile（含历史复用目录）—— 只做一次
   sweepProfiles()
+
+  const failures = []
+  for (const cand of list) {
+    let session = null
+    try {
+      session = await launchOne(cand, url)
+      return session
+    } catch (e) {
+      failures.push(`${cand.name}：${String(e?.message ?? e).slice(0, 160)}`)
+      // launchOne 自己已经收拾过失败的进程和目录，这里只管继续试下一个
+    }
+  }
+
+  throw new Error(
+    `试过 ${list.length} 个浏览器都没能打开调试通道：\n` + failures.map((f) => `  · ${f}`).join("\n"),
+  )
+}
+
+/**
+ * 用**指定**的一个浏览器起一次登录窗口。
+ * 失败时保证：进程已杀、目录已删（不会给后面留垃圾）。
+ */
+async function launchOne(cand, url) {
   const dir = newProfileDir()
+
   // ⚠ 残留会让这次「看起来起来了、其实什么都没做」—— 一次性目录里通常没有，
   //   但 sweep 失败、或目录被复用时它们就是根因，清一遍几乎不花钱：
   //   DevToolsActivePort  —— 不清掉，waitPort 会立刻返回一个已失效的旧端口
@@ -157,7 +317,7 @@ export async function launchLoginBrowser(url) {
   let child
   try {
     child = spawn(
-      exe,
+      cand.path,
       [
         `--user-data-dir=${dir}`,
         "--remote-debugging-port=0",
@@ -167,23 +327,43 @@ export async function launchLoginBrowser(url) {
         "--disable-background-networking",
         url,
       ],
+      // 某些国产浏览器不接受部分参数会直接退出，stdio 必须 ignore，
+      // 否则它往 stdout 写的吐槽会污染 magpie 的日志
       { stdio: "ignore", detached: false, windowsHide: false },
     )
   } catch (e) {
-    throw new Error(`浏览器启动失败：${e?.message ?? e}`)
+    await cleanupFailed({ dir })
+    throw new Error(`进程起不来：${e?.message ?? e}`)
   }
 
-  const port = await waitPort(dir)
+  // 进程若直接退出（参数不认 / 已被别的实例接管），waitPort 会白等 8 秒。
+  // 监听 exit 提前退出等待，把真实原因带回去。
+  let exited = null
+  child?.on?.("exit", (code) => {
+    exited = code
+  })
+
+  const port = await waitPort(dir, 8_000, () => exited !== null)
   if (!port) {
-    try {
-      child.kill()
-    } catch {}
-    try {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
-    } catch {}
-    throw new Error("浏览器进程起来了，但 8 秒内没写出调试端口 DevToolsActivePort（多半是 profile 被一个已退出的实例占着）")
+    await cleanupFailed({ dir, child })
+    throw new Error(
+      exited !== null
+        ? `进程启动后退出了（code ${exited}），没写出调试端口`
+        : "8 秒内没写出调试端口 DevToolsActivePort",
+    )
   }
-  return { port, dir, child }
+  return { port, dir, child, name: cand.name, exe: cand.path }
+}
+
+/** 失败收尾：杀进程 + 删目录，都不抛错 */
+async function cleanupFailed({ dir, child }) {
+  try {
+    child?.kill()
+  } catch {}
+  if (!dir) return
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
+  } catch {}
 }
 
 // ── 最小 CDP 客户端 ───────────────────────────────────────────────────

@@ -126,8 +126,8 @@ export function makeMethods(c) {
           url,
           ...(session ? { opened: true } : {}),
           instructions: session
-            ? "浏览器已打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。"
-            : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chrome / Edge）"}，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
+            ? `已用 ${session.name || "浏览器"} 打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。`
+            : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chrome / Edge / 360 等 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
           method: "auto",
           async callback() {
             let got = null
