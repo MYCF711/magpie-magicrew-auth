@@ -22,9 +22,10 @@
 - **模型跟着账号走** —— 每次登录后按 `/api/v1/flows/models` 实时拉，账户当前能选什么就展示什么，生图和 embedding 不会混进来
 - **积分算得准** —— 余额读的是 `/api/v1/quota/points/total`；空号就显示空，不会被优先派活
 - **登录一次管 30 天** —— 网页 JWT 顶 30 天，`mgw_` api_key 每 2 小时自续，refresh_token 每次续期时自滚
-- **两种登录方式** —— 手机号+密码走 API；或者从浏览器复制 JWT + 组织码（国际站现在走这条更稳）
+- **点一下就在浏览器里登** —— 第一个登录方法不带任何输入框，直接开官方登录页；官方页有什么方式就用什么（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉）
+- **登录方式还有两条备选** —— 手机号+密码走 API；或者直接粘 JWT + 组织码
 - **新手奖励自动领** —— 国内站 8 项里 7 项 PUT 即到账，每天跑一次幂等
-- **注册邀请码可选** —— 默认带作者邀请码，可以关，也可以换成自己的（真去调接口取，取不到就报错）
+- **邀请码自动滚** —— 第一次注册带作者的码，之后每次登录都记住「上一个登录账号」的码，拿到新的就覆盖旧的
 
 ---
 
@@ -59,11 +60,24 @@
 
 ## 邀请码
 
-注册时默认带作者的邀请码，可以关。
+只一条规则，不需要你选任何东西：
 
-「用我自己的邀请码」会把真的接口跑一次（`GET /api/v1/invitations/info`），拿到就用拿到的，拿不到就报错，不猜。
+```
+① 固定位置有记录 → 用记录里那个
+② 没有记录     → 用作者的码
+③ 登录成功后   → 查这个账号自己的码 → 覆盖写回
+```
 
-> 那个接口只认**客户端登录**签的 JWT。网页 localStorage 里那把调过去回 `{"code":2155,"message":"用户不存在"}` —— 两把都是同一账号签的，差别在 payload 里带不带用户字段。所以「用自己的」用的是本插件上次登录成功时存下的那把 JWT；从没登录过就选这项，会得到一句明确的报错。
+效果：第一次注册带作者的码，之后每次都用「上一个登录成功的账号」的码，一路滚下去。
+
+固定位置：
+
+```
+~/.cache/magpie/magicrew-invite-<站点 id>.json      {"code":"...","at":"..."}
+```
+
+> ③ 不是每次都能成。`/api/v1/invitations/info` 只认带 `device_id` 的 JWT —— 同一个账号同一时刻签的两把，差别就在这一个字段：桌面客户端 438 字符（`device_id` = 64 位 hex）能拿到码，网页版 350 字符（`device_id` 空）回 `2155 用户不存在`。
+> 密码登录走 API、带 device 指纹，滚得动；浏览器登录拿到的是网页那把，滚不动 —— 那就保留旧值，不报错、不挡登录。
 
 奖励口径（上游前端常量，2026-10-27）：
 
@@ -78,7 +92,23 @@
 
 在 magpie 的 **插件 → 发现** 搜 `magpie-magicrew-auth`，点**安装**。
 
-装完先选**站点**，再选登录方式。国际站建议直接走「登录态（JWT + 组织码）」：
+装完选站点，然后**点第一个「浏览器登录」** —— 不带输入框，直接开官方登录页：
+
+1. 用你平时的方式登进去（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉都行）
+2. 登录完成后回到那个页面，F12 → Console，粘这一行回车：
+
+```js
+copy(JSON.stringify({jwt:(()=>{try{return JSON.parse(localStorage["MAGIC:user:authorization"]).value}catch{return localStorage["MAGIC:user:authorization"]}})(),org:(()=>{try{return JSON.parse(localStorage["MAGIC:user:organizationCode"]).value}catch{return localStorage["MAGIC:user:organizationCode"]}})()}))
+```
+
+3. 插件自己从剪贴板读走，读到就完成 —— 不用回来点任何按钮
+
+> **为什么不能像别的插件那样纯自动？** 因为 magicrew 没有那条通道。它的登录类型只有 13 种、全是「拿凭据换 token」，没有设备码、没有插件授权、没有一次性 ticket；也没有 WorkBuddy 那种 `/v2/plugin/auth/state` + `/v2/plugin/auth/token` 协议。网页登录成功后 token 只在 `www.magicrew.ai` 的 localStorage 里，插件读不到别的源的存储。所以最短路径就是「开官方页 + 把结果送进剪贴板」。
+
+不想碰 Console 的话，另外两条：
+
+- **密码登录** —— 手机号 + 密码 + 区号，走 API，全程在 magpie 里
+- **登录态（JWT + 组织码）** —— 手填两个字段：
 
 ```
 DevTools → Application → Local Storage → https://www.magicrew.ai
