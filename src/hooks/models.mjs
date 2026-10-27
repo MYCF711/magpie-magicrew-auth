@@ -9,9 +9,16 @@
 //
 // 登录态失效 → 抛带 signIn: "expired" 的错误。
 
-import { fetchModels } from "../api.mjs"
+import { fetchModels, fetchModelPoints } from "../api.mjs"
 import { modelEntry } from "../context.mjs"
 import { readSnapshot, writeSnapshot } from "../store.mjs"
+
+// 倍率系数：input_points / 2000 与网站实测值吻合
+//   Qwen3.5 Flash  20   → 0.01  (网站 0.01) ✓
+//   Qwen3.8 Flash  100  → 0.05  (网站 0.05) ✓
+//   Qwen3.7 Plus   200  → 0.10  (网站 0.10) ✓
+//   Qwen3.8 Max   1200  → 0.60  (网站 0.56)
+const MULT_BASE = 2000
 
 export function makeModels(c) {
   return async (provider, { auth } = {}) => {
@@ -22,8 +29,32 @@ export function makeModels(c) {
       const live = await fetchModels(auth.jwt, auth.org, c.host)
       if (!live.length) return snapshot ?? {}
 
+      // 计费信息拿不到就退回原名，不挡列表
+      const points = await fetchModelPoints(auth.jwt, auth.org, live.map((m) => m.id), c.host).catch(() => ({}))
+      const pointsOk = Object.keys(points).length > 0
+
       const out = {}
-      for (const m of live) out[m.id] = modelEntry(c, m.id, m.name, m.vision)
+      for (const m of live) {
+        // VIP / 锁定的模型不列 —— 选中会报错，插件注释里那条铁律
+        // （语言模型这批实测 tags 全是 `Magic`，没有 VIP；VIP 只出现在
+        //  网站的「生图模型 / 视频模型」里，那两个接口不在本插件范围内）
+        const locked = (m.tags || []).some((t) => /vip|lock|pay|premium/i.test(String(t?.value ?? "")))
+        if (locked) continue
+
+        const p = points[m.id] || {}
+        const hasPoints = p.inputPoints != null && Number(p.inputPoints) > 0
+        // 计费接口整体成功、但这条没价格 → 不列。
+        // 不填 rate 就不会画倍率胶囊（正确），但也别让它出现在列表里 ——
+        // 用户选了不知道花多少。接口整体失败时不过滤，免得列表空掉。
+        if (pointsOk && !hasPoints) continue
+
+        // name 保持干净，倍率走 magpie 自己的 `rate` 字段 → 渲染成灰色胶囊。
+        // （之前试过拼进 name、也试过塞进 cost，都不对：抓 codearts 插件的
+        //   modelOf 才看到宿主认的是 rate / free 这两个字段）
+        out[m.id] = modelEntry(c, m.id, m.name, m.vision, {
+          rate: hasPoints ? Number(p.inputPoints) / MULT_BASE : 0,
+        })
+      }
       writeSnapshot(c.id, out)
       return out
     } catch (e) {
@@ -35,3 +66,4 @@ export function makeModels(c) {
     }
   }
 }
+

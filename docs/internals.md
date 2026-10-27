@@ -693,8 +693,27 @@ mgw_8f9a…（18:14 又一次续期换的）       → 网关请求 HTTP 200 正
                └─ src/hooks/refresh.mjs 直接调 api.refreshGatewayKey(auth.refresh)
                   ⚠ 不经过 keys.mjs，也不读 key-store
 
-每天一次     checkin → runCheckin()         ← 只领积分 / 任务，**不碰 key**
+每天一次     checkin → runCheckin()         ← 领积分 / 补首任务 / 新手福利，**不碰 key**
 ```
+
+### checkin 现在做四件事（0.3.11 起）
+
+```
+① POST /api/v1/login-gift          领每日登录积分（国内 +200、国际 +50；当天已领回 granted:false，幂等）
+② 首任务 / 首对话没做过 → 走 Socket.IO 发一条消息（纯 Node，不开浏览器）
+     国内站：onboarding 的 first_ai_work 还是 PENDING → 建话题 + 发一条，轮询等 COMPLETED
+     国际站：onboarding 恒返回空任务 → 改看「有没有工作台项目」，一个都没有才发
+③ 其余新手福利 → PUT /api/v1/onboarding/tasks/<code>/completion
+④ 报积分变化
+```
+
+② 是唯一有外部副作用的动作：会建项目 / 话题、真花一次模型积分（挑最便宜的模型）。
+所以有一道闸门 —— 每账号每天最多一次，落在
+`~/.cache/magpie/magicrew-autochat-<siteId>.json`（`siteId` 取 `magicrew` / `magicrew-intl`），
+内容是 `{ [org]: "YYYY-MM-DD" }`，按北京时间算日期，**发送成功才写**；失败不写，留给下一次。
+
+怎么发的（协议帧、三个 id 从哪来、为什么不用浏览器）见 `src/chat-task.mjs` 顶部注释。
+key 依然一个都不碰。
 
 ### ⚠ 更正（2026-10-27）：checkin 并不续 key
 
