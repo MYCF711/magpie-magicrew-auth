@@ -2,11 +2,14 @@
 
 ## 0.3.1
 
-- **修流式请求被 magpie 判为「没结束」**：`Stream ended without finish_reason` → 重试 → 499 中断
-  - 成因：magicrew 在 `stream: true` 下**默认不返回 usage**；magpie 新版靠 `[DONE]` 前那条
-    `{"choices":[],"usage":{...}}` 收尾 chunk 判定流正常结束，缺了就重试
-  - 修法：流式请求自动补 `stream_options: { include_usage: true }`（upstream 支持，实测有效）
+- **流式请求补 `stream_options: { include_usage: true }`**（防御性）
+  - magicrew 在 `stream: true` 下默认不返回 usage；补上之后 `[DONE]` 前会多一条
+    `{"choices":[],"usage":{...}}` 的收尾 chunk，流更完整，下游判定"结束了"更有把握
   - 实测：补之前 `usage=无`，补之后 `finish_reason=stop · usage=有 · 收尾chunk=true · [DONE]=true`
+
+> ⚠ `Stream ended without finish_reason` 的真正根因**不是流式**，而是下面这条
+> 「签新 key 会吊销旧 key」—— 见 docs/internals.md 第十三节。这一项留着是因为
+> 它让流更完整，不是因为它是那个报错的解药。
 
 ## 0.3.0
 

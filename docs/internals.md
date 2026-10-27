@@ -537,3 +537,51 @@ finish_reason=stop | usage=有 | 收尾chunk=true | [DONE]=true
 
 ⚠ 这个坑的判据是「看流里有没有那条 choices 为空的收尾」，不是「看 finish_reason 在不在」——
 后者一直在，容易误判成上游的问题。
+
+---
+
+## 十三、签新 key 会吊销旧 key —— 别随便签
+
+**这是 `Stream ended without finish_reason` 的真正根因**（第十二节记的是排查过程中顺手补的防御项）。
+
+### 现象
+
+- agent 里反复 `Stream ended without finish_reason`，重试，用户终止 → magpie 记 `499`
+- magpie 里 provider 显示「已登录」，模型列表也正常
+- 但插件拿 `access` 去打上游，回 `{"code":403,"message":"token无效"}`
+
+### 根因
+
+`POST /api/v1/model-gateway/tokens` **一个账号只保留一把 `mgw_` key，签新的就把旧的顶掉**。
+排查过程中反复签 key 验证接口，每签一次就让 magpie 存的那把失效一次 —— 于是
+`plugin-auth.json` 里的 `access` 还在（`expires` 甚至没到期），但它已经不被上游承认了。
+
+链路因此变成：插件用死 key → 上游 403 → magpie 把 `{"code":403,...}` 这个 **JSON** 回给 agent
+→ agent 读流读到非 SSE 内容 → 判 `Stream ended without finish_reason` → 重试。
+
+**那个报错是 403 的下游症状，不是流式的问题。** 判据：看插件发出的请求上游回什么，
+而不是盯着流里有没有 `finish_reason`。
+
+### 修法
+
+用 `refresh_token` 换一把新的，写回 `plugin-auth.json`（magpie 直接读文件，**不用重启**）：
+
+```bash
+curl -X PUT <host>/api/v1/model-gateway/tokens \
+  -H 'content-type: application/json' \
+  -d '{"refresh_token":"<plugin-auth.json 里的 refresh>"}'
+```
+
+⚠ **body 只能有 `refresh_token` 这一个字段**。塞别的（或用 authorization 头发）会回：
+
+```
+{"code":5003,"message":"Request body must only contain refresh_token"}
+```
+
+换出来的 `api_key` 立刻可用，同时**又会吊销上一把** —— 所以换完要立刻写回，别在中途用二次。
+
+### 教训
+
+- **调试期间不要反复签 key**。要看接口通不通，用**已有的** `access` 打；真要签，签完立刻写回。
+- `expires` 没到期 ≠ key 有效。这个网关的吊销是**服务端即时**的，本地那个时间戳只是"理论到期"。
+- 排查上游问题时，**先看上游的原始响应**，再看下游报什么 —— 下游的报错经常是上游错误的二次加工。
