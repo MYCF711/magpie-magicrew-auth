@@ -43,6 +43,10 @@ import { ICON_BY_SITE } from "./src/icons.mjs"
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
+import { execFile as execFileCb } from "node:child_process"
+import { promisify } from "node:util"
+
+const execFile = promisify(execFileCb)
 
 const COMMUNITY_ENTRY = {
   package: "magpie-magicrew-auth",
@@ -100,17 +104,23 @@ function writeSnapshot(siteId, models) {
   } catch {}
 }
 
-// ═══ 邀请码：作者码默认开，可以关，也可以换成自己的 ═══════════════════
+// ═══ 邀请码：滚动的，就一条规则 ═══════════════════════════════════════
 //
-// 两件事分开：
+//   ① 固定位置有记录 → 用记录里那个
+//   ② 没有记录     → 用作者码
+//   ③ 登录成功后   → 查这个账号自己的邀请码 → 覆盖写回
 //
-//   ① 作者邀请码 —— 注册时默认带上，给作者记一点积分。纯常量，随时能关。
-//   ② 自己的邀请码 —— 真去调 /api/v1/invitations/info 拿，拿不到就报错。
+// 固定位置：~/.cache/magpie/magicrew-invite-<siteId>.json    { code, at }
 //
-// 为什么 ② 要有「上次登录的 JWT」：那个接口只认客户端登录态签的 JWT
-// （payload 里带用户字段），网页 localStorage 里那把调过去回 2155 用户不存在。
-// 而登录进行中还没拿到新 JWT，所以只能用上一次登录成功时存下的那把。
-// ⇒ 从没登录过就选「用自己的」，得到的是一句明确的报错，不是猜出来的码。
+// 效果：第一次用作者的，之后每次都用「上一个登录成功的账号」的码，一路滚下去。
+//
+// ⚠ ③ 不是每次都能成。/api/v1/invitations/info 只认带 device_id 的 JWT ——
+//   同一个账号、同一时刻签的两把，实测差别就在这一个字段：
+//     桌面客户端  438 字符  cus.device_id = 64 位 hex  → 200 拿到 invite_code
+//     网页版      350 字符  cus.device_id = ""         → 2155 用户不存在
+//   密码登录走 API、会带 device 指纹，签出来的是前者，滚得动；
+//   浏览器登录（剪贴板）拿到的就是网页那把，滚不动 —— 那就保留旧值，
+//   不报错、不挡登录。
 //
 // 奖励口径（上游前端 constants，2026-10-27）：
 //            每次注册   每次订阅   邀请注册封顶   总额封顶
@@ -121,6 +131,47 @@ const AUTHOR_INVITE = {
   magicrew: "",
   // 国际站
   "magicrew-intl": "IV75F0ZKVKXG",
+}
+
+function invitePath(siteId) {
+  return join(homedir(), ".cache", "magpie", `magicrew-invite-${siteId}.json`)
+}
+
+/** 固定位置里存的邀请码；没有就是空串 */
+function readInvite(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(invitePath(siteId), "utf8"))
+    return typeof v?.code === "string" ? v.code.trim() : ""
+  } catch {
+    return ""
+  }
+}
+
+/** 覆盖写 —— 拿到新的就盖掉旧的 */
+function writeInvite(siteId, code) {
+  const c = String(code || "").trim()
+  if (!c) return ""
+  try {
+    const f = invitePath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify({ code: c, at: new Date().toISOString() }))
+  } catch {}
+  return c
+}
+
+/** 这次登录该带的邀请码：记录里的，没有就作者码 */
+function inviteToUse(siteId) {
+  return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
+}
+
+/** 登录成功后把账号自己的邀请码滚上去；拿不到就安静跳过 */
+async function rollInvite(siteId, jwt, org, host) {
+  try {
+    const own = await fetchOwnInviteCode(jwt, org, host)
+    return writeInvite(siteId, own.code)
+  } catch {
+    return ""
+  }
 }
 
 /** 上次登录成功时落盘的 { jwt, org }，只给「自己的邀请码」用 */
@@ -143,6 +194,98 @@ function writeSession(siteId, jwt, org) {
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, JSON.stringify({ jwt, org }))
   } catch {}
+}
+
+// ═══ 浏览器登录：为什么只能「开页面 + 接剪贴板」═══════════════════════
+//
+// 想要的那种「点一下 → 跳官网 → 用 Google / 邮箱 / 手机登 → 插件自己拿到凭证」
+// magicrew **没有这条路**，不是没找到实现方法，是接口不存在：
+//
+//   ① 它的登录类型只有 13 种，全是「拿凭据换 token」的：
+//        phone_password / phone_captcha / email / DingTalk / DingTalkAvoid /
+//        wecom / Lark / LarkRedirect / wechat_official_account / wechat_app /
+//        dingtalk_app / redirect / apple_login / google_login / feishu_oauth
+//      （dtyq/magic `frontend/magic-web/src/types/login.ts` 的 LoginType 枚举，
+//       注释写明「登录方式(与API强绑定，禁止修改)」）
+//      —— 没有设备码、没有插件授权、没有一次性 ticket。
+//
+//   ② WorkBuddy 那种做法在它这里是空的：它没有
+//        POST /v2/plugin/auth/state      （开登录会话）
+//        GET  /v2/plugin/auth/token      （轮询拿 token）
+//      这套 `/plugin/auth/*` 协议。
+//
+//   ③ 也试过 `/api/v1/auth/status`、`/api/v1/auth/environment`、
+//      `/api/v1/aggregation/login-data` —— status 要 authorization（3103），
+//      environment 回 `{"login_code":null}` 且没有配套的兑现接口。
+//
+//   ④ 网页登录成功后 token 只在 www.magicrew.ai 的 localStorage 里，
+//      插件读不到别的源的存储；`redirect` 字段也不能收任意回调地址。
+//
+// ⇒ 所以能做的最短路径是：**用系统浏览器打开官方登录页（官方登录方式一样不少），
+//   登录完粘一行 Console 命令把两个值送进剪贴板，插件自己读回来。**
+//   用户不用在 magpie 里输手机号密码，也不用去 DevTools 里翻两个字段。
+//
+// 剪贴板读法（三平台）：
+//   win32   powershell Get-Clipboard -Raw
+//   darwin  pbpaste
+//   linux   xclip -selection clipboard -o
+const CLIP_HINT = [
+  "浏览器已打开官方登录页 —— 用你平时的方式登进去（Google / 邮箱 / 手机号都行）。",
+  "登录完成后回到那个页面按 F12 → Console，粘这一行回车：",
+  `copy(JSON.stringify({jwt:(()=>{try{return JSON.parse(localStorage["MAGIC:user:authorization"]).value}catch{return localStorage["MAGIC:user:authorization"]}})(),org:(()=>{try{return JSON.parse(localStorage["MAGIC:user:organizationCode"]).value}catch{return localStorage["MAGIC:user:organizationCode"]}})()}))`,
+  "插件会自己从剪贴板读，读到就完成 —— 不用回来点任何按钮。",
+].join("\n")
+
+async function clipboardText() {
+  try {
+    const { stdout } = await execFile(CLIP_CMD[process.platform]?.[0] ?? "true", CLIP_CMD[process.platform]?.slice(1) ?? [], {
+      timeout: 6000,
+      windowsHide: true,
+      maxBuffer: 1 << 20,
+    })
+    return String(stdout ?? "")
+  } catch {
+    return ""
+  }
+}
+
+const CLIP_CMD = {
+  win32: ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"],
+  darwin: ["pbpaste"],
+  linux: ["xclip", "-selection", "clipboard", "-o"],
+}
+
+/** 剪贴板里的内容 → { jwt, org }，认不出返回 null */
+function parseCreds(txt) {
+  const s = String(txt || "").trim()
+  if (!s) return null
+  // ① Console 那行给的 JSON
+  try {
+    const o = JSON.parse(s)
+    if (typeof o?.jwt === "string" && o.jwt.startsWith("eyJ")) {
+      return { jwt: o.jwt, org: String(o?.org || "").trim() }
+    }
+  } catch {}
+  // ② 只粘了 JWT（组织码空着，后面会报错让人补）
+  if (s.startsWith("eyJ") && s.split(".").length === 3) return { jwt: s, org: "" }
+  return null
+}
+
+/**
+ * 盯着剪贴板，直到出现能认的凭证。
+ * @param skip 打开登录页之前剪贴板里就有的内容 —— 不能拿它当结果
+ */
+async function pollClipboard({ skip = "", timeout = 300_000, interval = 1500 } = {}) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    const txt = (await clipboardText()).trim()
+    if (txt && txt !== skip) {
+      const got = parseCreds(txt)
+      if (got) return got
+    }
+    await new Promise((r) => setTimeout(r, interval))
+  }
+  return null
 }
 
 // ═══ 站点差异 ═════════════════════════════════════════════════════════
@@ -232,6 +375,58 @@ function makePlugin(SITE) {
         // ═══ ② 登录 ═══════════════════════════════════════════════════
         methods: [
           {
+            // ═══ ① 浏览器登录（推荐）═══════════════════════════════════════
+            //
+            // 点一下就用系统浏览器打开官方登录页 —— 手机号 / 密码 / Google /
+            // 邮箱验证码 / 飞书 / 钉钉，官方页面有什么就能用什么，插件不掺和。
+            // 登录完粘一行 Console 命令，值进剪贴板，插件自己读回来。
+            type: "oauth",
+            label: `${SHORT} 浏览器登录`,
+            async authorize() {
+              // ⚠ 不能 await：读剪贴板要起 powershell，几百毫秒；authorize 必须立刻返回。
+              //   把「打开页面前的剪贴板」作为 promise 递下去，callback 里才落地。
+              const skipPromise = clipboardText()
+              return {
+                url: `${SITE.web}/login`,
+                instructions: CLIP_HINT,
+                method: "auto",
+                opened: true,
+                async callback() {
+                  const skip = (await skipPromise).trim()
+                  const got = await pollClipboard({ skip })
+                  if (!got) {
+                    return {
+                      type: "failed",
+                      error:
+                        "等了 5 分钟没在剪贴板里读到登录态 —— 那行 Console 命令粘了吗？（也可以改用「密码登录」或「登录态」两种方法）",
+                    }
+                  }
+                  try {
+                    if (!got.org) throw new Error("剪贴板里只有 JWT，没看到组织码 —— 两样要一起复制")
+                    // 真的验一次：读积分能过，说明 JWT + 组织码都对
+                    await fetchPoints(got.jwt, got.org, SITE.host)
+                    const key = await issueGatewayKey(got.jwt, got.org, SITE.host)
+                    writeSession(SITE.id, got.jwt, got.org)
+                    // 滚邀请码（网页那把 JWT 多半滚不动，滚不动就保留旧值）
+                    rollInvite(SITE.id, got.jwt, got.org, SITE.host).catch(() => {})
+                    return {
+                      type: "success",
+                      access: key.apiKey,
+                      refresh: key.refreshToken,
+                      expires: Date.now() + 2 * 3600_000,
+                      accountId: got.org,
+                      uid: got.org,
+                      jwt: got.jwt,
+                      org: got.org,
+                    }
+                  } catch (e) {
+                    return { type: "failed", error: String(e?.message ?? e) }
+                  }
+                },
+              }
+            },
+          },
+          {
             type: "oauth",
             label: `${SHORT} 密码登录`,
             prompts: [
@@ -254,23 +449,6 @@ function makePlugin(SITE) {
                 message: "区号",
                 options: STATE_CODES,
               },
-              {
-                // 默认带作者邀请码；换成「我自己的」就真去调接口取，取不到报错。
-                // 这项只在**这次登录顺带建组织**时生效（账号早就有组织的，服务端不再记账）。
-                type: "select",
-                key: "invite",
-                message: "注册邀请码",
-                options: [
-                  {
-                    label: AUTHOR_INVITE[SITE.id]
-                      ? `作者邀请码 ${AUTHOR_INVITE[SITE.id]}（默认）`
-                      : "作者邀请码（这个站点作者没给码，等于不用）",
-                    value: "author",
-                  },
-                  { label: "我自己的邀请码（真去取，取不到会报错）", value: "own" },
-                  { label: "不用邀请码", value: "none" },
-                ],
-              },
             ],
 
             async authorize(inputs) {
@@ -278,24 +456,10 @@ function makePlugin(SITE) {
               const phone = String(inputs?.phone || "").replace(/\D/g, "")
               const password = String(inputs?.password || "")
               const stateCode = String(inputs?.stateCode || (SITE.id === "magicrew" ? "+86" : "+1"))
-              const inviteMode = String(inputs?.invite || "author")
+              // 滚动的邀请码：上一次登录记下的那个，没有就用作者码
+              const inviteCode = inviteToUse(SITE.id)
 
               const result = (async () => {
-                let inviteCode = ""
-                if (inviteMode === "author") {
-                  inviteCode = AUTHOR_INVITE[SITE.id] || ""
-                } else if (inviteMode === "own") {
-                  // 真跑一次。拿不到就抛，让 callback 把真实原因回给用户 —— 不猜、不静默降级。
-                  const prev = readSession(SITE.id)
-                  if (!prev) {
-                    throw new Error(
-                      "这个站点还没登录成功过，拿不到你自己的邀请码 —— 先按「作者邀请码」或「不用」登录一次，之后再来选这项",
-                    )
-                  }
-                  const own = await fetchOwnInviteCode(prev.jwt, prev.org, SITE.host)
-                  inviteCode = own.code
-                }
-
                 const { token, organizationCode, raw } = await login({
                   phone,
                   password,
@@ -307,16 +471,11 @@ function makePlugin(SITE) {
                 return { token, organizationCode, key, raw, inviteCode }
               })()
 
-              // 同步就能拼的只有作者码；「自己的」那一刻还没取到
-              const authorCode = AUTHOR_INVITE[SITE.id] || ""
-              const loginUrl =
-                inviteMode === "author" && authorCode
-                  ? `${SITE.web}/login?invitation=${encodeURIComponent(authorCode)}`
-                  : `${SITE.web}/login`
-
               return {
-                url: loginUrl,
-                instructions: "正在用手机号+密码登录…",
+                url: inviteCode
+                  ? `${SITE.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+                  : `${SITE.web}/login`,
+                instructions: `正在用手机号+密码登录…${inviteCode ? `（邀请码 ${inviteCode}）` : ""}`,
                 method: "auto",
                 opened: true,
                 async callback() {
@@ -327,9 +486,10 @@ function makePlugin(SITE) {
                     return { type: "failed", error: String(e?.message ?? e) }
                   }
                   if (!r) return { type: "failed", error: "登录超时" }
-                  // 存下这把 JWT：下次选「我自己的邀请码」要用它换码
-                  // （只有登录态签的 JWT 能调 /api/v1/invitations/info）
                   writeSession(SITE.id, r.token, r.organizationCode)
+                  // 把这个账号自己的邀请码滚上去，下次登录就用它。
+                  // 拿不到不算错（网页那把 JWT 调不了这个接口）—— 保留旧值，不挡登录。
+                  rollInvite(SITE.id, r.token, r.organizationCode, SITE.host).catch(() => {})
                   return {
                     type: "success",
                     access: r.key.apiKey,
@@ -340,7 +500,6 @@ function makePlugin(SITE) {
                     // 额外字段：models / usage / checkin 要用网页 JWT，mgw key 调不动业务接口
                     jwt: r.token,
                     org: r.organizationCode,
-                    inviteCode: r.inviteCode || "",
                   }
                 },
               }
@@ -408,6 +567,10 @@ function makePlugin(SITE) {
                   } catch (e) {
                     return { type: "failed", error: String(e?.message ?? e) }
                   }
+                  if (!r) return { type: "failed", error: "登录超时" }
+                  writeSession(SITE.id, jwt, org)
+                  // 滚邀请码（网页那把 JWT 多半滚不动，滚不动就保留旧值）
+                  rollInvite(SITE.id, jwt, org, SITE.host).catch(() => {})
                   return {
                     type: "success",
                     access: r.apiKey,
@@ -602,4 +765,9 @@ export const _internal = {
   SITES,
   readSnapshot,
   snapshotPath,
+  readInvite,
+  writeInvite,
+  inviteToUse,
+  invitePath,
+  parseCreds,
 }

@@ -335,3 +335,68 @@ cat "<安装目录>/resources/app-update.yml"
 # 国内：url: https://cdn.letsmagic.cn/download
 # 国际：url: https://public-cdn.magicrew.ai/download/global
 ```
+
+---
+
+## 九、为什么做不到「点一下全自动」
+
+对比 OfficeAce：它能做到「浏览器登录完，magpie 窗口自动继续」，因为华为云 OAuth 的
+`redirect_uri` 指向一个**可控的服务**（`${CLAW_BASE}/v1/claw/auth/callback`），
+插件轮询那个服务取结果。magicrew 没有这条通道：
+
+**① 登录类型只有 13 种，全是「拿凭据换 token」。**
+`frontend/magic-web/src/types/login.ts` 的 `LoginType` 枚举，注释写明「与API强绑定，禁止修改」：
+
+```
+phone_password / phone_captcha / email / DingTalk / DingTalkAvoid / wecom /
+Lark / LarkRedirect / wechat_official_account / wechat_app / dingtalk_app /
+redirect / apple_login / google_login / feishu_oauth
+```
+
+没有设备码、没有插件授权、没有一次性 ticket。
+
+**② 没有 WorkBuddy 那套 `/plugin/auth/*` 协议。**
+WorkBuddy 的 `browserSignIn` 走的是
+`POST /v2/plugin/auth/state`（开登录会话）→ 打开 `authUrl` → `GET /v2/plugin/auth/token?state=`
+轮询拿 token。magicrew 这两个端点都不存在。
+
+**③ 试过的三个候选，都不行。**
+
+| 端点 | 结果 |
+|---|---|
+| `/api/v1/auth/status` | 要 authorization，缺了回 `3103 authorization 不合法` |
+| `/api/v1/auth/environment` | `{"code":1000,"data":{"login_code":null}}` —— 有 `login_code` 字段，但没有配套的兑现接口 |
+| `/api/v1/aggregation/login-data` | 连不通 |
+
+**④ 网页登录成功后 token 只在 `www.magicrew.ai` 的 localStorage 里。**
+插件读不到别的源的存储；`redirect` 字段也不能收任意回调地址（那是第三方登录的 provider code）。
+
+⇒ 能做的最短路径：**开官方登录页 + 把结果送进剪贴板 + 插件读剪贴板**。
+剪贴板的读法三平台各一条命令，实测可用：
+
+```js
+win32   powershell -NoProfile -NonInteractive -Command Get-Clipboard -Raw
+darwin  pbpaste
+linux   xclip -selection clipboard -o
+```
+
+⚠ `authorize()` 里**不能 await** 读剪贴板 —— 起 powershell 要几百毫秒，而它必须立刻返回。
+做法是把「读剪贴板」这个 promise 递下去，`callback()` 里才落地。
+
+⚠ callback 里要拿「打开页面前的剪贴板内容」当 `skip` —— 否则用户上一次复制的东西会被当成结果。
+
+## 十、两把 JWT 的差别（决定邀请码能不能滚）
+
+同一账号、几乎同一时刻签的两把，段数都是 3、header 都是 `{"alg":"HS256","type":"JWT"}`，
+签名段都是 64 位 hex。唯一的差别是 `cus.device_id`：
+
+| 来源 | 长度 | 各段 | `cus.device_id` | `/api/v1/invitations/info` |
+|---|---|---|---|---|
+| 桌面客户端 | 438 | 40 / 332 / 64 | 64 位 hex | `200 {"code":1000,"data":{"invite_code":"..."}}` |
+| 网页 localStorage | 350 | 40 / 244 / 64 | `""` | `{"code":2155,"message":"用户不存在"}` |
+
+`POST /api/v1/sessions` 的 body 带 `device` 字段（`LoginFormCommonValues.device`，
+来自 `getDeviceInfo()` 的浏览器指纹），签出来的就是带 `device_id` 的那把。
+
+所以「登录后把自己的邀请码滚上去」这件事：密码登录滚得动，浏览器登录（剪贴板拿到的是网页那把）滚不动。
+实现上滚不动就安静保留旧值 —— 不报错、不挡登录。
