@@ -1,154 +1,145 @@
-# magpie-magicrew-auth
+# 超级麦吉 / MagiCrew for magpie
 
-**超级麦吉（Magicrew / letsmagic.cn）接进 magpie 和 OpenCode。**
+**一个包，两个供应商：国内 27 个模型、国际 49 个模型，原样走它的 OpenAI 兼容网关。**
 
-手机号登录，直连它自己的 OpenAI 兼容网关，模型目录只给你账号**真正能选**的那 27 个，卡片上显示积分余额。
+超级麦吉（`letsmagic.cn`）和 MagiCrew（`magicrew.ai`）是同一产品的两套云。这个插件把它们各接成一个独立供应商 —— 在 magpie 的供应商列表、用量概览、模型目录里各占一行，不聚合、不互相覆盖登录态。
 
 ```
-供应商 id   magicrew
-API 基址    https://i-magic-service.letsmagic.cn/v1
-协议        OpenAI Chat Completions（原生，不是翻译出来的）
+国内   超级麦吉   www.letsmagic.cn     27 个账号可选模型
+国际   MagiCrew   www.magicrew.ai      49 个账号可选模型
+协议   OpenAI Chat Completions —— 原生，不是翻译出来的
+计费   积分（预充值，不是月度配额）
+凭证   登录一次 30 天全自动：api_key 两小时自续，refresh_token 自滚
 ```
+
+> 数字是 2026-10-27 实测：`GET <站点>/api/v1/flows/models` 各拉一遍数出来的。两站列表不一样，而且会随订阅档位变 —— 所以插件里**没有一张写死的模型清单**，账户能选什么就显示什么。
 
 ---
 
-## 为什么值得单独做一个
+## 功能
 
-超级麦吉对外是个 AI Agent 平台（PPT、看板、云端 7×24 任务），所以几乎所有人都把 `dtyq/magic` 当企业平台看，没人去敲一下 `/v1/models`。
-
-它其实**自带 OpenAI 兼容网关**：
-
-```
-GET  /v1/models              → 44 个模型，object:"list"
-POST /v1/chat/completions    → 标准 chat.completion，带 usage 与 reasoning_content
-```
-
-所以这个插件**不翻译任何协议** —— 它只做三件事：登录、每 2 小时续一次密钥、把模型和积分摆到卡片上。跟那些要把 Agent 会话硬掰成 chat 格式的插件，不是一个量级的活。
-
----
-
-## 登录
-
-三种方式，按可用性排：
-
-| 方式 | 怎么来 | 有效期 |
-|---|---|---|
-| **手机号 + 密码** | 网页「密码登录」那套密码 | 30 天 |
-| **粘贴 JWT** | DevTools → Application → Local Storage → `MAGIC:user:authorization`，取 JSON 里的 `value` | 30 天 |
-| 微信扫码 | 不支持（扫码拿不到可复用的凭据） | — |
-
-登录后拿到三层凭证，有效期完全不同：
-
-```
-网页 JWT        30 天   用来换密钥、读模型目录和积分
-mgw_ api_key     2 小时  真正请求时的 Bearer
-refresh_token    7 天    PUT 一次换新的 api_key；每换一次就轮换一次
-```
-
-⇒ 只要登录一次，**30 天全自动**：api_key 每 2 小时自己续，refresh_token 每次续期时自己滚。
+- **两个供应商分得开** —— 国内、国际各一行，图标、名字、模型、积分、登录态全部独立
+- **模型跟着账号走** —— 每次登录后按 `/api/v1/flows/models` 实时拉，账户当前能选什么就展示什么，生图和 embedding 不会混进来
+- **积分算得准** —— 余额读的是 `/api/v1/quota/points/total`；空号就显示空，不会被优先派活
+- **登录一次管 30 天** —— 网页 JWT 顶 30 天，`mgw_` api_key 每 2 小时自续，refresh_token 每次续期时自滚
+- **两种登录方式** —— 手机号+密码走 API；或者从浏览器复制 JWT + 组织码（国际站现在走这条更稳）
+- **新手奖励自动领** —— 国内站 8 项里 7 项 PUT 即到账，每天跑一次幂等
+- **注册邀请码可选** —— 默认带作者邀请码，可以关，也可以换成自己的（真去调接口取，取不到就报错）
 
 ---
 
 ## 模型
 
-卡片上的模型来自 `/api/v1/flows/models` —— 也就是你在网页模型选择器里**眼睛能点到的那些**，27 个。
+不写死。上面那张表是**数量**，不是清单：
 
-**这里刻意没用 `/v1/models`。** 那个接口返回 44 个，混着 VIP 锁定（选不了）、生图、embedding：
+| 站点 | 可选语言模型 | 网关全量（含生图/向量） |
+|---|---|---|
+| 国内 · 超级麦吉 | 27 | 44 |
+| 国际 · MagiCrew | 49 | 65 |
 
-| 分类 | 数量 | 例子 | 能不能进 magpie |
-|---|---|---|---|
-| 语言 | 27 | GLM 5.3 / DeepSeek V4.1 Flash / Qwen3.8 Max / Kimi K3.1 Pro / Seed 2.0 | ✅ 全部 |
-| 生图 | 11 | qwen-image-3.0-pro、doubao-seedream-4.5 | ❌ chat 通道用不上 |
-| 向量 | 6 | text-embedding-3-large、doubao-embedding | ❌ 同上 |
+用的是 `/api/v1/flows/models`（网页模型选择器里眼睛能点到的那些），不是 `/v1/models` —— 后者混着 VIP 锁定、生图、embedding，塞进来用户会选到根本调不动的模型。
 
-把生图模型塞进 magpie，用户选中就会报错 —— 所以宁可少 17 个。
+上下文窗口统一按 **256K** 保守填：这两个接口都不返回 `context_length`。填大了 agent 要等上游报错才知道越界，填小了自己压得早。
 
-### 积分单价（每百万 token，2026-10-27 实测）
+推理模型会吃 `max_tokens`：`glm-5.3-flash` 给 64 个 token 时 `reasoning_content` 就吃满、`content` 是空串。插件把低于 512 的 `max_tokens` 抬到 512。
 
-`POST /api/v1/products/model-points` 拿到的官方数字。按 ¥3.4 / 1000 积分折算：
+国际站有 27 个模型是国内没有的：GPT 5.x / 6-luna、Gemini 3.x、Claude Haiku 5.5、Kimi K3 等。
 
-| 模型 | 输入积分 | 输出积分 | 折合 ¥/M in | ¥/M out |
+---
+
+## 新手奖励
+
+国内站 8 项任务合计 500 积分，7 项 PUT 一次就完成（实测 1240 → 1540，+300，六项当场入账）。只有「完成第一次 AI 工作」那项服务端认死必须真的跑过一次，PUT 回 `9303`。
+
+国际站 `/api/v1/onboarding/tasks` 现在返回空列表 —— 接口在，这个账号没东西可领。
+
+每天跑一次，幂等。
+
+---
+
+## 邀请码
+
+注册时默认带作者的邀请码，可以关。
+
+「用我自己的邀请码」会把真的接口跑一次（`GET /api/v1/invitations/info`），拿到就用拿到的，拿不到就报错，不猜。
+
+> 那个接口只认**客户端登录**签的 JWT。网页 localStorage 里那把调过去回 `{"code":2155,"message":"用户不存在"}` —— 两把都是同一账号签的，差别在 payload 里带不带用户字段。所以「用自己的」用的是本插件上次登录成功时存下的那把 JWT；从没登录过就选这项，会得到一句明确的报错。
+
+奖励口径（上游前端常量，2026-10-27）：
+
+| | 每次注册 | 每次订阅 | 邀请注册封顶 | 总额封顶 |
 |---|---|---|---|---|
-| glm-5.3-flash | 80 | 280 | 0.27 | 0.95 |
-| qwen3.5-flash | 20 | 200 | 0.07 | 0.68 |
-| deepseek-v4.1-flash | 200 | 800 | 0.68 | 2.72 |
-| doubao-seed-2.0-lite | 90 | 540 | 0.31 | 1.84 |
-| glm-5.3 | 941 | 2956 | 3.20 | 10.05 |
-| qwen3.8-max | 1200 | 3600 | 4.08 | 12.24 |
-| kimi-k3.1-pro | 1300 | 6800 | 4.42 | 23.12 |
+| 国内 | 1,000 | 3,000 | 60,000 | 300,000 |
+| 国际 | 200 | 500 | 10,000 | 30,000 |
 
 ---
 
 ## 安装
 
-magpie 里：
+在 magpie 的 **插件 → 发现** 搜 `magpie-magicrew-auth`，点**安装**。
 
-```bash
-magpie plugin add https://github.com/MYCF711/magpie-magicrew-auth
+装完先选**站点**，再选登录方式。国际站建议直接走「登录态（JWT + 组织码）」：
+
+```
+DevTools → Application → Local Storage → https://www.magicrew.ai
+  MAGIC:user:authorization     → JSON，取 value     = JWT
+  MAGIC:user:organizationCode  → JSON，取 value     = 组织码（12 位小写字母数字）
 ```
 
-或者本地开发：
+> 组织码**不能从 JWT 推**。JWT 里只有 `cus.tenant_id`（18 位数字），组织码是另一套短串。缺了它 `/api/v1/*` 回 `2182 用户所在组织不存在`，给错了回 `3035 登录失败`。
+
+### 命令行
 
 ```bash
-git clone https://github.com/MYCF711/magpie-magicrew-auth
-cd magpie-magicrew-auth
-node tests/smoke.mjs          # 不花钱的自测：config / models / usage
-node tests/smoke.mjs full     # 再加上签到探测
+# 从 npm（推荐）
+magpie plugin add magpie-magicrew-auth
+
+# 从仓库源码（拿最新代码，不走 npm）
+magpie plugin add github:MYCF711/magpie-magicrew-auth
 ```
 
-`tests/smoke.mjs` 的凭据来源：环境变量 `MAGICREW_JWT` + `MAGICREW_ORG`，没有就从本机 Edge 的 localStorage 读。
+装完确认：
+
+```bash
+magpie plugin list
+# magpie-magicrew-auth  on
+#   magicrew (超级麦吉, 27 models)  signed in as ...
+#   magicrew-intl (MagiCrew, 49 models)  signed in as ...
+```
+
+两个供应商各一行 —— 这就是「不聚合」的样子。
 
 ---
 
-## 新手福利：7 项可以自动做完，1 项不行
+## 常见问题
 
-8 项任务合计 500 积分。接口只有两行，藏在 `onboarding-CZBI0pQt.js` 里：
+**两个站要装两次吗？** 不用。一个包导出两个插件，装一次两个供应商都在，各自登录。
 
-```
-GET  /api/v1/onboarding/tasks
-PUT  /api/v1/onboarding/tasks/{code}/completion
-```
+**为什么国际站的模型数会变？** 因为这个数字是从 `/api/v1/flows/models` 实时拉的。订阅档位变了、平台方开关变了，数字就跟着变 —— 插件里没有需要维护的清单。
 
-`magpie` 的 `auth.checkin` 钩子就干这件事：拉任务列表 → 把 PENDING 的挨个 PUT → 报积分变化。**每天跑一次，第一次就把 300 分拿完。**
+**国际站 `/v1/chat/completions` 报 500，22 字节的纯文本？** 那是缺 `organization-code` 请求头。国内站不需要，国际站强制。插件按站点自动带。
 
-实测（2026-10-27，国内站）：**1240 → 1540，+300，六项当场入账**。
+**`glm-5.3-flash` 回复是空的？** 推理 token 吃满了 `max_tokens`。插件已经把低于 512 的抬到 512；还是空就把 `max_tokens` 再调大。
 
-| 任务 | code | 分 | 能不能自动 |
-|---|---|---|---|
-| 了解工作台 | `super_magic_intro` | 50 | ✅（网页上已点过） |
-| 了解 AI PPT | `ai_ppt` | 50 | ✅ PUT 即到账 |
-| AI 录音 | `ai_recording` | 50 | ✅ |
-| 雇佣数字员工 | `digital_employee` | 50 | ✅ |
-| 添加/管理技能 | `skill_management` | 50 | ✅ |
-| 微应用 | `micro_app` | 50 | ✅ |
-| 超级龙虾 | `magiclaw` | 50 | ✅ |
-| **完成第一次 AI 工作** | `first_ai_work` | **100** | ❌ 回 `9303 该新人引导任务不支持手动完成` |
-
-那一项服务端认死「必须真的跑过一次 AI 任务」，PUT 不进去。要拿就在网页里正常用一次（1~2 分钟），或者用 `tools/onboarding.mjs` 走浏览器自动化。
-
-### 每日登录积分
-
-价格页写「每日登录发放 200 积分」，但**没有独立的签到接口** —— 4 个候选路径全 404：
-
-```
-POST /api/v1/quota/points/daily-claim
-POST /api/v1/quota/points/free-claim
-POST /api/v1/user/daily-reward
-POST /api/v1/growth/daily-checkin
-```
-
-它是登录即发，不需要签。所以签到钩子的实质产出就是上面那张表。
-
-## 已知限制
-
-- **只支持国内站（letsmagic.cn）**。国际站 `magicrew.ai` 是同一产品的英文品牌（同一个 `dtyq/magic` 仓库），但后端网关不同：`api.magicrew.ai` 存在却没有 `/v1/models`，暂未适配。
-- **积分只读不写**。插件不会替你充值、不会自己领奖。
-- **上下文窗口除 glm-5.3-flash 外未逐个实测**，一律按 256K 保守填。实测方法在 `docs/internals.md`。
-- **推理模型会吃 max_tokens**：`glm-5.3-flash` 一次 60 token 的请求里 42 个花在 `reasoning_content` 上，content 是空串。插件在 loader 里把低于 512 的 `max_tokens` 抬到 512。
-- 微信扫码登录不支持，因为拿不到可复用凭据。
+**Android / macOS 也支持吗？** 插件只调 HTTP 接口，跟客户端无关。设备上能登录，这里就能用。
 
 ---
 
-## 协议与许可
+## 参考源
 
-MIT。上游 `dtyq/magic` 是 Magic Open Source License（Apache 2.0 + 附加限制），本插件不复制其代码，只调它的公开 HTTP 接口。
+| 来源 | 用在哪 |
+|---|---|
+| [dtyq/magic](https://github.com/dtyq/magic)（Apache 2.0 + 附加限制） | 接口契约：`types/login.ts` 的 `invite_code`、`LoginService.ts` 关于「邀请码在创建组织时消费」的注释、`constants/api.ts` 的错误码 |
+| [@magpie-community/opencode-workbuddy-auth](https://github.com/magpie-community/plugins/tree/main/packages/workbuddy)（MIT） | 「一个包导出多个 `XxxAuthPlugin`」的写法：每个站点一个具名导出，各成一个供应商 |
+| [@magpie-community/opencode-qoder-auth](https://github.com/magpie-community/plugins/tree/main/packages/qoder)（MIT） | 同上，四站点四导出的对照例 |
+| [magpie-plugin-template](https://github.com/MYCF711/magpie-plugin-template)（MIT） | README / CHANGELOG / NOTICE 的骨架与硬规则 |
+
+本插件不复制上游代码，只调它的公开 HTTP 接口。完整版权声明见 [`NOTICE.md`](./NOTICE.md)。
+
+---
+
+> 更新记录：[`CHANGELOG.md`](./CHANGELOG.md)
+
+## 许可
+
+MIT。

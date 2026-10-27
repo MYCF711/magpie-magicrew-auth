@@ -1,7 +1,7 @@
 {
   "name": "magpie-magicrew-auth",
-  "version": "0.1.0",
-  "description": "Magicrew / 超级麦吉 (letsmagic.cn) provider for magpie and OpenCode: phone sign-in, the account's own 27 chat models, points balance, newcomer-task progress — over the platform's OpenAI-compatible gateway.",
+  "version": "0.2.0",
+  "description": "超级麦吉 / MagiCrew for magpie and OpenCode — one package, two providers: letsmagic.cn (国内) and magicrew.ai (international). Password or web-JWT sign-in, the account's own live model list, points balance, newcomer rewards, invite codes.",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
@@ -9,6 +9,8 @@
     "index.mjs",
     "src",
     "README.md",
+    "CHANGELOG.md",
+    "NOTICE.md",
     "docs"
   ],
   "keywords": [
@@ -20,6 +22,7 @@
     "provider",
     "auth",
     "magicrew",
+    "magiccrew",
     "super-magic",
     "letsmagic",
     "dtyq"
@@ -35,5 +38,9 @@
   "homepage": "https://github.com/MYCF711/magpie-magicrew-auth#readme",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
+  },
+  "magpie": {
+    "maxConcurrency": 4,
+    "autoCheckin": true
   }
 }

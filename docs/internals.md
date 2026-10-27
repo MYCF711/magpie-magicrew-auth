@@ -1,0 +1,337 @@
+# 实现细节与协议取证
+
+README 里所有「为什么」都在这。取证日期统一是 **2026-10-27**，除非另注。
+
+---
+
+## 一、两站是同一份东西
+
+| | 国内 · 超级麦吉 | 国际 · MagiCrew |
+|---|---|---|
+| 网页 | `www.letsmagic.cn` | `www.magicrew.ai` |
+| 业务 API + 模型网关 | `i-magic-service.letsmagic.cn` | `magic-service.magicrew.ai` |
+| `MAGIC_APP_ENV` | `saas-prod` | `international-prod` |
+| `MAGIC_APP_SHA` | `fb90a86cd576dd10f25efdf914485a3bfcc0a13d` | **同一个值** |
+| `MAGIC_APP_VERSION` | `5.0.157` | `5.0.157` |
+| 套餐支付 | ALIPAY | STRIPE |
+
+`MAGIC_APP_SHA` 相同 ⇒ 前端是同一份构建，两站差别只在服务端注入的 `MAGIC_*` 环境变量。
+后端是同一个 Go 服务，逐字符同构：
+
+```
+GET /                        → hello, magic-service!
+GET /v1/models               → {"code":403,"message":"token无效",...}
+GET /api/v1/flows/models     → {"code":2179,"message":"auth_token 不存在",...}
+```
+
+### 站点地址是怎么找到的
+
+客户端是个纯 webview 壳，`app.asar` 里只有区域枚举和 `WebUrl`，**没有 API 地址**：
+
+```js
+const Tp = {
+  ChinaRegion:         { WebUrl: "https://www.letsmagic.cn", defaultLocale: zhCN },
+  internationalRegion: { WebUrl: "https://www.magicrew.ai",  defaultLocale: enUS },
+}
+```
+
+真正的地址在**运行时配置注入页**里 —— 任意非营销路由（比如 `/workspace`）返回的 HTML 内嵌了一份 `window` 配置：
+
+```bash
+curl -s https://www.magicrew.ai/workspace | grep -o '"MAGIC_[A-Z_]*":"[^"]*"'
+```
+
+```json
+"MAGIC_SERVICE_BASE_URL": "https://magic-service.magicrew.ai"
+"MAGIC_SOCKET_BASE_URL":  "wss://magic-service.magicrew.ai"
+"MAGIC_GATEWAY_ADDRESS":  "https://api.magicrew.ai"
+```
+
+⚠ **`api.magicrew.ai` 不是这套 API**。它是 `MAGIC_GATEWAY_ADDRESS`（teamshare 网关），
+对 `/v1/models`、`/api/v1/*` 一律回 `not match rule path`。它就是那个「看起来最像、
+试了才发现全不对」的坑。
+
+国内站同位置是 `i-magic-service.letsmagic.cn`，`MAGIC_GATEWAY_ADDRESS: https://api.teamshare.cn`。
+
+---
+
+## 二、三层凭证
+
+```
+网页 JWT       30 天    换密钥、读模型目录和积分
+mgw_ api_key    2 小时   真正请求时的 Bearer
+refresh_token   7 天     PUT 一次换新的 api_key；每换一次轮换一次
+```
+
+```bash
+# ① 登录
+POST /api/v1/sessions
+  { type:"phone_password", phone, password, state_code, organization_code, invite_code }
+
+# ② 签发网关密钥（要 JWT）
+POST /api/v1/model-gateway/tokens          → { api_key, refresh_token, *_expires_at }
+
+# ③ 续期（不需要登录态；refresh_token 一次性，必须串行）
+PUT  /api/v1/model-gateway/tokens  { refresh_token }
+```
+
+`mgw_` key 是**站点绑定**的：国际站的 key 拿去国内站回 `{"code":403,"message":"token无效"}`。
+
+### JWT 的形状
+
+magic 自己那套，不是标准 JWT：每段 base64 **带 `==` 填充**，签名段是 64 位 **hex**（不是 base64url）。
+
+```
+header  {"alg":"HS256","type":"JWT"}
+payload {"iss":<组织id>,"exp":<30天后>,"iat":<现在>,"jti":<会话id>,
+         "cus":{"device_id":"","tenant_id":<18位数字>}}
+```
+
+### ⚠ `organization-code` 是另一个东西
+
+JWT 里只有 `cus.tenant_id`（18 位数字，例 `765235992687812611`），而服务端要的
+`organization-code` 是另一套 12 位短串（例 `67u4oe6fbenj`）。两者不能互推。
+
+这个值在浏览器的 local storage：
+
+```
+MAGIC:user:organizationCode      → {"key":"organizationCode","value":"67u4oe6fbenj"}
+MAGIC:user:teamshareOrganizationCode → 同值
+```
+
+错误码分得很清：
+
+| 情况 | 返回 |
+|---|---|
+| 不带 `organization-code` | `{"code":2182,"message":"用户所在组织不存在"}` |
+| 带任意非空值（token 无效） | `{"code":3035,"message":"登录失败"}` |
+| 带对的值 + 有效 JWT | `{"code":1000,"message":"ok",...}` |
+
+注意：**带错的码也还是 3035**，和「码对但 token 无效」同一个错误码 —— 所以不能靠错误码判断是码错还是 token 错。
+
+### ⚠ 国际站 `/v1/*` 强制要 `organization-code`
+
+这是两站唯一的网关层差异：
+
+```bash
+# 国际站，不带 organization-code
+POST /v1/chat/completions
+→ HTTP 500  "Internal Server Error."     ← 22 字节纯文本，不是 JSON
+
+# 带上就正常
+POST /v1/chat/completions  -H "organization-code: <code>"
+→ HTTP 200  {"id":"...","choices":[...]}
+```
+
+国内站不需要（一直是 `i-magic-service.letsmagic.cn/v1` 裸调）。
+插件在 `loader` 里按 `SITE.needsOrgOnGateway` 决定带不带。
+
+**CORS 预检能问出允许的头名**，这条路对所有站点通用：
+
+```bash
+curl -s -X OPTIONS https://magic-service.magicrew.ai/api/v1/flows/models \
+  -H "Origin: https://www.magicrew.ai" \
+  -H "Access-Control-Request-Method: GET" \
+  -H "Access-Control-Request-Headers: authorization,organization-code" -D - -o /dev/null
+```
+
+两站返回的 `Access-Control-Allow-Headers` 完全一致：
+
+```
+DNT,Keep-Alive,User-Agent,Cache-Control,Content-Type,Authorization,
+application-code,organization-code,x-forwarded-user,token,request-id,
+Language,api-key,X-Magic-Image-Process,X-App-Id,X-Timestamp,X-Nonce,X-Sign
+```
+
+---
+
+## 三、接口清单（实测）
+
+### 业务 API（要 JWT + organization-code）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/v1/sessions` | 登录；`invite_code` 字段在此 |
+| POST/PUT | `/api/v1/model-gateway/tokens` | 签发 / 续期 `mgw_` key |
+| GET | `/api/v1/flows/models` | 账号当前可选的语言模型 |
+| POST | `/api/v1/products/model-points` | 每个模型的积分单价 |
+| GET | `/api/v1/quota/points/total` | 积分余额 |
+| POST | `/api/v1/quota/points/records/queries` | 积分流水（注意是 POST，GET 回 405） |
+| GET | `/api/v1/onboarding/tasks` | 新手任务列表 |
+| PUT | `/api/v1/onboarding/tasks/{code}/completion` | 标记完成；`9303` = 不支持手动完成 |
+| GET | `/api/v1/invitations/info` | 自己的邀请码 + 已邀请人数 |
+| GET | `/api/v1/invitations/activity` | 邀请活动配置 |
+| GET | `/api/v1/invitations/rewards/total-points` | 邀请已赚积分 |
+
+### 模型网关（要 `mgw_` key）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/v1/models` | 全量（含生图/向量）；国内 44、国际 65 |
+| POST | `/v1/chat/completions` | OpenAI 兼容；国际站另需 `organization-code` |
+
+### `/api/v1/flows/models` 的返回
+
+```json
+{"code":1000,"message":"ok","data":{"models":[
+  {"value":"mimo-v2.6-flash","label":" MiMo V2.6 Flash","vision":true,
+   "tags":[{"type":1,"value":"Magic"}],"configs":{"temperature":0.5}}
+]}}
+```
+
+`label` 前面常带前导空格，`name` 要 `.trim()`。
+**不返回 `context_length`** —— 所以上下文统一按 256K 保守填。
+
+---
+
+## 四、邀请码
+
+### 链接格式
+
+```
+https://www.magicrew.ai/?invitation=<code>
+https://www.letsmagic.cn/?invitation=<code>
+```
+
+上游前端 `constants-BGteNvs6.js` 原文：`a = (e,t) => \`${e}/?${i}=${t}\``，其中 `i = "invitation"`。
+
+### 消费时机
+
+`LoginService.ts` 里那两行注释是全部答案（原文）：
+
+```ts
+// PS: 改到在无组织下创建组织的时候再消费邀请码
+// values.invite_code = consumeInvitationCookie()
+```
+
+⇒ **不是登录那一下生效**，是「该账号还没有组织、这次登录顺手建个人组织」时生效。
+老账号组织早就有，传了也不会再记账。
+
+字段名来自 `types/login.ts`：`invite_code?: string`。
+错误码 `2152` = 邀请码已被使用（`constants/api.ts`）。
+
+### 接口只认客户端登录的 JWT
+
+同一账号签的两把 JWT：
+
+| 来源 | 长度 | `/api/v1/invitations/info` |
+|---|---|---|
+| 网页 local storage（354 字符） | 354 | `{"code":2155,"message":"用户不存在"}` |
+| 桌面客户端（438 字符） | 438 | `{"code":1000,"data":{"invite_code":"..."}}` |
+
+差别在 payload 里带不带用户字段。所以插件把**上次登录成功的那把 JWT** 落盘到
+`~/.cache/magpie/magicrew-session-<siteId>.json`，专供「用我自己的邀请码」这一项；
+从没登录过就没文件，选这项直接报错。
+
+### 这个路径是怎么找到的（可复用）
+
+盲试 30 余条候选路径全 404，最后从**客户端缓存**里读出来的：
+
+```bash
+C="$APPDATA/Magic/Cache/Cache_Data/data_1"
+grep -a -o -E 'https://magic-service\.magicrew\.ai/api/v1/[a-zA-Z0-9/_.-]*' "$C" | sort -u
+grep -a -o -E '"invite_code":"[A-Za-z0-9]+"' "$C"
+```
+
+Electron 的 `Cache/Cache_Data/data_*` 里留着客户端访问过的全部 URL 和响应体。
+**这比扒 JS chunk 有效得多** —— chunk 是按路由懒加载、名字哈希化的；
+缓存目录里是「它真的请求过什么」。
+
+同一份缓存里还能顺手捞出别的接口：`/api/v1/settings/all`、`/api/v1/im/messages/page`、
+`/api/v1/auth/status`、`/api/v1/notifications/counts` 等 20 余条。
+
+---
+
+## 五、一个包两个供应商
+
+magpie 把包里的**每个具名导出**当成一个独立插件。所以：
+
+```js
+export const MagicrewAuthPlugin     = makePlugin(SITES.cn)
+export const MagicrewIntlAuthPlugin = makePlugin(SITES.intl)
+```
+
+两个 provider id 不同（`magicrew` / `magicrew-intl`），于是：
+
+- 供应商列表里两行
+- 用量概览里两张卡
+- 模型目录各拉各的
+- 登录态各存各的，互不覆盖
+
+对照实现：`@magpie-community/opencode-workbuddy-auth` 用 `makePlugin(site)` 做两个导出
+（WorkBuddy / WorkBuddy AI），`opencode-qoder-auth` 用同一个模式做四个导出。
+
+**`auth` 里不存站点**：所有 host 都来自闭包里的 `SITE`。这是这套写法的关键 ——
+一旦把站点塞进 `auth`，同一个 provider id 就被两个站抢，登录态互相覆盖。
+
+⚠ `magicrew` 这个 id 不能改 —— 已装的用户靠它认领登录态。
+
+---
+
+## 六、调试
+
+```bash
+# 不花钱的自测（config / models / usage / loader 头）
+node  tests/multi-provider.mjs
+bun   tests/multi-provider.mjs      # magpie 实际跑在 bun 上，用它更准
+
+# 真打一发（会花积分）
+MAGICREW_INTL_JWT=... MAGICREW_INTL_ORG=... node tests/smoke.mjs full
+```
+
+⚠ **Node 连不上 `magic-service.magicrew.ai`，bun 可以。** 同一台机器、同一个 IP：
+`curl` 通、`bun fetch` 通、`node fetch` 与 `node https.get` 一律 `UND_ERR_CONNECT_TIMEOUT`
+（TCP 和 TLS 握手都成功，卡在 HTTP 响应）。所以验证一律用 bun 跑，别被 Node 的超时误导。
+
+⚠ **中文请求体别走 shell 内联**：Git Bash 把中文按 GBK 传给 `curl.exe`，服务端按 UTF-8 解，
+结果是一律 `HTTP 500 Internal Server Error.`（22 字节纯文本）。看起来像接口挂了，其实是编码。
+把 body 写成 UTF-8 文件再 `--data-binary @file`。
+
+`max_tokens` 的实测（`glm-5.3-flash`，中文提问）：
+
+| max_tokens | 结果 |
+|---|---|
+| 64 | `finish_reason:"length"`、`content:""`、reasoning 吃满 |
+| 512 | 正常出话（reasoning 208 / total 233） |
+
+---
+
+## 七、客户端服务地址对照（供以后换站参考）
+
+```bash
+curl -s https://www.magicrew.ai/workspace | grep -o '"MAGIC_[A-Z_]*":"[^"]*"'
+```
+
+| 变量 | 国内 | 国际 |
+|---|---|---|
+| `MAGIC_SERVICE_BASE_URL` | `https://i-magic-service.letsmagic.cn` | `https://magic-service.magicrew.ai` |
+| `MAGIC_SOCKET_BASE_URL` | `wss://i-magic-service.letsmagic.cn` | `wss://magic-service.magicrew.ai` |
+| `MAGIC_SERVICE_KEEWOOD_BASE_URL` | `https://i-keewood-service.teamshare.cn` | `https://keewood-service.magicrew.ai` |
+| `MAGIC_SERVICE_TEAMSHARE_BASE_URL` | `https://i-teamshare-service.teamshare.cn` | `https://teamshare-service.magicrew.ai` |
+| `MAGIC_GATEWAY_ADDRESS` | `https://api.teamshare.cn` | `https://api.magicrew.ai` |
+| `MAGIC_PUBLIC_CDN_URL` | `https://public-cdn.letsmagic.cn` | `https://public-cdn.magicrew.ai` |
+| `MAGIC_CDNHOST` | `https://cdn.letsmagic.cn/__assets__/packages` | `https://cdn.magicrew.ai/__assets__/packages` |
+
+## 八、客户端安装包
+
+两站的包**同版本号、不同构建**（sha512 不同，差 104 字节，差的是 `app-update.yml` 那行更新源）：
+
+```
+国内  https://cdn.letsmagic.cn/download/latest.yml
+      116003728 B  sha512 u7F2Y0c8vUdtEyUvQouQLe4f2uulGgUiD0ye0jOnKUPKNNNYodF5QPI3v3G7jK88FlfqK5vL1CgciSD5Bu136w==
+
+国际  https://public-cdn.magicrew.ai/download/global/latest.yml
+      116003832 B  sha512 KqHznUXQLCC6II82JAtY1VxzOFqx/VnEkdrxU0HUZHtUPu7pED9p0LvOD2EtAQJdrY4DthfYnfu2QCqI0oPdvQ==
+```
+
+⚠ 路径里必须有 **`/global/`**。`public-cdn.magicrew.ai/download/latest.yml`（不带 `global`）
+和 `cdn.letsmagic.cn/download/latest.yml` **逐字节相同** —— 那是国内清单的镜像，
+少一个目录名就落到国内包上。这是「从国际站网页下载，装出来是国内版」的原因。
+
+装完自查：
+
+```bash
+cat "<安装目录>/resources/app-update.yml"
+# 国内：url: https://cdn.letsmagic.cn/download
+# 国际：url: https://public-cdn.magicrew.ai/download/global
+```
