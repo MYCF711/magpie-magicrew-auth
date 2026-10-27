@@ -382,17 +382,22 @@ export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
 // ── ④c 这个登录态是谁 ────────────────────────────────────────────────
 //
 // 卡片上原来显示组织码（67u4oe6fbenj / h97gkbu8bruj），那是随机串，用户认不出是谁。
-// 这里取一个能认的名字，优先级：昵称 → 真名 → 手机号 → 邮箱 → 组织码。
 //
-// ⚠ 服务端把手机号打码了（实测 `189****051`），邮箱常常是 null ——
-//   所以实际能用的多半是 nickname。
+// 优先级：**手机号 → 邮箱 → 昵称 → 真名**。
+//
+// ⚠ 昵称排在后面是有原因的：那是用户自己填的，新账号可以不填、也可以随便填
+//   （作者自己的账号填的是 "MYCF711"，跟他是谁毫无关系）。手机号是登录凭据本身，
+//   改不了、也漏不掉。
+//
+// ⚠ 服务端把手机号打码了（实测 `189****051`，中间四位星号），邮箱常常是 null。
+//   打码归打码，它仍然是唯一稳定的账号标识 —— 至少能看出是哪个号。
 //
 // 接口来自客户端缓存里出现过的清单（docs/internals.md 第九节的办法找到的）。
 export async function fetchWho(token, org, host = SITES.cn.host) {
   const res = await fetch(`${host}/api/v1/contact/accounts/me/users`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const u = body?.data?.items?.[0] ?? body?.data ?? {}
-  const name = String(u.nickname || u.real_name || u.phone || u.email || "").trim()
+  const name = String(u.phone || u.email || u.nickname || u.real_name || "").trim()
   return {
     name,
     nickname: String(u.nickname || "").trim(),
