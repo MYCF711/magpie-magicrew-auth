@@ -1,0 +1,9 @@
+{
+  "package": "magicrew-auth",
+  "name": "超级麦吉 / MagiCrew",
+  "providers": ["magicrew", "magicrew-intl"],
+  "summary": {
+    "en": "Magicrew (super-magic) — an OpenAI-compatible gateway behind the agent platform, both builds: 超级麦吉 (letsmagic.cn) and MagiCrew (magicrew.ai).",
+    "zh": "超级麦吉 / MagiCrew：Agent 平台背后的 OpenAI 兼容网关，国内站与国际站双份。"
+  }
+}
