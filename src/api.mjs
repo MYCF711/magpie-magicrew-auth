@@ -19,20 +19,45 @@
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 
+// 一个包 = 两个 provider。
+//
+// 每个站点的 `id` 就是它在 magpie 里的**供应商 id** —— 不是内部代号。
+// 所以两个站会各自占一行（供应商列表、用量概览、模型目录全分开），
+// 和 @magpie-community/opencode-workbuddy-auth 承载 WorkBuddy / WorkBuddy AI、
+// opencode-qoder-auth 承载 Qoder / Qoder CN / QwenWork 是同一个做法：
+//   export const MagicrewAuthPlugin     = makePlugin(SITES.cn)
+//   export const MagicrewIntlAuthPlugin = makePlugin(SITES.intl)
+//
+// ⚠ `cn` 的 id 必须保持 `magicrew` —— 已装的用户靠这个 id 认领登录态。
 export const SITES = {
   cn: {
-    id: "cn",
+    id: "magicrew",
     label: "国内 · 超级麦吉",
     web: "https://www.letsmagic.cn",
     host: "https://i-magic-service.letsmagic.cn",
   },
   intl: {
-    id: "intl",
+    id: "magicrew-intl",
     label: "国际 · MagiCrew",
     web: "https://www.magicrew.ai",
-    // ⚠ 未验证：api.magicrew.ai 对已知路径全部返回 "not match rule path"
-    host: "https://api.magicrew.ai",
-    unverified: true,
+    // 实测（2026-10-27）：来源是 www.magicrew.ai 的运行时配置注入页
+    //   GET https://www.magicrew.ai/workspace  →  HTML 里内嵌 window 配置
+    //   "MAGIC_SERVICE_BASE_URL":"https://magic-service.magicrew.ai"
+    //   "MAGIC_APP_ENV":"international-prod"
+    //
+    // ⚠ api.magicrew.ai 不是这套 API —— 它是 MAGIC_GATEWAY_ADDRESS（teamshare 网关），
+    //   对 /v1/models、/api/v1/* 一律回 "not match rule path"。
+    //
+    // 该网关与国内 i-magic-service.letsmagic.cn 逐字符同构（同一个 Go 服务）：
+    //   GET /                     → hello, magic-service!
+    //   GET /v1/models            → {"code":403,"message":"token无效"}
+    //   GET /api/v1/flows/models  → {"code":2179,"message":"auth_token 不存在"}
+    host: "https://magic-service.magicrew.ai",
+    // 国际站 /v1/chat/completions **强制**要求 organization-code：
+    //   不带 → HTTP 500 "Internal Server Error."（22 字节裸文本，不是 JSON）
+    //   带上 → 200 正常 chat.completion
+    // 国内站 /v1/* 不需要（README 里那套一直是两条 base 分开用的）。
+    needsOrgOnGateway: true,
   },
 }
 
@@ -91,7 +116,14 @@ async function read(res) {
  *
  * 国际站登录页有 Google / Password / Email / Private Service 四种，password 这条大概率同构。
  */
-export async function login({ phone, password, stateCode = "+86", organizationCode = "", host = SITES.cn.host }) {
+export async function login({
+  phone,
+  password,
+  stateCode = "+86",
+  organizationCode = "",
+  host = SITES.cn.host,
+  inviteCode = "",
+}) {
   const res = await fetch(`${host}/api/v1/sessions`, {
     method: "POST",
     headers: headersFor("", organizationCode, host),
@@ -103,6 +135,17 @@ export async function login({ phone, password, stateCode = "+86", organizationCo
       organization_code: organizationCode || "",
       email: "",
       redirect: "",
+      // 注册邀请码。
+      //
+      // 字段名来自上游前端 dtyq/magic 的 `types/login.ts`（`invite_code?: string`），
+      // 消费时机写在 `LoginService.ts` 的注释里：
+      //   // PS: 改到在无组织下创建组织的时候再消费邀请码
+      //   // values.invite_code = consumeInvitationCookie()
+      // ⇒ 不是登录那一下生效，是「该账号还没有组织、这次登录顺手建个人组织」时生效。
+      //   已经是老账号、组织早就有了，传了也不会再记账。
+      //
+      // 不传就是空串，服务端忽略（登录本身不受影响）。
+      invite_code: inviteCode || "",
     }),
   })
   const body = await read(res)
@@ -294,6 +337,46 @@ export async function fetchPointRecords(token, org, { page = 1, pageSize = 20, h
   })
   const body = await read(res)
   return body?.data?.list ?? body?.data ?? []
+}
+
+// ── ④b 自己的邀请码 ──────────────────────────────────────────────────
+//
+// 「Free Points Program」那套分享激励。页面上看到的现成链接长这样：
+//
+//   https://www.magicrew.ai/?invitation=IV75F0ZKVKXG
+//   https://www.letsmagic.cn/?invitation=<code>
+//
+// 奖励口径两站不同（来自上游前端 constants，2026-10-27 读的）：
+//
+//            每次注册   每次订阅   邀请注册封顶   总额封顶
+//   国内      1,000      3,000       60,000      300,000
+//   国际        200        500       10,000       30,000
+//
+// 接口（2026-10-27 实测，从客户端 Cache/Cache_Data/data_1 里读出来的）：
+//
+//   GET /api/v1/invitations/info                  → { invite_code, invite_count, invited_users }
+//   GET /api/v1/invitations/activity              → 活动配置
+//   GET /api/v1/invitations/rewards/total-points  → 已赚积分
+//
+// ⚠ 这三个接口只认**客户端登录**的那把 JWT（438 字符），网页版那把
+//   localstorage 里的 JWT（354 字符）调过去回 {"code":2155,"message":"用户不存在"}。
+//   两把都是同一账号签的，差别在 payload 里的用户字段 —— 网页版不带。
+//   ⇒ 所以「用我自己的邀请码」只能拿**本插件上次登录成功时存下的**那把 JWT，
+//     没登录过就没得用（报错，不猜）。
+export const INVITE_CODE_PATH = "/api/v1/invitations/info"
+
+/** 拿不到就抛错 —— 调用方要的是「真实结果」，不是静默降级 */
+export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}${INVITE_CODE_PATH}`, { headers: headersFor(token, org, host) })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const code = d.invite_code || d.inviteCode || d.code || d.invitation_code || ""
+  if (!code) throw new MagicrewError("接口通了但返回里没有 invite_code")
+  return {
+    code,
+    count: Number(d.invite_count ?? 0),
+    invited: Array.isArray(d.invited_users) ? d.invited_users.length : 0,
+  }
 }
 
 export { MagicrewError, headersFor as _headers }

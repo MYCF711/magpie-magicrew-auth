@@ -25,7 +25,7 @@
 //
 // 每天跑一次，第一次就把 300 分拿完；之后每次都是 done。
 
-import { fetchPoints, fetchOnboardingTasks, completeOnboardingTask, site } from "./api.mjs"
+import { fetchPoints, fetchOnboardingTasks, completeOnboardingTask } from "./api.mjs"
 
 /** 已知不支持手动完成的任务，别再白试 */
 const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
@@ -33,8 +33,12 @@ const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
 /** 9303 = 该新人引导任务不支持手动完成 */
 const CODE_NOT_SUPPORTED = 9303
 
+/**
+ * @param {{ jwt: string, org: string, host: string }} auth
+ *   host 由调用方的插件闭包给（每个供应商绑定一个站点，不在 auth 里存站点代号）
+ */
 export async function runCheckin(auth) {
-  const host = site(auth.site).host
+  const host = auth.host
   const h = { jwt: auth.jwt, org: auth.org, host }
 
   let before = null
