@@ -419,6 +419,47 @@ export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
   }
 }
 
+// ── ④b-2 邀请奖励明细 ────────────────────────────────────────────────
+//
+//   GET /api/v1/invitations/rewards  → { page, total, list:[…] }
+//
+// 每条 = 一笔「因为邀请而该发给我的奖励」：
+//
+//   { reward_points: 1000, description: "注册奖励", status: "COMPLETED",
+//     status_description: "已完成", scheduled_at: "…", invited_user_id: "usi_…" }
+//
+// 发放条件（前端 locale 原文，2026-10-27 核对）：
+//
+//   「被邀请人完成首个任务或对话后，即可获得 {{points}} 积分奖励。」
+//   「邀请的用户开通付费套餐，在其套餐每个月度周期结束后，发放奖励积分」
+//
+// ⚠ 这就是「小号注册了、邀请人却没到账」的答案：**光注册不发**。
+//   被邀请人得真的在**产品里**跑完一次任务/对话 —— 走 socket 的那条路。
+//   通过 magpie / OpenAI 兼容网关调模型**不算**：实测同一个号用 magpie
+//   调了好几轮、真扣了积分，`first_ai_work` 仍然是 PENDING（见 CHANGELOG 0.3.9）。
+export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/invitations/rewards`, {
+    headers: headersFor(token, org, host),
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = Array.isArray(d.list) ? d.list : []
+  return {
+    total: Number(d.total ?? list.length),
+    earned: list
+      .filter((r) => String(r.status).toUpperCase() === "COMPLETED")
+      .reduce((s, r) => s + Number(r.reward_points ?? 0), 0),
+    list: list.map((r) => ({
+      points: Number(r.reward_points ?? 0),
+      description: String(r.description ?? ""),
+      status: String(r.status ?? ""),
+      statusText: String(r.status_description ?? ""),
+      scheduledAt: r.scheduled_at ?? null,
+      invitedUserId: String(r.invited_user_id ?? ""),
+    })),
+  }
+}
+
 // ── ④c 这个登录态是谁 ────────────────────────────────────────────────
 //
 // 卡片上原来显示组织码（orgcode67890 / orgcode12345），那是随机串，用户认不出是谁。
