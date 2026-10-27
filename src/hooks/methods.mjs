@@ -239,5 +239,24 @@ export function makeMethods(c) {
         }
       },
     },
+    // ── 体检 ────────────────────────────────────────────────────────
+    //
+    // 借「登录方式」这个位置挂一个**只读**检查：点一下，把本机该站点所有账号的
+    // 首任务状态、邀请人数、奖励明细一次列出来。不输入、不改任何状态。
+    //
+    // 为什么需要：邀请奖励不是注册即得，条件是「被邀请人完成首个任务或对话」
+    // （见 api.mjs 的 fetchInviteRewards 注释）。号一多就分不清哪个小号还没跑、
+    // 哪笔钱卡在什么状态 —— 这个按钮就是回答那两个问题的。
+    //
+    // ⚠ 用 throw 而不是返回 success：这不是登录，不该在账号列表里留下一条记录。
+    //   magpie 会把错误信息原样显示出来，正好当报告用。
+    {
+      type: "oauth",
+      label: `${c.SHORT}: 体检（首任务 / 邀请奖励）`,
+      async authorize() {
+        const { buildReport } = await import("../inspect.mjs")
+        throw new Error(await buildReport({ siteId: c.id === "magicrew-intl" ? "intl" : "cn" }))
+      },
+    },
   ]
 }
