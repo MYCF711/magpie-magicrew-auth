@@ -219,10 +219,11 @@ const READ_CREDS = `(() => {
   const jwt = pick("MAGIC:user:authorization")
   const org = pick("MAGIC:user:organizationCode")
   if (!jwt || !jwt.startsWith("eyJ") || !org) return ""
-  // 卡片上要显示一个能认的名字：昵称 → 真名 → 手机号 → 邮箱
-  // （服务端存的是打码手机号，昵称才是对人友好的那个）
+  // 卡片上要显示一个能认的名字：**手机号 → 邮箱 → 昵称 → 真名**
+  // （昵称是用户自己填的，可以不填也可以乱填；手机号是登录凭据本身。
+  //   服务端存的是打码版 189****051，但仍是唯一稳定的账号标识）
   const ui = obj("MAGIC:user:userInfo") || {}
-  const name = String(ui.nickname || ui.real_name || ui.phone || ui.email || "").trim()
+  const name = String(ui.phone || ui.email || ui.nickname || ui.real_name || "").trim()
   return JSON.stringify({ jwt, org, name })
 })()`
 
