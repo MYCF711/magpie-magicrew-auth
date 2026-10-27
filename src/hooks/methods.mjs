@@ -54,7 +54,7 @@ function kickoffFirstTask(c, jwt, org) {
  *   头都一样），不能拿来判断。⇒ 多组织账号在无头这条路上会落到列表第一个组织，
  *   这是已知限制，不是 bug。
  */
-async function completeSignIn(c, jwt, org, orgs = []) {
+async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null) {
   const candidates = [org, ...orgs.filter((o) => o && o !== org)]
   let lastErr = null
   let picked = null
@@ -78,12 +78,23 @@ async function completeSignIn(c, jwt, org, orgs = []) {
   await rollInvite(c.id, jwt, picked, c.host)
   kickoffFirstTask(c, jwt, picked)
   const who = await fetchWho(jwt, picked, c.host).catch(() => null)
+
+  // ⚠ `accountId` 决定 magpie 是「替换」还是「新增」—— 同一个账号在两条登录路上
+  //   必须算出同一个字符串，否则就会出现「同一个号被加了两遍」。
+  //
+  //   真机踩过：浏览器登录拿到的是打码手机号 `189****051`（fetchWho 成功，
+  //   服务端只给打码号）；无头那条路 fetchWho 挂了（438 字符的 access_token
+  //   配 Bearer 头不通），于是兜底用了组织码 `h97gkbu8bruj` ⇒ 两条并存。
+  //
+  //   所以优先用**调用方明确给的** accountId（无头路径里就是它自己算出来的打码手机号），
+  //   `who.name` 只作为补充，组织码是最后一档 —— 它绝不该当账号名。
+  const accountId = preferredAccountId || who?.name || picked
   return {
     type: "success",
     access: key.apiKey,
     refresh: key.refreshToken,
     expires: Date.now() + 2 * 3600_000,
-    accountId: who?.name || picked,
+    accountId,
     uid: picked,
     jwt,
     org: picked,
@@ -235,7 +246,9 @@ export function makeMethods(c) {
               return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
             }
             try {
-              return await completeSignIn(c, creds.jwt, creds.org, creds.orgs)
+              // 传 masked（打码手机号）当 accountId —— 浏览器登录那条路拿到的也是
+              // 这个字符串，两边一致才不会把同一个号加成两条
+              return await completeSignIn(c, creds.jwt, creds.org, creds.orgs, masked)
             } catch (e) {
               return { type: "failed", error: `登录成功了，但换 key 失败：${String(e?.message ?? e).slice(0, 300)}` }
             }
