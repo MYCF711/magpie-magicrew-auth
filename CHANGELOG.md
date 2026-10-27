@@ -13,8 +13,11 @@
 | refresh_token | **7 天** | 用一次轮换一次 |
 
 - **所有签发/续期只走 `src/keys.mjs`**，落到 `~/.cache/magpie/magicrew-key-<站点>.json`，**只保留最新一把**
-  - 之前 magpie 的 `auth.refresh` 和 loader 各有一次签发机会，两边各签一把就互相吊销，
-    表现是「显示已登录、模型也列得出来，一发请求 403」
+  - 动机：magpie 的 `auth.refresh` 和 loader 若各有一次签发机会，两份本地凭据会分叉，
+    谁都不确定手里那把是不是服务端认的
+  - ⚠ 早前版本这里写的是「签一把顶一把、旧的当场吊销」—— **那条没验证充分**。
+    实测两把不同时间签发的 `mgw_` key 可以同时有效；到底哪种操作会让旧 key 失效
+    （PUT 续期？只在 refresh_token 轮换时？）还没分清，见 internals 第十四节的更正
 - **首次运行自动接管**：key-store 空时从 magpie 存的凭据接一次，之后全部自管
 - **到期前 10 分钟自动续**（`ensureKey` 在每次请求前检查）
 - **checkin 每天顺手续一次**（24 小时提前量）：一天没请求时也不会让 refresh_token 闲置到 7 天失效
