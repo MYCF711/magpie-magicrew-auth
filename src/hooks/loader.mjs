@@ -10,6 +10,8 @@
 // ⚠ 不要在这里读流、不要重试换号、不要手拼 x-api-key ——
 //   前两件 magpie 做了，第三件看 SDK 包自动加。见 README「最小交付面」。
 
+import { ensureKey } from "../keys.mjs"
+
 export function makeLoader(c) {
   return async (getAuth) => {
     const auth = await getAuth()
@@ -22,6 +24,10 @@ export function makeLoader(c) {
         const fresh = await getAuth()
         if (!fresh) throw new Error(`${c.SHORT} 未登录`)
 
+        // key 只有一个来源（src/keys.mjs）—— 服务端签一把顶一把，多入口必互相吊销
+        const key = await ensureKey(c, getAuth)
+        if (!key) throw new Error(`${c.SHORT} 未登录（拿不到可用的 key）`)
+
         const req = input instanceof Request ? input : null
         const url =
           typeof input === "string"
@@ -32,7 +38,7 @@ export function makeLoader(c) {
 
         const incoming = new Headers(init?.headers ?? req?.headers ?? {})
         const headers = {
-          authorization: `Bearer ${fresh.access}`,
+          authorization: `Bearer ${key.apiKey}`,
           "content-type": "application/json",
         }
         if (c.needsOrgOnGateway && fresh.org) headers["organization-code"] = fresh.org
