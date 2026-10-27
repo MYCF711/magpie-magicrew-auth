@@ -21,6 +21,8 @@ import {
 import { inviteToUse, readSession, writeSession, noteLoginFailure, noteOrg, readKnownOrgs, rollInvite } from "../store.mjs"
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
+import { readVisionModel } from "../vision.mjs"
+import { finishSmsLogin, startSmsLogin } from "../headless.mjs"
 
 /**
  * 账号刚加进来（登录成功）→ 一次性把「首次 AI 工作 / 首个对话」补掉。
@@ -35,8 +37,167 @@ function kickoffFirstTask(c, jwt, org) {
     .catch(() => {})
 }
 
+/**
+ * 登录拿到 jwt + org 之后的统一收尾。
+ *
+ * 无头登录和浏览器登录最后都落到这里，保证「验证一次 / 建 key / 落 session /
+ * 记组织 / 滚邀请码 / 补首任务 / 取昵称」这一串只有一份实现。
+ */
+async function completeSignIn(c, jwt, org) {
+  // 真的验一次：读积分能过，说明 JWT + 组织码都对
+  await fetchPoints(jwt, org, c.host)
+  const key = await issueGatewayKey(jwt, org, c.host)
+  writeSession(c.id, jwt, org)
+  noteOrg(c.id, org)
+  // 滚邀请码：把这个账号自己的码存成下一次用的
+  await rollInvite(c.id, jwt, org, c.host)
+  kickoffFirstTask(c, jwt, org)
+  const who = await fetchWho(jwt, org, c.host).catch(() => null)
+  return {
+    type: "success",
+    access: key.apiKey,
+    refresh: key.refreshToken,
+    expires: Date.now() + 2 * 3600_000,
+    accountId: who?.name || org,
+    uid: org,
+    jwt,
+    org,
+  }
+}
+
 export function makeMethods(c) {
   return [
+    {
+      // 手机号 + 短信验证码，**不开浏览器**。
+      //
+      // 卡点从来不是协议，是那张「拖动滑块使图片角度为正」的图。现在的做法：
+      // 用 magpie 设置里用户自己选的识图模型（settings.json 的 vision）
+      // 判断「主体上方向指向钟面几点」，再换算成拖动角度 —— 实测 120° 的图判出 122°，
+      // 而服务端容差 ±10°，够用。
+      //
+      // 没配识图模型时不在这里瞎猜（猜中概率只有 ~5.6%，会先撞「验证提交过于频繁」），
+      // 而是让这条方法直接报错并指路 —— 详见下面那段说明。
+      type: "oauth",
+      label: `${c.SHORT} 手机号验证码`,
+      prompts: [
+        {
+          type: "text",
+          key: "phone",
+          message: "手机号",
+          placeholder: "13800138000",
+          validate: (v) =>
+            /^1\d{10}$/.test(String(v || "").replace(/[\s-]/g, "")) ? undefined : "11 位手机号，只要数字",
+        },
+      ],
+      async authorize(inputs) {
+        const phone = String(inputs?.phone || "").replace(/[\s-]/g, "")
+        if (!/^1\d{10}$/.test(phone)) return { type: "failed", error: "手机号不完整" }
+
+        const vision = readVisionModel()
+        const masked = phone.replace(/^(\d{3})\d{4}(\d{4})$/, "$1****$2")
+
+        if (!vision) {
+          // 没有识图模型 → 回退到浏览器：打不开就不硬撑。
+          //
+          // 为什么不在这里瞎猜角度：容差 ±10° 意味着瞎猜命中率只有 ~5.6%（20/360），
+          // 平均要试十几次，而服务端有「验证提交过于频繁」和「验证次数已超限」两道风控 ——
+          // 等不到猜中，先被限流。所以老老实实让用户转那一下。
+          let browser = null
+          let why = ""
+          try {
+            browser = await import("../browser-login.mjs")
+          } catch (e) {
+            why = `浏览器登录模块加载失败：${String(e?.message ?? e).slice(0, 200)}`
+            noteLoginFailure(c.id, why)
+          }
+
+          const inviteCode = inviteToUse(c.id)
+          const url = inviteCode
+            ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+            : `${c.web}/login`
+          const hostFragment = new URL(c.web).hostname
+
+          const session = browser
+            ? await browser.launchLoginBrowser(url).catch((e) => {
+                why = String(e?.message ?? e).slice(0, 300)
+                noteLoginFailure(c.id, `launch: ${why}`)
+                return null
+              })
+            : null
+
+          return {
+            url,
+            ...(session ? { opened: true } : {}),
+            instructions: session
+              ? `没有配置识图模型，那个「拖动滑块使图片角度为正」得你自己转一下 —— 已经用 ${session.name || "浏览器"} 打开了登录页。\n` +
+                `在里面选「手机登录」，填 ${masked}，把图片转正、收到验证码后填进去；登录完成这个窗口会自动接上，不用回来点任何东西。\n` +
+                `（想全自动的话：magpie 设置 → 识图模型，选一个能看图的，下次就只需要填手机号和验证码。）`
+              : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n` +
+                `登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
+            method: "auto",
+            async callback() {
+              let got = null
+              if (session && browser) {
+                got = await browser.waitForCreds(session, hostFragment).catch(() => null)
+                await browser.closeSession(session).catch(() => {})
+              }
+              if (!got && !session) {
+                got = await pollClipboard({ skip: "" }).catch(() => null)
+              }
+              if (!got) {
+                return {
+                  type: "failed",
+                  error: session
+                    ? "浏览器开着了，但 5 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？"
+                    : "5 分钟内没拿到登录状态。可以改用「登录态（JWT + 组织码）」那条备选。",
+                }
+              }
+              try {
+                if (!got.org) throw new Error("只拿到 JWT，没有组织码")
+                return await completeSignIn(c, got.jwt, got.org)
+              } catch (e) {
+                return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+              }
+            },
+          }
+        }
+
+        // 发短信这一步最慢（过验证最多试 3 张图、每张问两遍模型）。
+        // 但必须等它结束才能告诉用户「验证码已发出」—— 所以这里不甩到 callback 里。
+        let sent
+        try {
+          sent = await startSmsLogin(c, { mobile: phone })
+        } catch (e) {
+          return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+        }
+
+        return {
+          url: `${c.web}/login`,
+          instructions:
+            `验证码已发送到 ${masked}。\n` +
+            `旋转验证由识图模型（${vision}）自动通过，试了 ${sent.rounds} 张图。\n` +
+            `把收到的 6 位验证码填进下面的框就行。`,
+          method: "code",
+          opened: false,
+          async callback(code) {
+            const c0 = String(code || "").replace(/\D/g, "")
+            if (c0.length < 4) return { type: "failed", error: "验证码是 4~8 位数字" }
+            let creds
+            try {
+              creds = await finishSmsLogin(c, { mobile: phone, code: c0 })
+            } catch (e) {
+              return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+            }
+            try {
+              return await completeSignIn(c, creds.jwt, creds.org)
+            } catch (e) {
+              return { type: "failed", error: `登录成功了，但换 key 失败：${String(e?.message ?? e).slice(0, 300)}` }
+            }
+          },
+        }
+      },
+    },
+
     {
       type: "oauth",
       label: `${c.SHORT} 浏览器登录`,
