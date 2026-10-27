@@ -493,7 +493,7 @@ waitForCreds(..., { baseline })  → 第二道防线：窗口打开时就有的�
 
 代价是每次都要在这个窗口里重新登录一次 —— 独立 profile 本来也没有他日常浏览器的 cookie。
 
-判据（可复跑）：`node tools/_verify_profile_scope.mjs` —— 窗口打开 4 秒后
+判据（可复跑）：`node tools/verify-profile-scope.mjs` —— 窗口打开 4 秒后
 `READ_CREDS` 必须返回**空串**，关窗后目录必须不存在。单元测试见 `tests/login-profile.mjs`。
 
 **③ `authorize()` 里可以 await 启动浏览器（~270ms），但不能 await 用户操作。**
