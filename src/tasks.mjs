@@ -74,8 +74,25 @@ export async function runCheckin(auth) {
     failed = true
     parts.push(`新手任务读取失败：${tasksErr?.message ?? tasksErr}`)
   } else if (!tasks.length) {
-    // ⚠ 空列表 ≠ 已完成。国际站这个接口对未登记账号恒返回空数组。
-    parts.push("本站无新手福利任务")
+    // 国际站：onboarding 接口恒返回空数组，没有「新手福利」这套任务。
+    // 但**邀请奖励的判据是一样的** —— 官方 locale 原文「被邀请人完成首个任务
+    // 或对话后，即可获得 {{points}} 积分奖励」，而国际站没有任务清单，
+    // 所以那条判据在这边就等于「发过一条消息」。
+    //
+    // 实测（2026-10-28）：新号发一条消息后，邀请人立刻 +200。
+    //
+    // 怎么判断「要不要发」：看这个账号有没有工作台项目 ——
+    //   一个项目都没有 = 从没发过消息 → 建项目 + 发一条
+    //   已经有项目     = 用过 → 跳过（别每天签到都发，白烧积分）
+    const r = await autoFirstChat(h)
+    if (r.ok) {
+      claimedAnything = true
+      parts.push(`首对话：已自动完成（${r.topicName}，模型 ${r.model}）`)
+    } else if (r.skipped) {
+      parts.push("首对话：此前已用过，跳过")
+    } else {
+      parts.push(`首对话：${r.reason}`)
+    }
   } else {
     const pending = tasks.filter((t) => t.status !== "COMPLETED" && t.rewardStatus !== "GRANTED")
 
@@ -186,6 +203,31 @@ async function autoFirstWork(h) {
     return { ok: true, pending: true }
   } catch (e) {
     return { ok: false, reason: String(e?.message ?? e) }
+  }
+}
+
+/**
+ * 国际站的「首个对话」：没有任务清单可依，只能看它用没用过。
+ *
+ * 判据是**有没有工作台项目**：项目是发第一条消息时前端顺带建的，
+ * 一个都没有基本等于从没说过话。已经有项目就跳过，免得每天签到都发一条。
+ *
+ * @returns {{ok?:boolean, skipped?:boolean, reason?:string, topicName?:string, model?:string}}
+ */
+async function autoFirstChat(h) {
+  try {
+    const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
+    if (!wsId) return { reason: "这个账号还没有工作区，先在网页里进一次" }
+
+    const { findProjectId, runChatTask } = await import("./chat-task.mjs")
+    const existing = await findProjectId(h.jwt, h.org, h.host, wsId).catch(() => "")
+    if (existing) return { skipped: true }
+
+    const r = await runChatTask({ jwt: h.jwt, org: h.org, host: h.host, workspaceId: wsId })
+    if (!r.ok) return { reason: r.reason || "发送失败" }
+    return { ok: true, topicName: r.topicName, model: r.model }
+  } catch (e) {
+    return { reason: String(e?.message ?? e) }
   }
 }
 
