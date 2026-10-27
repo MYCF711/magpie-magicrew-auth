@@ -460,6 +460,22 @@ export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
   }
 }
 
+// ── ④d 第一个工作区 ──────────────────────────────────────────────────
+//
+// 自动完成首任务要打开 `/<站点>/global/super/workspace/<id>`，这个 id 只有接口给。
+// 每个账号注册时会自动建一个默认工作区，取第一个就够。
+export async function fetchFirstWorkspaceId(token, org, host = SITES.cn.host) {
+  const res = await fetch(
+    `${host}/api/v1/super-agent/workspaces/queries?page=1&page_size=1&pin_priority=true`,
+    { headers: headersFor(token, org, host) },
+  )
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = d.list ?? d.items ?? []
+  const w = list[0] ?? null
+  return String(w?.id ?? w?.workspace_id ?? w?.workspaceId ?? "")
+}
+
 // ── ④c 这个登录态是谁 ────────────────────────────────────────────────
 //
 // 卡片上原来显示组织码（orgcode67890 / orgcode12345），那是随机串，用户认不出是谁。
