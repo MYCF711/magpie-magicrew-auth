@@ -442,7 +442,7 @@ linux   xclip -selection clipboard -o
 launchLoginBrowser(url)
   → findBrowser()          Edge / Chrome / Brave / Chromium，按平台列路径逐个 existsSync
   → spawn(exe, [
-      --user-data-dir=~/.cache/magpie/magicrew-login-profile,
+      --user-data-dir=~/.cache/magpie/magicrew-login-<pid>-<ts>-<rand>,   ← 一次性，见下面 ②
       --remote-debugging-port=0,      ← 0 = 让系统挑空闲端口
       --no-first-run, --no-default-browser-check,
       url,
@@ -473,10 +473,28 @@ JSON.stringify({ jwt: pick("MAGIC:user:authorization"), org: pick("MAGIC:user:or
 抛 SecurityError，被 `catch` 吞掉→看起来像「一直读不到」。必须只认 URL 匹配的 target，
 匹配不上返回 null 让轮询继续。实测：启动 → 页面就绪只需 **1.5 秒**，但必须等到它跳转。
 
-**② profile 目录不能删。**
-独立 profile 意味着用户在这个窗口里要重新登录一次（没有他日常浏览器的 cookie）。
-下次登录还用它，登录态就还在 —— 所以目录固定为
-`~/.cache/magpie/magicrew-login-profile`，只 `kill()` 进程，不删目录。
+**② profile 目录必须一次性，用完删。**（2026-10-27 更正 —— 这里原先写的是「不能删」）
+
+原先固定复用 `~/.cache/magpie/magicrew-login-profile`，理由是「登录态留着，下次不用重登」。
+那会制造一个很隐蔽的串号 bug：**添加第二个账号时，浏览器一打开，localStorage 里就躺着
+上一个账号的 jwt + org**，`waitForCreds` 第一轮（1.5 秒内）命中 → 立刻关窗；magpie 拿到的
+`accountId` / `uid` 与已有账号一模一样，按契约「同一 accountId + 同一 uid → 替换旧账号」，
+于是**不新增账号**。用户看到的就是「网页闪一下就没了，登录成功但 magpie 里没多出账号」。
+
+现在的做法：
+
+```
+newProfileDir()        → magicrew-login-<pid>-<ts36>-<rand>，每次登录一个
+sweepProfiles()        → launch 开头先清：历史复用目录一律删、一次性目录超过 2h 删
+                         （只认本插件造的名字，且只动目录 —— 同前缀的 .log 不动）
+closeSession()         → 关窗后删掉这一次的目录；删不掉留给下次 sweep
+waitForCreds(..., { baseline })  → 第二道防线：窗口打开时就有的凭据不算登录成功
+```
+
+代价是每次都要在这个窗口里重新登录一次 —— 独立 profile 本来也没有他日常浏览器的 cookie。
+
+判据（可复跑）：`node tools/_verify_profile_scope.mjs` —— 窗口打开 4 秒后
+`READ_CREDS` 必须返回**空串**，关窗后目录必须不存在。单元测试见 `tests/login-profile.mjs`。
 
 **③ `authorize()` 里可以 await 启动浏览器（~270ms），但不能 await 用户操作。**
 `launchLoginBrowser` 实测 273ms 返回，可接受；`waitForCreds` 必须放到 `callback()` 里。

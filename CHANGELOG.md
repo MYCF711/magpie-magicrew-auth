@@ -1,5 +1,22 @@
 # 更新记录
 
+## 0.3.6
+
+**修：添加第二个账号时网页闪一下就关，magpie 里没多出账号**
+
+- 症状：点「添加账号」→ 浏览器正常弹出 → 一两秒内自己关掉；用户确实也登录成功了，但账号列表里没有新账号
+- 根因：登录浏览器**复用**同一个 profile（`~/.cache/magpie/magicrew-login-profile`）。第二个窗口一打开，
+  localStorage 里就是上一个账号的 `MAGIC:user:authorization` / `organizationCode`，`waitForCreds`
+  第一轮（1.5 秒）读到它 → 判定登录完成 → 关窗；magpie 拿到的 `accountId` / `uid` 与已有账号完全相同，
+  按契约「同 accountId + 同 uid → 替换旧账号」→ 不新增
+- 修法：每次登录一个**一次性** profile（`magicrew-login-<pid>-<ts>-<rand>`），`closeSession()` 关窗后删；
+  `launchLoginBrowser()` 开头先 `sweepProfiles()` 清掉历史复用目录与超过 2 小时的一次性目录
+  （只认本插件造的名字，且只动目录 —— 同前缀的 `.log` 不碰）
+- 第二道防线：`waitForCreds(..., { baseline })` —— 窗口打开时就存在的凭据不算登录成功
+- 代价：每次都要在窗口里重新登录一次（独立 profile 本来也没有日常 cookie），换来「读到的凭据一定是本次的」
+- 判据：`node tools/_verify_profile_scope.mjs`（窗口打开 4 秒后 `READ_CREDS` 必须是空串、关窗后目录必须不存在）
+  + `node tests/login-profile.mjs`
+
 ## 0.3.5
 
 **卡片上多一个「承载」徽章：`magpie.carries`**

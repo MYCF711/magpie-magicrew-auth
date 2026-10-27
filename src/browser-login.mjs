@@ -13,20 +13,67 @@
 // 页面是我们自己开的，告诉 magpie 「别再开一次」。
 //
 // ⚠ 独立 profile 意味着用户要在这个窗口里登一次（没有他日常浏览器的 cookie）。
-//   所以 profile 目录**不删**，下次还能复用登录态：~/.cache/magpie/magicrew-login-profile
+//   **每次登录一个一次性 profile，用完删** —— 为什么不能复用，见下面 newProfileDir()。
 
 import { spawn } from "node:child_process"
-import { existsSync, readFileSync, mkdirSync } from "node:fs"
+import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-/** 复用同一个 profile：第二次登录时里面已经有 cookie 了 */
-function profileDir() {
-  const d = join(homedir(), ".cache", "magpie", "magicrew-login-profile")
-  try {
-    mkdirSync(d, { recursive: true })
-  } catch {}
+const BASE = () => join(homedir(), ".cache", "magpie")
+
+/**
+ * 每次登录一个**一次性** profile 目录，登录结束就删。
+ *
+ * ⚠ 这里曾经刻意复用同一个目录（旧注释：`复用同一个 profile：第二次登录时里面已经有 cookie 了`），
+ *   那是个 bug —— 现象是「添加第二个账号时，网页正确弹出、然后瞬间关闭，
+ *   magpie 里也没多出账号」：
+ *
+ *     ① 复用目录里的 localStorage 还躺着**上一个账号**的 jwt + org；
+ *     ② 浏览器一打开，`waitForCreds` 第一轮（1.5 秒内）就读到它 → 判定「登录完成」→ 关窗；
+ *     ③ magpie 拿到的 accountId / uid 与已有账号一模一样，按契约
+ *        （同一 accountId + 同一 uid → 替换旧账号）不会新增账号。
+ *
+ *   一次性目录把这条路彻底堵死：读到的凭据只可能是本次登录写进去的。
+ *   代价是每次都要在这个窗口里重新登一次 —— 独立 profile 本来也没有他日常浏览器的 cookie。
+ */
+export function newProfileDir() {
+  const d = join(
+    BASE(),
+    `magicrew-login-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  )
+  mkdirSync(d, { recursive: true })
   return d
+}
+
+/**
+ * 清残留：超过 maxAgeMs 的一次性 profile，以及历史上那个**复用**目录
+ * （`magicrew-login-profile`，里面装着别的账号的 cookie —— 正是上面那个 bug 的来源）。
+ * 只删本插件自己造的名字，别的一概不碰。
+ */
+export function sweepProfiles({ maxAgeMs = 2 * 3600_000 } = {}) {
+  let names = []
+  try {
+    names = readdirSync(BASE())
+  } catch {
+    return 0
+  }
+  let removed = 0
+  for (const name of names) {
+    const legacy = name === "magicrew-login-profile"
+    if (!legacy && !/^magicrew-login-/.test(name)) continue
+    const p = join(BASE(), name)
+    try {
+      // ⚠ 只动目录：同前缀的日志文件（magicrew-login-*.log）不是 profile
+      const st = statSync(p)
+      if (!st.isDirectory()) continue
+      // 遗留的复用目录不管多新都删；一次性目录只在过期后删（可能正有别的账号在登）
+      if (!legacy && Date.now() - st.mtimeMs < maxAgeMs) continue
+      rmSync(p, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+      removed++
+    } catch {}
+  }
+  return removed
 }
 
 /** 按平台找浏览器；找不到返回 null，调用方降级 */
@@ -91,8 +138,11 @@ export async function launchLoginBrowser(url) {
   const exe = findBrowser()
   if (!exe) throw new Error("本机没找到 Chrome / Edge / Bravo / Chromium")
 
-  const dir = profileDir()
-  // ⚠ 上一次的残留会让这次「看起来起来了、其实什么都没做」：
+  // 先扫掉上一次登录留下的临时 profile（含历史复用目录），再开一个全新的
+  sweepProfiles()
+  const dir = newProfileDir()
+  // ⚠ 残留会让这次「看起来起来了、其实什么都没做」—— 一次性目录里通常没有，
+  //   但 sweep 失败、或目录被复用时它们就是根因，清一遍几乎不花钱：
   //   DevToolsActivePort  —— 不清掉，waitPort 会立刻返回一个已失效的旧端口
   //   SingletonLock / SingletonCookie / SingletonSocket / lockfile
   //                       —— 不清掉，新进程判定 profile 被占用，把 URL 转交给
@@ -127,6 +177,9 @@ export async function launchLoginBrowser(url) {
   if (!port) {
     try {
       child.kill()
+    } catch {}
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
     } catch {}
     throw new Error("浏览器进程起来了，但 8 秒内没写出调试端口 DevToolsActivePort（多半是 profile 被一个已退出的实例占着）")
   }
@@ -229,16 +282,31 @@ const READ_CREDS = `(() => {
 
 /**
  * 盯着那个浏览器，直到页面里的 localStorage 出现完整凭据。
- * @returns {Promise<{jwt:string, org:string} | null>}
+ *
+ * `baseline` = 「窗口打开时就已经在 localStorage 里的那份」。传进来的话，
+ * 只有**跟它不一样**的凭据才算登录成功。一次性 profile 下它恒为空，
+ * 留着是第二道防线：万一哪天又改回复用目录，这条判据能挡住「读到上一个账号」。
+ *
+ * @param {{jwt:string, org:string}|null} [opts.baseline]
+ * @param {(port:number, host:string, expr:string)=>Promise<string>} [opts.probe] 测试注入用
+ * @returns {Promise<{jwt:string, org:string, name?:string} | null>}
  */
-export async function waitForCreds(session, hostFragment, { timeout = 300_000, interval = 1500 } = {}) {
+export async function waitForCreds(
+  session,
+  hostFragment,
+  { timeout = 300_000, interval = 1500, baseline = null, probe = evaluate } = {},
+) {
+  const base = baseline ?? session?.baseline ?? null
   const deadline = Date.now() + timeout
   while (Date.now() < deadline) {
     try {
-      const raw = await evaluate(session.port, hostFragment, READ_CREDS)
+      const raw = await probe(session.port, hostFragment, READ_CREDS)
       if (raw) {
         const o = JSON.parse(raw)
-        if (o?.jwt?.startsWith("eyJ") && o?.org) return o
+        if (o?.jwt?.startsWith("eyJ") && o?.org) {
+          const same = base && o.jwt === base.jwt && o.org === base.org
+          if (!same) return o
+        }
       }
     } catch {
       // 页面还在加载 / target 换了 —— 下一轮再试
@@ -249,13 +317,17 @@ export async function waitForCreds(session, hostFragment, { timeout = 300_000, i
 }
 
 /**
- * 关掉这个浏览器窗口。profile 留着，下次复用登录态。
+ * 关掉这个浏览器窗口，然后把这一次的临时 profile 删掉。
  *
  * 两条路都要走：
- *   ① CDP 的 `Browser.close` —— 走浏览器自己的退出流程，cookie 会被刷到磁盘
- *      （profile 里没有落盘的 cookie，下次登录还得再来一次）
+ *   ① CDP 的 `Browser.close` —— 走浏览器自己的退出流程，进程干净退出
  *   ② 兜底 kill —— ①在 2 秒内没关掉就强杀整棵进程树
- *      （Windows 上 kill() 只杀主进程，渲染/GPU 子进程会留着占住 profile）
+ *      （Windows 上 kill() 只杀主进程，渲染/GPU 子进程会留着占住 profile，
+ *        后面的 rmSync 也会因为文件锁失败）
+ *
+ * ⚠ profile 是**一次性**的，删掉是对的：里面只有这次登录的 cookie，
+ *   留着只会让下一次登录读到上一个账号（见 newProfileDir 的注释）。
+ *   删不掉不影响正确性 —— 下次 launch 会先 sweepProfiles()。
  */
 export async function closeSession(session) {
   if (!session) return
@@ -302,21 +374,35 @@ export async function closeSession(session) {
 
   // ② 兜底：还活着就强杀整棵进程树
   const pid = session.child?.pid
-  if (!pid) return
-  try {
-    if (process.platform === "win32") {
-      await new Promise((resolve) => {
-        const k = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
-        k.on("exit", resolve)
-        k.on("error", resolve)
-        setTimeout(resolve, 3000)
-      })
-    } else {
-      try {
-        session.child.kill("SIGKILL")
-      } catch {}
+  if (pid) {
+    try {
+      if (process.platform === "win32") {
+        await new Promise((resolve) => {
+          const k = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
+          k.on("exit", resolve)
+          k.on("error", resolve)
+          setTimeout(resolve, 3000)
+        })
+      } else {
+        try {
+          session.child.kill("SIGKILL")
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // ③ 删掉这一次的临时 profile。文件锁通常要等子进程死透才放，
+  //    所以给它几次机会；删不掉就算了，下次 launch 会 sweep。
+  const dir = session.dir
+  if (!dir) return
+  for (let i = 0; i < 5; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
+      return
+    } catch {
+      await new Promise((r) => setTimeout(r, 200))
     }
-  } catch {}
+  }
 }
 
-export const _internal = { READ_CREDS, profileDir, waitPort, evaluate }
+export const _internal = { READ_CREDS, newProfileDir, sweepProfiles, waitPort, evaluate }
