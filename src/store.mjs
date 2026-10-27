@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
+import { fetchOwnInviteCode } from "./api.mjs"
 
 function cacheDir() {
   return join(homedir(), ".cache", "magpie")
@@ -117,12 +118,30 @@ function inviteToUse(siteId) {
   return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
 }
 
-/** 登录成功后把账号自己的邀请码滚上去；拿不到就安静跳过 */
+/** 滚动请求最多等这么久 —— 登录流程不能被它拖死 */
+const INVITE_TIMEOUT_MS = 6000
+
+/**
+ * 登录成功后把账号自己的邀请码滚上去；失败不挡登录。
+ *
+ * ⚠ 这个函数曾经**完全没有 import `fetchOwnInviteCode`**（0.3.7 及更早版本）。
+ *   于是每次调用都在调它的那一行抛 ReferenceError，又被下面的空 catch 静默吞掉 ——
+ *   「滚动邀请码」这个功能从上线起一次都没成功过：
+ *   magicrew-invite-<site>.json 永远不存在，每次注册都退回作者码，
+ *   等于每个新号都在给作者送 200 分（国内站 1,000 分）。
+ *   留痕留在 MAGICREW_DEBUG 下，就是为了不再重演这种「静默停摆」。
+ */
 async function rollInvite(siteId, jwt, org, host) {
   try {
-    const own = await fetchOwnInviteCode(jwt, org, host)
+    const own = await Promise.race([
+      fetchOwnInviteCode(jwt, org, host),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("超时")), INVITE_TIMEOUT_MS)),
+    ])
     return writeInvite(siteId, own.code)
-  } catch {
+  } catch (e) {
+    if (process.env.MAGICREW_DEBUG) {
+      console.error(`[magicrew] 滚动邀请码失败（${siteId}）：${e?.message ?? e}`)
+    }
     return ""
   }
 }
