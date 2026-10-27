@@ -90,7 +90,7 @@
 
 ## 安装
 
-在 magpie 的 **插件 → 发现** 搜 `magpie-magicrew-auth`，点**安装**。
+在 magpie 的 **插件 → 发现** 搜 `magicrew`，点**安装**。
 
 装完选站点，然后**点第一个「浏览器登录」** —— 没有任何输入框，插件自己把浏览器拉起来：
 
@@ -122,12 +122,12 @@ DevTools → Application → Local Storage → https://www.magicrew.ai
 ### 命令行
 
 ```bash
-# 从 npm（推荐）
-magpie plugin add magpie-magicrew-auth
-
-# 从仓库源码（拿最新代码，不走 npm）
 magpie plugin add github:MYCF711/magpie-magicrew-auth
 ```
+
+> 卡片标题取自 `package.json` 的 `name`，也就是 **`Magicrew`**。
+> 包名从 `magpie-magicrew-auth` 改成 `Magicrew` 之后，已经装过的用户要
+> `magpie plugin rm magpie-magicrew-auth` 再装一次。
 
 装完确认：
 

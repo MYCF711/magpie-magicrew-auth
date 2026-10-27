@@ -379,4 +379,26 @@ export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
   }
 }
 
+// ── ④c 这个登录态是谁 ────────────────────────────────────────────────
+//
+// 卡片上原来显示组织码（67u4oe6fbenj / h97gkbu8bruj），那是随机串，用户认不出是谁。
+// 这里取一个能认的名字，优先级：昵称 → 真名 → 手机号 → 邮箱 → 组织码。
+//
+// ⚠ 服务端把手机号打码了（实测 `189****051`），邮箱常常是 null ——
+//   所以实际能用的多半是 nickname。
+//
+// 接口来自客户端缓存里出现过的清单（docs/internals.md 第九节的办法找到的）。
+export async function fetchWho(token, org, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/contact/accounts/me/users`, { headers: headersFor(token, org, host) })
+  const body = await read(res)
+  const u = body?.data?.items?.[0] ?? body?.data ?? {}
+  const name = String(u.nickname || u.real_name || u.phone || u.email || "").trim()
+  return {
+    name,
+    nickname: String(u.nickname || "").trim(),
+    phone: String(u.phone || ""),
+    email: String(u.email || ""),
+  }
+}
+
 export { MagicrewError, headersFor as _headers }

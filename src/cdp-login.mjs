@@ -69,7 +69,7 @@ export function findBrowser() {
  * 文件两行：第一行端口，第二行 ws 路径。`--remote-debugging-port=0` 让系统挑端口，
  * 避免和已有的调试端口撞车。
  */
-async function waitPort(dir, timeoutMs = 20_000) {
+async function waitPort(dir, timeoutMs = 8_000) {
   const f = join(dir, "DevToolsActivePort")
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -89,14 +89,20 @@ async function waitPort(dir, timeoutMs = 20_000) {
  */
 export async function launchLoginBrowser(url) {
   const exe = findBrowser()
-  if (!exe) return null
+  if (!exe) throw new Error("本机没找到 Chrome / Edge / Bravo / Chromium")
 
   const dir = profileDir()
-  // 上一次没清干净的端口文件会让 waitPort 立刻返回旧端口 —— 先删
-  try {
-    const { unlinkSync } = await import("node:fs")
-    unlinkSync(join(dir, "DevToolsActivePort"))
-  } catch {}
+  // ⚠ 上一次的残留会让这次「看起来起来了、其实什么都没做」：
+  //   DevToolsActivePort  —— 不清掉，waitPort 会立刻返回一个已失效的旧端口
+  //   SingletonLock / SingletonCookie / SingletonSocket / lockfile
+  //                       —— 不清掉，新进程判定 profile 被占用，把 URL 转交给
+  //                          那个已经死掉的实例，然后自己退出
+  const { unlinkSync } = await import("node:fs")
+  for (const f of ["DevToolsActivePort", "SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile"]) {
+    try {
+      unlinkSync(join(dir, f))
+    } catch {}
+  }
 
   let child
   try {
@@ -113,8 +119,8 @@ export async function launchLoginBrowser(url) {
       ],
       { stdio: "ignore", detached: false, windowsHide: false },
     )
-  } catch {
-    return null
+  } catch (e) {
+    throw new Error(`浏览器启动失败：${e?.message ?? e}`)
   }
 
   const port = await waitPort(dir)
@@ -122,7 +128,7 @@ export async function launchLoginBrowser(url) {
     try {
       child.kill()
     } catch {}
-    return null
+    throw new Error("浏览器进程起来了，但 8 秒内没写出调试端口 DevToolsActivePort（多半是 profile 被一个已退出的实例占着）")
   }
   return { port, dir, child }
 }
@@ -195,22 +201,29 @@ async function evaluate(port, hostFragment, expression, timeoutMs = 8000) {
 
 /** 在页面的 localStorage 里取 jwt + 组织码 —— 一次求值，两个都拿 */
 const READ_CREDS = `(() => {
+  const raw = (k) => { try { return localStorage.getItem(k) || "" } catch { return "" } }
   const pick = (k) => {
+    const s = raw(k)
+    if (!s) return ""
     try {
-      const raw = localStorage.getItem(k)
-      if (!raw) return ""
-      try {
-        const o = JSON.parse(raw)
-        return typeof o === "object" && o ? String(o.value ?? "") : String(raw)
-      } catch {
-        return String(raw)
-      }
-    } catch { return "" }
+      const o = JSON.parse(s)
+      return typeof o === "object" && o ? String(o.value ?? "") : String(s)
+    } catch { return s }
+  }
+  const obj = (k) => {
+    try {
+      const o = JSON.parse(raw(k))
+      return (o && typeof o === "object" ? (o.value ?? o) : null) || null
+    } catch { return null }
   }
   const jwt = pick("MAGIC:user:authorization")
   const org = pick("MAGIC:user:organizationCode")
   if (!jwt || !jwt.startsWith("eyJ") || !org) return ""
-  return JSON.stringify({ jwt, org })
+  // 卡片上要显示一个能认的名字：昵称 → 真名 → 手机号 → 邮箱
+  // （服务端存的是打码手机号，昵称才是对人友好的那个）
+  const ui = obj("MAGIC:user:userInfo") || {}
+  const name = String(ui.nickname || ui.real_name || ui.phone || ui.email || "").trim()
+  return JSON.stringify({ jwt, org, name })
 })()`
 
 /**
@@ -236,8 +249,15 @@ export async function waitForCreds(session, hostFragment, { timeout = 300_000, i
 
 /** 关掉这个浏览器窗口（profile 留着，下次复用登录态） */
 export function closeSession(session) {
+  const pid = session?.child?.pid
+  if (!pid) return
   try {
-    session.child?.kill()
+    if (process.platform === "win32") {
+      // kill() 只杀主进程，渲染/GPU 子进程会留着占住 profile
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
+    } else {
+      session.child.kill("SIGKILL")
+    }
   } catch {}
 }
 
