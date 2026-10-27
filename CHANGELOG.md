@@ -37,6 +37,56 @@
 - 奖励进的是当日 23:59:59 过期的额度包（`expire_type:1`），不累积
 - 接口来源：网页登录过程抓包（CDP Network），`POST /api/v1/login-gift` 无请求体
 
+---
+
+**邀请码滚动修复：`store.mjs` 少了一行 import，这个功能从上线起就没工作过**
+
+症状：每个新号注册，浏览器都被带到 `?invitation=<作者的码>`。用户自己的
+`invite_count` 永远是 0 —— 也就是说每注册一个号，都在给作者送积分
+（国际站 200/次，国内站 1,000/次）。
+
+根因：`src/store.mjs` 的 `rollInvite()` 里调 `fetchOwnInviteCode()`，但文件头
+**只 import 了 `node:fs` / `node:os` / `node:path`**，从来没 import 过这个函数。
+于是每次调用都在那一行抛 `ReferenceError`，又被下面的空 `catch {}` 静默吞掉：
+
+```js
+async function rollInvite(siteId, jwt, org, host) {
+  try {
+    const own = await fetchOwnInviteCode(jwt, org, host)  // ← ReferenceError
+    return writeInvite(siteId, own.code)
+  } catch {
+    return ""          // ← 错误在这里消失，调用方只看到「没滚到」
+  }
+}
+```
+
+结果 `magicrew-invite-<site>.json` 从来没被写过，`inviteToUse()` 每次都掉进
+「没有记录 → 用作者码」这个分支。滚动机制形同虚设。
+
+修法：
+
+- `src/store.mjs` 补上 `import { fetchOwnInviteCode } from "./api.mjs"`
+  （`api.mjs` 不反向依赖 store，无循环依赖）
+- `rollInvite` 加 6 秒超时（`Promise.race`），失败不再完全静默 ——
+  设 `MAGICREW_DEBUG=1` 时打一行错误，避免同类问题再次「安静地死掉」
+- `src/hooks/methods.mjs` 三处调用从 `rollInvite(...).catch(() => {})`
+  改成 `await rollInvite(...)`：发射后不管的话，host 进程在 callback 之后被回收，
+  滚动一样会丢
+- `src/hooks/checkin.mjs` 每天签到时顺带滚一次 —— 登录那一路万一被打断，
+  第二天还能补上
+
+实测（2026-10-27，隔离 HOME 里验的，不污染真实配置）：
+
+| 站点 | 滚动前 | 滚动后 |
+|---|---|---|
+| 国际站 | `IV75F0ZKVKXG`（作者） | `IVF4A4H12KM8`（账号自己的） |
+| 国内站 | `IVC8BAWYXRY1`（作者） | `IV1475HL797R`（账号自己的） |
+
+> 附带更正 `src/api.mjs` 里一条过时的注释：原来写「网页版 JWT（`device_id` 空）
+> 调 `/api/v1/invitations/info` 回 2155 用户不存在」。实测四个账号全是 354 字符的
+> 网页 JWT、`device_id` 全为空，接口全部返回 200 并正常给出邀请码 ——
+> 上游已经放宽了这个限制，滚动现在是通的，只是以前的 import 缺失挡住了它。
+
 ## 0.3.7
 
 **登录先看本机浏览器：你在自己浏览器里登过，插件直接认，不再开窗让你重登**
