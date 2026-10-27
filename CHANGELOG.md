@@ -8,11 +8,9 @@
 - 成因：那个徽章的数据源是 `provider.MovedOnto`，只认 **magpie 内置订阅被迁移到插件上**。
   Magicrew 从来不是内置订阅（`internal/provider/migrate.go` 的 `movers` 表），所以永远是空
 - 修法：magpie 加 `magpie.carries` —— 插件在 `package.json` 里自己声明它承载哪些供应商，
-  后端读进 `pluginEntryJSON.Served`，前端照样画同一个 `pm-chip moved`
+  后端读进 `pluginEntryJSON.Carries`（JSON 字段 `carries`），前端照样画同一个 `pm-chip moved`
 - 本插件声明：`["超级麦吉 (letsmagic.cn)", "MagiCrew (magicrew.ai)"]`
 - 兼容性：**旧 magpie 不认这个字段，直接忽略**；只有带 `carries` 能力的 magpie 才画这个徽章
-
-## 0.3.5
 
 **上下文窗口的三档优先级，兜底从 256K 提到 1M**
 
