@@ -34,11 +34,28 @@ function roots() {
   const h = homedir()
   if (process.platform === "win32") {
     const local = process.env.LOCALAPPDATA || join(h, "AppData", "Local")
+    const roaming = process.env.APPDATA || join(h, "AppData", "Roaming")
     return [
+      // ── 国际主流 ──
       ["Edge", join(local, "Microsoft", "Edge", "User Data")],
       ["Chrome", join(local, "Google", "Chrome", "User Data")],
       ["Brave", join(local, "BraveSoftware", "Brave-Browser", "User Data")],
       ["Chromium", join(local, "Chromium", "User Data")],
+      ["Vivaldi", join(local, "Vivaldi", "User Data")],
+      // ── 国产 Chromium 系 ──
+      // ⚠ 2026-10-28 实测：用户日常用的是 360 极速浏览器 X（360ChromeX），
+      //   它的 localStorage 里确实有 www.letsmagic.cn 的记录。
+      //   不加这一行，「本机浏览器已登录就直接认」这条首选路径对它永远不生效 ——
+      //   用户明明在网页上登着，插件却还要他再登一次。
+      ["360极速浏览器X", join(local, "360ChromeX", "Chrome", "User Data")],
+      ["360浏览器", join(local, "360Chrome", "Chrome", "User Data")],
+      ["360安全浏览器", join(roaming, "secoresdk", "360se6", "User Data")],
+      ["QQ浏览器", join(local, "Tencent", "QQBrowser", "User Data")],
+      ["搜狗浏览器", join(local, "SogouExplorer", "User Data")],
+      ["2345浏览器", join(local, "2345Explorer", "User Data")],
+      ["猎豹浏览器", join(local, "liebao", "User Data")],
+      ["UC浏览器", join(local, "UCBrowser", "User Data")],
+      ["夸克浏览器", join(local, "Quark", "User Data")],
     ]
   }
   if (process.platform === "darwin") {
@@ -47,6 +64,7 @@ function roots() {
       ["Edge", join(h, "Library/Application Support/Microsoft Edge")],
       ["Brave", join(h, "Library/Application Support/BraveSoftware/Brave-Browser")],
       ["Chromium", join(h, "Library/Application Support/Chromium")],
+      ["Vivaldi", join(h, "Library/Application Support/Vivaldi")],
     ]
   }
   return [
@@ -54,6 +72,7 @@ function roots() {
     ["Chromium", join(h, ".config/chromium")],
     ["Edge", join(h, ".config/microsoft-edge")],
     ["Brave", join(h, ".config/BraveSoftware/Brave-Browser")],
+    ["Vivaldi", join(h, ".config/vivaldi")],
   ]
 }
 

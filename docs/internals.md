@@ -477,18 +477,80 @@ knownOrgs 去重）。真机：`node tests/smoke.mjs` 仍能跑通（凭据从�
 
 ```
 launchLoginBrowser(url)
-  → findBrowser()          Edge / Chrome / Brave / Chromium，按平台列路径逐个 existsSync
-  → spawn(exe, [
-      --user-data-dir=~/.cache/magpie/magicrew-login-<pid>-<ts>-<rand>,   ← 一次性，见下面 ②
-      --remote-debugging-port=0,      ← 0 = 让系统挑空闲端口
-      --no-first-run, --no-default-browser-check,
-      url,
-    ])
-  → 等 <user-data-dir>/DevToolsActivePort 出现，第一行是端口
+  → browserCandidates()    按优先级列出候选，逐个 existsSync 过滤出真实存在的
+  → 对每个候选依次 launchOne()：
+      spawn(exe, [
+        --user-data-dir=~/.cache/magpie/magicrew-login-<pid>-<ts>-<rand>,   ← 一次性，见下面 ②
+        --remote-debugging-port=0,      ← 0 = 让系统挑空闲端口
+        --no-first-run, --no-default-browser-check,
+        url,
+      ])
+      等 <user-data-dir>/DevToolsActivePort 出现，第一行是端口
+      ├─ 拿到端口 → 就用它，返回 { port, dir, child, name, exe }
+      └─ 没拿到   → 杀进程 + 删目录，换下一个候选
+  → 全部失败才抛错，错误里带每个候选的失败原因
 ```
 
 ⚠ 启动前**必须删掉** `DevToolsActivePort` —— 上一次残留的文件会让 `waitPort` 立刻
 返回一个已经失效的旧端口。
+
+#### 浏览器优先级（0.3.13，按「谁最干净」而不是名气）
+
+```
+① Chrome / Chromium   自己装的，无企业策略、无强制登录、无侧边栏  ← 首选
+② 国产 Chromium 系    360 / QQ / 搜狗 / 2345 / 猎豹 / UC / 夸克 —— 用户日常在用的
+③ Edge                垫底
+```
+
+Edge 放最后的三个理由：
+
+1. 企业/组策略常禁用远程调试，是所有候选里**起不来概率最高**的
+2. 会被系统账号强制接管、带侧边栏与首次运行引导
+3. 用户明确反馈不愿意用
+
+#### ⚠ 本案根因（2026-10-28）：`msedge.exe` 这个名字是错的
+
+现象：点「浏览器登录」→ 用户在浏览器里登完了、页面跳到 agent 界面了 →
+magpie 卡片一直停在「请在浏览器中完成登录」，5 分钟后超时。
+
+判据（每次登录都往这里写一行）：
+
+```
+~/.cache/magpie/magicrew-login-<site>.log
+  [2026-10-27T16:33:25.497Z] launch: 本机没找到 Chrome / Edge / Bravo / Chromium
+```
+
+**但这台机器上 Edge 是装着的**（`122.0.2365.106`，微软官方包）。查下来：
+
+```
+注册表 HKLM\...\StartMenuInternet\Microsoft Edge\shell\open\command
+  → "C:\Program Files (x86)\Microsoft\Edge\Application\Microsoft Edge.exe"
+
+实际目录里：  "Microsoft Edge.exe"    ← 微软落盘的名字，带空格、带大写
+代码里写死：  "msedge.exe"            ← 这个名字在本机**不存在**
+```
+
+`existsSync` 一路 miss → `findBrowser()` 返回 `null` → **永远**走降级路径
+（系统浏览器 + 让用户去 Console 粘一行）。用户不知道有 Console 这一步，
+只会觉得「我明明登好了，插件没反应」。
+
+⇒ 修法两条，缺一不可：
+
+1. **两个名字都留着**：`Microsoft Edge.exe`（微软真实落盘）+ `msedge.exe`（有些装法是这个）
+2. **不能只挑「第一个存在的」就认定它能用** —— 存在 ≠ 能起 CDP。
+   改成逐个试，第一个真写出 `DevToolsActivePort` 的才算数。
+
+#### 实测数据（2026-10-28，本机）
+
+| 浏览器 | 起 CDP | 页面就绪 | 读凭据 | 备注 |
+|---|---|---|---|---|
+| **Chromium 154.0.8037.93**（scoop） | 650–800 ms | ~2 s | ✓ | **当前选中**，端到端 3.4 s 全通 |
+| Edge 122.0.2365.106 | ✓ | ~2 s | ✓ | 可用，但按上面理由垫底 |
+| 360ChromeX（Chrome 132 内核） | ✓ | — | ✓ | 用户日常浏览器，CDP 正常 |
+| 360se6 / 搜狗 / QQ | — | — | — | 本机装了 360se6，未逐一验证 |
+
+真机复跑：`node tools/verify-profile-scope.mjs`（窗口打开 4 秒后 `READ_CREDS` 必须是空串，
+关窗后目录必须不存在）。单元判据：`node tests/browser-detect.mjs`。
 
 ```js
 waitForCreds(session, hostFragment)
@@ -549,10 +611,15 @@ waitForCreds(..., { baseline })  → 第二道防线：窗口打开时就有的�
 ### 降级链
 
 ```
-找到浏览器 → 自己拉 + CDP 读          全自动
-找不到     → magpie 开系统浏览器 + 剪贴板   用户粘一行
-都没有     → 报错，让用户改用「登录态（JWT + 组织码）」
+候选里有一个能起 CDP → 自己拉 + CDP 读              全自动
+一个都起不来         → magpie 开系统浏览器 + 剪贴板   用户粘一行
+连浏览器都没有       → 报错，让用户改用「登录态（JWT + 组织码）」
 ```
+
+⚠ 这条链**只有第一环的判断是对的才算数**。0.3.12 及更早，第一环用的是
+「文件名写死的 `msedge.exe` 是否存在」—— 文件名错了就永远落到第二环，
+而第二环要求用户去按 F12 开 Console，绝大多数人不会做，看到的就是「一直等」。
+判据是 `~/.cache/magpie/magicrew-login-<site>.log` 里那行 `launch: ...`。
 
 > 0.2.0 里那条「密码登录」方法已经删掉了：网页登录拿到的 token 一样能签发
 > `mgw_` key（见第十节的更正），再让用户在小窗里输手机号密码是多余的一步。
