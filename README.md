@@ -100,9 +100,35 @@ node tests/smoke.mjs full     # 再加上签到探测
 
 ---
 
-## 签到与新手任务：实话实说
+## 新手福利：7 项可以自动做完，1 项不行
 
-**每日积分没有独立签到接口。** 我把 4 个候选路径都试了，全 404：
+8 项任务合计 500 积分。接口只有两行，藏在 `onboarding-CZBI0pQt.js` 里：
+
+```
+GET  /api/v1/onboarding/tasks
+PUT  /api/v1/onboarding/tasks/{code}/completion
+```
+
+`magpie` 的 `auth.checkin` 钩子就干这件事：拉任务列表 → 把 PENDING 的挨个 PUT → 报积分变化。**每天跑一次，第一次就把 300 分拿完。**
+
+实测（2026-10-27，国内站）：**1240 → 1540，+300，六项当场入账**。
+
+| 任务 | code | 分 | 能不能自动 |
+|---|---|---|---|
+| 了解工作台 | `super_magic_intro` | 50 | ✅（网页上已点过） |
+| 了解 AI PPT | `ai_ppt` | 50 | ✅ PUT 即到账 |
+| AI 录音 | `ai_recording` | 50 | ✅ |
+| 雇佣数字员工 | `digital_employee` | 50 | ✅ |
+| 添加/管理技能 | `skill_management` | 50 | ✅ |
+| 微应用 | `micro_app` | 50 | ✅ |
+| 超级龙虾 | `magiclaw` | 50 | ✅ |
+| **完成第一次 AI 工作** | `first_ai_work` | **100** | ❌ 回 `9303 该新人引导任务不支持手动完成` |
+
+那一项服务端认死「必须真的跑过一次 AI 任务」，PUT 不进去。要拿就在网页里正常用一次（1~2 分钟），或者用 `tools/onboarding.mjs` 走浏览器自动化。
+
+### 每日登录积分
+
+价格页写「每日登录发放 200 积分」，但**没有独立的签到接口** —— 4 个候选路径全 404：
 
 ```
 POST /api/v1/quota/points/daily-claim
@@ -111,18 +137,7 @@ POST /api/v1/user/daily-reward
 POST /api/v1/growth/daily-checkin
 ```
 
-价格页写的「每日登录发放 200 积分」是**登录即发**，不是签到制。所以 `auth.checkin` 返回 `inactive`，只在 message 里带上余额和还差哪些任务。
-
-**新手福利 8 项（共 500 积分）也做不了纯 HTTP。** 决定性证据：任务是靠前端导览（tour）判定的，埋点事件名 `onboarding_guide_step_click` 这类，本地 key 形如 `onboarding_first_ai_work`。奖励是后端**自动发**的（积分流水里叫「新人引导任务奖励」，我核对过一笔 13:40:57 +50）。
-
-| 任务 | 纯 HTTP 能做吗 |
-|---|---|
-| 完成第一次 AI 工作 | 理论上能（要调 super-magic 的建 topic + 发消息，链路很长） |
-| 工作台 / AI PPT / AI 录音 / 数字员工 / 技能 / 微应用 / 超级龙虾 | ❌ 都要在网页里点 1~2 分钟导览 |
-
-所以那 500 积分，**你手动点 6 次导览，一次性拿走**，比写自动化划算。插件不假装能做这件事。
-
----
+它是登录即发，不需要签。所以签到钩子的实质产出就是上面那张表。
 
 ## 已知限制
 
