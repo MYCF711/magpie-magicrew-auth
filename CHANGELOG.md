@@ -14,7 +14,7 @@
   （只认本插件造的名字，且只动目录 —— 同前缀的 `.log` 不碰）
 - 第二道防线：`waitForCreds(..., { baseline })` —— 窗口打开时就存在的凭据不算登录成功
 - 代价：每次都要在窗口里重新登录一次（独立 profile 本来也没有日常 cookie），换来「读到的凭据一定是本次的」
-- 判据：`node tools/_verify_profile_scope.mjs`（窗口打开 4 秒后 `READ_CREDS` 必须是空串、关窗后目录必须不存在）
+- 判据：`node tools/verify-profile-scope.mjs`（窗口打开 4 秒后 `READ_CREDS` 必须是空串、关窗后目录必须不存在）
   + `node tests/login-profile.mjs`
 
 ## 0.3.5
