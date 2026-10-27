@@ -217,58 +217,108 @@ function noteOrg(siteId, org) {
   } catch {}
 }
 
-// ═══ 自动发消息的去重标记 ═══════════════════════════════════════════
+// ═══ 「首次 AI 工作 / 首个对话」的一次性标记 ═════════════════════════
 //
-// 签到里那条「替账号完成首个任务/对话」的动作是有成本的：建项目、建话题、
-// 真花积分跑一次模型。所以必须有闸门，否则会踩三种雷：
+// 这件事对每个账号**只该做一次**。目的只有一个：满足服务端
+// 「被邀请人完成首个任务或对话后，邀请人才能拿到积分」那条判定。
+// 邀请奖励只发一次，所以补一次就够，再发纯属白烧积分。
 //
-//   ① 结算慢 —— 消息发出去了，服务端要几十秒才把任务标成 COMPLETED。
-//      这期间签到结束，下一次（当天重试或第二天）又看到「未完成」，再发一条。
-//   ② 判定不到 —— 国际站没有任务清单，只能看「有没有项目」。万一项目建了
-//      但消息没发出去，下次会被当成「已用过」而永远不补；反过来若项目没建
-//      成，又会每次都重发。
-//   ③ 异常重试 —— checkin 抛错时 magpie 当天会重试，同一件事做两遍。
+// 早前的闸门写错了 —— 按「今天发过没有」记日期，于是：
 //
-// 闸门就一条规则：**每个账号每天最多发一次**。按 org 记日期，跨天自动失效。
-// 发送前查、发送成功才写；失败的不要写，留给下一次重试。
+//   ① 服务端结算慢（几十秒到几分钟）、或者任务状态压根不翻 COMPLETED 时，
+//      第二天签到又看到 PENDING，再发一条。一个号天天烧钱。
+//   ② 只按「有没有项目」判：项目建了但消息没发出去，会被当成「已用过」
+//      而永远不补；反过来项目没建成，每次进来都重试。
+//
+// 现在的规则：
+//   · 发送成功 → 写 `status: "sent"`，**此后再也不发**（换天、重登、重启都一样）
+//   · 真去发了但失败 → 记 attempts，最多 MAX_AUTOCHAT_ATTEMPTS 次，到顶写
+//     `gave-up` 也不再发（别让一个永远失败的号每次签到都撞一遍）
+//   · 「还没有工作台/项目」不算失败 —— 那是账号没就绪，不计数，下次再来
+//   · 老文件里的 `"YYYY-MM-DD"` 字符串按「已发过」读，升级后不会重发
+//
+// 文件：~/.cache/magpie/magicrew-autochat-<siteId>.json
+//   { [org]: { at: "ISO", status: "sent" | "failed" | "gave-up", attempts: n, reason?: "…" } }
+
+const MAX_AUTOCHAT_ATTEMPTS = 3
 
 function autochatPath(siteId) {
   return join(cacheDir(), `magicrew-autochat-${siteId}.json`)
 }
 
-/** { [org]: "YYYY-MM-DD" } */
+/**
+ * 读整张表。老格式（值为 `"YYYY-MM-DD"` 字符串）归一成 `{ at, status: "sent" }`,
+ * 这样升级后的第一次读就把历史账号认成「已经补过」。
+ */
 export function readAutoChat(siteId) {
   try {
     const v = JSON.parse(readFileSync(autochatPath(siteId), "utf8"))
-    return v && typeof v === "object" ? v : {}
+    if (!v || typeof v !== "object") return {}
+    const out = {}
+    for (const [org, e] of Object.entries(v)) {
+      if (typeof e === "string") out[org] = { at: e, status: "sent", attempts: 1, legacy: true }
+      else if (e && typeof e === "object") out[org] = e
+    }
+    return out
   } catch {
     return {}
   }
 }
 
-/** 北京时间的那一天 —— magpie 也是按北京时间调签到 */
-export function todayInBeijing() {
-  return new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10)
+/** 这个账号的那一笔，没有就 null */
+export function readAutoChatEntry(siteId, org) {
+  return readAutoChat(siteId)[org] ?? null
 }
 
-/** 这个账号今天是不是已经替它发过了 */
-export function sentToday(siteId, org) {
-  return readAutoChat(siteId)[org] === todayInBeijing()
+/** 已经补过（或已放弃）→ 一次都不再发。换天也不会。 */
+export function isAutoChatSettled(siteId, org) {
+  const e = readAutoChatEntry(siteId, org)
+  return !!e && (e.status === "sent" || e.status === "gave-up")
 }
 
-/** 记一笔「今天已经发过」。只在**发送成功**后调用 */
-export function noteAutoChat(siteId, org) {
+function writeAutoChat(siteId, org, entry) {
   try {
     const m = readAutoChat(siteId)
-    m[org] = todayInBeijing()
-    // 只留最近 80 个账号，文件别无限涨
+    m[org] = entry
+    // 只留最近 200 个账号，文件别无限涨
     const keys = Object.keys(m)
-    if (keys.length > 80) for (const k of keys.slice(0, keys.length - 80)) delete m[k]
+    if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete m[k]
     const f = autochatPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, JSON.stringify(m))
   } catch {}
 }
+
+/** 消息确实发出去了 —— 从此这个账号不再补。只在**发送成功**后调用。 */
+export function noteAutoChat(siteId, org, extra = {}) {
+  const prev = readAutoChatEntry(siteId, org)
+  writeAutoChat(siteId, org, {
+    at: new Date().toISOString(),
+    status: "sent",
+    attempts: (Number(prev?.attempts) || 0) + 1,
+    ...extra,
+  })
+}
+
+/**
+ * 真去发了但没成 —— 记一次尝试，留给下一次。
+ *
+ * @returns {{attempts:number, givenUp:boolean}}
+ */
+export function noteAutoChatFailure(siteId, org, reason) {
+  const prev = readAutoChatEntry(siteId, org)
+  const attempts = (Number(prev?.attempts) || 0) + 1
+  const givenUp = attempts >= MAX_AUTOCHAT_ATTEMPTS
+  writeAutoChat(siteId, org, {
+    at: new Date().toISOString(),
+    status: givenUp ? "gave-up" : "failed",
+    attempts,
+    reason: String(reason ?? "").slice(0, 200),
+  })
+  return { attempts, givenUp }
+}
+
+export { MAX_AUTOCHAT_ATTEMPTS }
 
 export {
   AUTHOR_INVITE,

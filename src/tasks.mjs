@@ -21,7 +21,7 @@
 // 每天跑一次，两步都做，任一步失败不影响另一步。
 
 import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId } from "./api.mjs"
-import { sentToday, noteAutoChat } from "./store.mjs"
+import { isAutoChatSettled, noteAutoChat, noteAutoChatFailure } from "./store.mjs"
 
 /** 站点 id —— 去重标记按站点分文件存 */
 function siteIdOf(host) {
@@ -94,9 +94,8 @@ export async function runCheckin(auth) {
     if (r.ok) {
       claimedAnything = true
       parts.push(`首对话：已自动完成（${r.topicName}，模型 ${r.model}）`)
-    } else if (r.skipped) {
-      parts.push("首对话：此前已用过，跳过")
-    } else {
+    } else if (!r.settled) {
+      // settled = 这个账号早就补过了（一次性任务）—— 不必每天在签到消息里复述
       parts.push(`首对话：${r.reason}`)
     }
   } else {
@@ -119,9 +118,8 @@ export async function runCheckin(auth) {
           if (r.ok) {
             claimed.push({ code: t.code, title: t.title, points: t.points })
             if (r.pending) parts.push("首任务：消息已发出，等结算")
-          } else if (r.skipped) {
-            // 今天已经补过 —— 不是失败，只是不再重复发
-            parts.push(`首任务：${r.reason}`)
+          } else if (r.settled) {
+            // 这个账号早就补过了（一次性任务）—— 安静跳过，不必每天复述
           } else {
             skipped.push(`${t.title}（${t.points} 分）：${r.reason}`)
           }
@@ -183,16 +181,18 @@ export async function runCheckin(auth) {
  */
 async function autoFirstWork(h) {
   const siteId = siteIdOf(h.host)
-  // 闸门：每个账号每天最多补一次。结算慢 / checkin 重试 / 判定不到，
-  // 都不会让它反复往外发消息。
-  if (sentToday(siteId, h.org)) {
-    return { ok: false, skipped: true, reason: "今天已经补过一次，不再重复发送" }
+
+  // 闸门：这个账号**曾经**补过就不再发 —— 不是「今天发过没有」。
+  // 邀请奖励只发一次，补第二遍纯属白烧积分（见 store.mjs 那节注释）。
+  if (isAutoChatSettled(siteId, h.org)) {
+    return { ok: false, settled: true, reason: "首任务此前已补过（一次性任务）" }
   }
 
   try {
     const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
     if (!wsId) {
-      return { ok: false, reason: "这个账号还没有工作台项目 —— 先在网页里进一次工作台" }
+      // 账号还没进过工作台 —— 不算失败、也不计数：只读接口，下次签到再来
+      return { ok: false, reason: "这个账号还没有工作台 —— 先在网页里进一次工作台" }
     }
 
     // 重模块按需加载：WebSocket 那套挂了不该拖累整个签到
@@ -203,13 +203,19 @@ async function autoFirstWork(h) {
       host: h.host,
       workspaceId: wsId,
     })
-    if (!r.ok) return { ok: false, reason: r.reason || "发送失败" }
+    if (!r.ok) {
+      // 真去发了但没成 —— 计数，到上限就放弃，别让一个永远失败的号每次签到撞一遍
+      const f = noteAutoChatFailure(siteId, h.org, r.reason || "发送失败")
+      const why = r.reason || "发送失败"
+      return { ok: false, reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
+    }
 
-    // 消息确实发出去了 —— 立刻落标记，之后不管结算成不成功都不再发第二条
-    noteAutoChat(siteId, h.org)
+    // 消息确实发出去了 —— 立刻写**一次性**标记。之后不管结算成不成功、换不换天、
+    // 重不重登，都不会再发第二条：这件事判的是「有没有过」，不是「今天有没有」。
+    noteAutoChat(siteId, h.org, { topicId: r.topicId || undefined, model: r.model || undefined })
 
-    // 等结算：服务端是异步判定，实测通常 5～40 秒内变成 COMPLETED。
-    // 拿不到就算了，标记已经写了，别把这次签到判成失败。
+    // 顺手等一会儿结算，让签到消息报得准。拿不到也无所谓 —— 标记已经写了，
+    // 下次签到看到 PENDING 只会安静跳过，不会再发消息。
     for (let i = 0; i < 12; i++) {
       await new Promise((res) => setTimeout(res, 5000))
       const list = await fetchOnboardingTasks(h.jwt, h.org, h.host).catch(() => null)
@@ -221,7 +227,9 @@ async function autoFirstWork(h) {
     }
     return { ok: true, pending: true }
   } catch (e) {
-    return { ok: false, reason: String(e?.message ?? e) }
+    const why = String(e?.message ?? e)
+    const f = noteAutoChatFailure(siteId, h.org, why)
+    return { ok: false, reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
   }
 }
 
