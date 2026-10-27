@@ -163,6 +163,40 @@ function writeSession(siteId, jwt, org) {
   } catch {}
 }
 
+// ═══ 加过哪些账号（只记 org）═══════════════════════════════════════════
+//
+// 唯一的用途：决定「本机浏览器里读到的登录态要不要自动接上」。
+//
+// 用户点「登录」多数是想加**新**账号；如果本机浏览器里那把属于已经加过的账号，
+// 自动接上只会得到「同一个账号」（magpie 侧同 accountId+uid → 替换，不新增），
+// 看起来又像「登录了却没加账号」。所以已经在名单里的 org，一律改走窗口登录。
+//
+// 记不上也无所谓：最坏是自动接上一个重复账号，magpie 会替换它。
+
+function orgsPath(siteId) {
+  return join(cacheDir(), `magicrew-orgs-${siteId}.json`)
+}
+
+function readKnownOrgs(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(orgsPath(siteId), "utf8"))
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string" && x) : []
+  } catch {
+    return []
+  }
+}
+
+function noteOrg(siteId, org) {
+  if (!org || typeof org !== "string") return
+  try {
+    const list = readKnownOrgs(siteId)
+    if (list.includes(org)) return
+    list.push(org)
+    const f = orgsPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify(list.slice(-50)))
+  } catch {}
+}
 
 export {
   AUTHOR_INVITE,
@@ -172,7 +206,10 @@ export {
   inviteToUse,
   loginLogPath,
   noteLoginFailure,
+  noteOrg,
+  orgsPath,
   readInvite,
+  readKnownOrgs,
   readSession,
   readSnapshot,
   sessionPath,

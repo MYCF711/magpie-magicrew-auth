@@ -18,7 +18,8 @@ import {
   fetchWho,
   fetchOwnInviteCode,
 } from "../api.mjs"
-import { inviteToUse, readSession, writeSession, noteLoginFailure, rollInvite } from "../store.mjs"
+import { inviteToUse, readSession, writeSession, noteLoginFailure, noteOrg, readKnownOrgs, rollInvite } from "../store.mjs"
+import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 
 export function makeMethods(c) {
@@ -33,6 +34,53 @@ export function makeMethods(c) {
           ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
           : `${c.web}/login`
         const hostFragment = new URL(c.web).hostname
+
+        // ⓿ 本机浏览器里已经有这个站点的登录态 → 直接接上，不开窗口。
+        //
+        //   这是「有的人网页登录了、插件里却没多出账号」的正解：用户平时那个浏览器
+        //   登录完，凭据就已经落在它的 localStorage 里了 —— 读文件就能拿到，
+        //   不用再让他在这个窗口里重登一次。
+        //
+        //   ⚠ 只在这个账号**还没加过**时自动接：否则用户点登录是想加新账号，
+        //     自动接上的会是同一个，magpie 侧（同 accountId + 同 uid）只会替换旧账号。
+        const local = readLocalCreds(hostFragment)
+        if (local && !readKnownOrgs(c.id).includes(local.org)) {
+          return {
+            url,
+            opened: true, // 凭据来自本机浏览器，我们没开页面 —— 别让 magpie 再开一个
+            instructions: `已从本机 ${local.browser} 读到 ${c.SHORT} 的登录态，正在验证…`,
+            method: "auto",
+            async callback() {
+              let r
+              try {
+                // 请求放在 callback 里：authorize 必须立刻返回，而且没被调用时不该打网络
+                await fetchPoints(local.jwt, local.org, c.host)
+                r = await issueGatewayKey(local.jwt, local.org, c.host)
+              } catch (e) {
+                // 本机那把失效了：记进「加过」名单，下次点登录就走窗口
+                noteOrg(c.id, local.org)
+                return {
+                  type: "failed",
+                  error: `本机 ${local.browser} 里的登录态已失效（${String(e?.message ?? e)}）。再点一次登录会打开窗口；或者先去那个浏览器里重新登录。`,
+                }
+              }
+              writeSession(c.id, local.jwt, local.org)
+              noteOrg(c.id, local.org)
+              rollInvite(c.id, local.jwt, local.org, c.host).catch(() => {})
+              const who = await fetchWho(local.jwt, local.org, c.host).catch(() => null)
+              return {
+                type: "success",
+                access: r.apiKey,
+                refresh: r.refreshToken,
+                expires: Date.now() + 2 * 3600_000,
+                accountId: who?.name || local.org,
+                uid: local.org,
+                jwt: local.jwt,
+                org: local.org,
+              }
+            },
+          }
+        }
 
         // 浏览器登录是**可选能力**，按需加载：这个模块用 child_process /
         // WebSocket / 端口探测，环境依赖最重。静态 import 一旦失败，
@@ -97,6 +145,7 @@ export function makeMethods(c) {
               await fetchPoints(got.jwt, got.org, c.host)
               const key = await issueGatewayKey(got.jwt, got.org, c.host)
               writeSession(c.id, got.jwt, got.org)
+              noteOrg(c.id, got.org)
               // 滚邀请码：把这个账号自己的码存成下一次用的
               rollInvite(c.id, got.jwt, got.org, c.host).catch(() => {})
               return {
@@ -170,6 +219,7 @@ export function makeMethods(c) {
               return { type: "failed", error: String(e?.message ?? e) }
             }
             writeSession(c.id, jwt, org)
+            noteOrg(c.id, org)
             rollInvite(c.id, jwt, org, c.host).catch(() => {})
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)
