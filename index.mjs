@@ -11,8 +11,8 @@
 
 import { startSelfRegister } from "./src/self-register.mjs"
 import {
-  API,
-  HOST,
+  SITES,
+  site as siteOf,
   login,
   issueGatewayKey,
   refreshGatewayKey,
@@ -40,7 +40,8 @@ const PROVIDER_NAME = "超级麦吉"
 /** 内嵌图标（SVG→base64）。magpie 只存不拉：外部 URL 在 git 源下不渲染 */
 const ICON =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48ZGVmcz48bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj48c3RvcCBvZmZzZXQ9IjAiIHN0b3AtY29sb3I9IiNBNzhCRkEiLz48c3RvcCBvZmZzZXQ9IjEiIHN0b3AtY29sb3I9IiM1QjIxQjYiLz48L2xpbmVhckdyYWRpZW50PjwvZGVmcz48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjMwIiBmaWxsPSIjMTYxMjFGIi8+PHJlY3QgeD0iMTgiIHk9IjE4IiB3aWR0aD0iNDIiIGhlaWdodD0iNDIiIHJ4PSIxMiIgZmlsbD0idXJsKCNnKSIgb3BhY2l0eT0iLjk1Ii8+PHJlY3QgeD0iNjgiIHk9IjE4IiB3aWR0aD0iNDIiIGhlaWdodD0iNDIiIHJ4PSIxMiIgZmlsbD0iIzIyRDNFRSIgb3BhY2l0eT0iLjc1Ii8+PHJlY3QgeD0iMTgiIHk9IjY4IiB3aWR0aD0iNDIiIGhlaWdodD0iNDIiIHJ4PSIxMiIgZmlsbD0iIzIyRDNFRSIgb3BhY2l0eT0iLjc1Ii8+PHJlY3QgeD0iNjgiIHk9IjY4IiB3aWR0aD0iNDIiIGhlaWdodD0iNDIiIHJ4PSIxMiIgZmlsbD0idXJsKCNnKSIgb3BhY2l0eT0iLjk1Ii8+PC9zdmc+"
-const BASE = `${HOST}/v1`
+const DEFAULT_SITE = "cn"
+const baseOf = (s) => `${siteOf(s).host}/v1`
 const SDK = "@ai-sdk/openai-compatible"
 const REFRESH_LEAD_MS = 10 * 60_000 // api_key 只活 2 小时，提前 10 分钟换
 
@@ -85,7 +86,8 @@ const MODELS = [
 ]
 
 /** 静态模型表（未登录 / 拉取失败时兜底，必须有内容） */
-function staticModels() {
+function staticModels(siteId = DEFAULT_SITE) {
+  const BASE = baseOf(siteId)
   const out = {}
   for (const [id, name, context, vision] of MODELS) {
     out[id] = {
@@ -127,8 +129,8 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
       cfg.provider[PROVIDER] ??= {
         name: PROVIDER_NAME,
         npm: SDK,
-        api: BASE,
-        models: staticModels(),
+        api: baseOf(DEFAULT_SITE),
+        models: staticModels(DEFAULT_SITE),
       }
     },
 
@@ -145,6 +147,15 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
           type: "oauth",
           label: `登录 ${PROVIDER_NAME}`,
           prompts: [
+            {
+              type: "select",
+              key: "region",
+              message: "站点",
+              options: [
+                { label: "国内 · 超级麦吉（letsmagic.cn）", value: "cn" },
+                { label: "国际 · MagiCrew（magicrew.ai，未验证）", value: "intl" },
+              ],
+            },
             {
               type: "text",
               key: "phone",
@@ -175,15 +186,17 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
             const phone = String(inputs?.phone || "").replace(/\D/g, "")
             const password = String(inputs?.password || "")
             const stateCode = String(inputs?.stateCode || "+86")
+            const siteId = String(inputs?.region || DEFAULT_SITE)
+            const host = siteOf(siteId).host
 
             const result = (async () => {
-              const { token, organizationCode, raw } = await login({ phone, password, stateCode })
-              const key = await issueGatewayKey(token, organizationCode)
+              const { token, organizationCode, raw } = await login({ phone, password, stateCode, host })
+              const key = await issueGatewayKey(token, organizationCode, host)
               return { token, organizationCode, key, raw }
             })()
 
             return {
-              url: "https://www.letsmagic.cn/login",
+              url: `${siteOf(siteId).web}/login`,
               instructions: "正在用手机号+密码登录…",
               method: "auto",
               opened: true,
@@ -205,6 +218,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
                   // 额外字段：models / usage / checkin 要用网页 JWT，mgw key 调不动业务接口
                   jwt: r.token,
                   org: r.organizationCode,
+                  site: siteId,
                 }
               },
             }
@@ -239,6 +253,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
                 accountId: "magicrew",
                 jwt,
                 org,
+                site: DEFAULT_SITE,
               }
             } catch (e) {
               return { type: "failed", error: String(e?.message ?? e) }
@@ -251,7 +266,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
       async refresh(auth, provider) {
         if (!auth?.refresh) return undefined
         try {
-          const k = await refreshGatewayKey(auth.refresh)
+          const k = await refreshGatewayKey(auth.refresh, siteOf(auth.site).host)
           return {
             access: k.apiKey,
             // ⚠ 服务端每次 PUT 都轮换 refresh_token，必须用新的
@@ -271,7 +286,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
         const auth = await getAuth()
         if (!auth || auth.type !== "oauth") return {}
         return {
-          baseURL: BASE,
+          baseURL: baseOf(auth.site),
           apiKey: auth.access,
           headers: { "user-agent": "MagicrewClient/1.0" },
           async fetch(input, init) {
@@ -324,7 +339,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
         const auth = await getAuth()
         if (!auth) return { error: "未登录", windows: [] }
         try {
-          const p = await fetchPoints(auth.jwt, auth.org)
+          const p = await fetchPoints(auth.jwt, auth.org, siteOf(auth.site).host)
           const nextExpiry = p.expiring?.[0]?.expiresAt
           return {
             plan: p.total > 0 ? "积分制" : "已耗尽",
@@ -375,7 +390,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
         if (!auth || auth.type !== "oauth") return fallback
 
         try {
-          const live = await fetchModels(auth.jwt, auth.org)
+          const live = await fetchModels(auth.jwt, auth.org, siteOf(auth.site).host)
           if (!live.length) return fallback
 
           const out = {}
@@ -388,7 +403,7 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
               ...base,
               id: m.id,
               name: m.name,
-              api: { id: m.id, url: BASE, npm: SDK },
+              api: { id: m.id, url: baseOf(auth.site), npm: SDK },
               capabilities: {
                 ...base.capabilities,
                 attachment: m.vision,
@@ -417,8 +432,8 @@ export const MagicrewAuthPlugin = async ({ client, directory }, options) => {
 
 export const _internal = {
   PROVIDER,
-  BASE,
+  baseOf,
   staticModels,
   MODELS,
-  API,
+  SITES,
 }
