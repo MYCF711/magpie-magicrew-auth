@@ -96,8 +96,15 @@ export async function startSmsLogin(site, { mobile, stateCode = "+86" } = {}) {
  *     · 组织码找不着就调 `/api/v1/aggregation/login-data`（带 authorization 头，
  *       服务端会回这个账号所在的组织列表）—— 这条路径是文档里查得到的
  */
-export async function finishSmsLogin(site, { mobile, stateCode = "+86", code, device }) {
-  const { json, status, text } = await loginBySmsCode(site, { phone: mobile, stateCode, code, device })
+export async function finishSmsLogin(site, { mobile, stateCode = "+86", code, device, redirect }) {
+  const { json, status, text } = await loginBySmsCode(site, {
+    phone: mobile,
+    stateCode,
+    code,
+    device,
+    autoRegister: true,
+    redirect,
+  })
   if (!json) {
     throw new Error(`登录接口回了非 JSON（HTTP ${status}）：${String(text).slice(0, 200)}`)
   }

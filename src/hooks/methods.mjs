@@ -162,6 +162,15 @@ export function makeMethods(c) {
           }
         }
 
+        // 邀请码两条路都要出现：登录页的 URL，以及最终注册时服务端读到的那份。
+        // ⚠ 无头这条路**没有**「打开带邀请码的页面」这一步，所以邀请码只能靠
+        //   `redirect` 传 —— 网页表单的初始值里 redirect 就是 window.location.href，
+        //   服务端从它上面取 `?invitation=`。少了它，新注册的号就没有邀请关系。
+        const inviteCode = inviteToUse(c.id)
+        const loginUrl = inviteCode
+          ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+          : `${c.web}/login`
+
         // 发短信这一步最慢（过验证最多试 3 张图、每张问两遍模型）。
         // 但必须等它结束才能告诉用户「验证码已发出」—— 所以这里不甩到 callback 里。
         let sent
@@ -172,19 +181,23 @@ export function makeMethods(c) {
         }
 
         return {
-          url: `${c.web}/login`,
+          url: loginUrl,
           instructions:
             `验证码已发送到 ${masked}。\n` +
             `旋转验证由识图模型（${vision}）自动通过，试了 ${sent.rounds} 张图。\n` +
             `把收到的 6 位验证码填进下面的框就行。`,
           method: "code",
-          opened: false,
+          // ⚠ 必须是 true。这条链路**全在后台走完**，不需要任何浏览器；
+          //   opened: false 会让 magpie 拿 url 去开**系统默认浏览器** —— 而那个浏览器里
+          //   往往本来就登着这个站，用户看到的是已登录界面，根本进不了「添加新号」，
+          //   还会以为插件把他登进了旧账号。这正是浏览器登录那条路修过的坑。
+          opened: true,
           async callback(code) {
             const c0 = String(code || "").replace(/\D/g, "")
             if (c0.length < 4) return { type: "failed", error: "验证码是 4~8 位数字" }
             let creds
             try {
-              creds = await finishSmsLogin(c, { mobile: phone, code: c0 })
+              creds = await finishSmsLogin(c, { mobile: phone, code: c0, redirect: loginUrl })
             } catch (e) {
               return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
             }
