@@ -439,7 +439,9 @@ function makePlugin(SITE) {
                   if (session) {
                     got = await waitForCreds(session, hostFragment)
                     via = "cdp"
-                    closeSession(session)
+                    // 拿到就关窗：先 Browser.close 让它把 cookie 刷到磁盘，
+                    // 关不掉再 taskkill 整棵进程树
+                    await closeSession(session)
                   }
 
                   // ② 降级：读剪贴板
