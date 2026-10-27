@@ -21,6 +21,12 @@
 // 每天跑一次，两步都做，任一步失败不影响另一步。
 
 import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask, fetchFirstWorkspaceId } from "./api.mjs"
+import { sentToday, noteAutoChat } from "./store.mjs"
+
+/** 站点 id —— 去重标记按站点分文件存 */
+function siteIdOf(host) {
+  return host.includes("magicrew") ? "magicrew-intl" : "magicrew"
+}
 
 /** 已知不支持手动完成的任务，别再白试 */
 const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
@@ -113,6 +119,9 @@ export async function runCheckin(auth) {
           if (r.ok) {
             claimed.push({ code: t.code, title: t.title, points: t.points })
             if (r.pending) parts.push("首任务：消息已发出，等结算")
+          } else if (r.skipped) {
+            // 今天已经补过 —— 不是失败，只是不再重复发
+            parts.push(`首任务：${r.reason}`)
           } else {
             skipped.push(`${t.title}（${t.points} 分）：${r.reason}`)
           }
@@ -173,6 +182,13 @@ export async function runCheckin(auth) {
  * @returns {{ok:boolean, pending?:boolean, reason?:string}}
  */
 async function autoFirstWork(h) {
+  const siteId = siteIdOf(h.host)
+  // 闸门：每个账号每天最多补一次。结算慢 / checkin 重试 / 判定不到，
+  // 都不会让它反复往外发消息。
+  if (sentToday(siteId, h.org)) {
+    return { ok: false, skipped: true, reason: "今天已经补过一次，不再重复发送" }
+  }
+
   try {
     const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
     if (!wsId) {
@@ -189,8 +205,11 @@ async function autoFirstWork(h) {
     })
     if (!r.ok) return { ok: false, reason: r.reason || "发送失败" }
 
+    // 消息确实发出去了 —— 立刻落标记，之后不管结算成不成功都不再发第二条
+    noteAutoChat(siteId, h.org)
+
     // 等结算：服务端是异步判定，实测通常 5～40 秒内变成 COMPLETED。
-    // 拿不到就算了，消息确实发出去了，别把这次签到判成失败。
+    // 拿不到就算了，标记已经写了，别把这次签到判成失败。
     for (let i = 0; i < 12; i++) {
       await new Promise((res) => setTimeout(res, 5000))
       const list = await fetchOnboardingTasks(h.jwt, h.org, h.host).catch(() => null)
@@ -215,6 +234,12 @@ async function autoFirstWork(h) {
  * @returns {{ok?:boolean, skipped?:boolean, reason?:string, topicName?:string, model?:string}}
  */
 async function autoFirstChat(h) {
+  const siteId = siteIdOf(h.host)
+  // 同一道闸门：每账号每天最多一条
+  if (sentToday(siteId, h.org)) {
+    return { skipped: true, reason: "今天已经补过一次" }
+  }
+
   try {
     const wsId = await fetchFirstWorkspaceId(h.jwt, h.org, h.host).catch(() => "")
     if (!wsId) return { reason: "这个账号还没有工作区，先在网页里进一次" }
@@ -225,6 +250,9 @@ async function autoFirstChat(h) {
 
     const r = await runChatTask({ jwt: h.jwt, org: h.org, host: h.host, workspaceId: wsId })
     if (!r.ok) return { reason: r.reason || "发送失败" }
+
+    // 发出去了才落标记；失败的不写，留给下一次（明天）重试
+    noteAutoChat(siteId, h.org)
     return { ok: true, topicName: r.topicName, model: r.model }
   } catch (e) {
     return { reason: String(e?.message ?? e) }
