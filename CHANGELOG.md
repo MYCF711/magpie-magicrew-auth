@@ -1,5 +1,75 @@
 # 更新记录
 
+## 0.3.10
+
+**新增「进行一次聊天（未完成的账号）」—— 纯协议补完首次 AI 工作，不开浏览器**
+
+邀请奖励不是注册即得，条件是「被邀请人完成首个任务或对话」。而这道判定只认
+**产品内真的跑完过一次** —— 通过 magpie 调模型不算（实测同一个号调了好几轮、
+真扣了积分，`first_ai_work` 仍是 PENDING）。
+
+所以要补的就是「在产品里发一条消息」。原来只能靠 CDP 开浏览器点输入框，
+现在不用了。
+
+### 协议（2026-10-27 抓包摸清，已实测跑通）
+
+消息走 **Socket.IO**（Engine.IO v3）：
+
+```
+连接    wss://<host>/socket.io/?EIO=3&transport=websocket
+登录    42/im,<ns>["login",{context:{authorization:JWT, organization_code, language:"zh_CN"}}]
+聊天    42/im,<ns>["chat",{context:{…},data:{message:{…},conversation_id}}]
+     → 43/im,<ns>[{code:1000,…seq}]
+```
+
+几个反直觉的点，都在 `src/chat-task.mjs` 顶部注释里：
+
+- **鉴权在消息体里**，握手头不带 token —— 所以不用 Cookie、不用登录态
+- **不需要先发 `40` CONNECT**，直接 `42` 事件就能被受理
+- `<ns>` 是客户端自己生成的唯一数字（浏览器用 `Date.now()`），随便给都行
+- 消息里的 `conversation_id` 必须非空，空着回 `3007`；填错回 `3016 话题未找到`
+
+三个 id 的来源（最容易卡住的地方）：
+
+```
+conversation_id  ← topic.chat_conversation_id
+message.topic_id ← topic.chat_topic_id
+（⚠ 不是 project.current_topic_id，用它会 3016）
+```
+
+话题直接建：`POST /api/v1/super-agent/topics { topic_name, project_id }`，
+返回体里就带 `chat_topic_id` / `chat_conversation_id`。
+
+### 按钮行为
+
+点一下，遍历该站点所有账号：
+
+- 首任务已完成 → 跳过
+- 本站没有新手福利（国际站）→ 跳过
+- 未完成 → 建话题、发一条、等 AI 回复
+
+两个细节：
+
+- **话题名从固定池随机挑**（`TOPIC_NAMES`，8 个日常短语），免得一堆「测试话题」扎堆
+- **模型按积分倍率自动选最便宜的**：查 `/api/v1/products/model-points`，按
+  `input_points + output_points` 升序取最小 —— 目前是 `qwen3.5-flash`（20 / 200），
+  也正是网页的默认模型。没有免费档
+
+### 0.3.9 的「体检」按钮撤掉了
+
+功能还在（`src/inspect.mjs` 的 `listAccounts` / `inspectOne` 被新按钮复用），
+但不再单独占一个登录方式的位置 —— 需求是「原本两个按钮不动，只加一个」。
+
+### 实测
+
+```
+[0s] 挑选模型… [0s] 定位项目… [0s] 建一个话题… [1s] 发送消息…
+结果: { ok: true, replies: 1, topicName: "介绍一下你自己",
+        model: "Qwen3.5 Flash", messageId: "973731075754430466" }
+```
+
+从建话题到 AI 回复完，全程 1 秒多。
+
 ## 0.3.9
 
 **新增「体检」：一键看清每个号的首任务做没做、邀请奖励到没到账**
