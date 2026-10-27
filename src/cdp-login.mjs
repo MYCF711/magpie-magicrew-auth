@@ -248,16 +248,73 @@ export async function waitForCreds(session, hostFragment, { timeout = 300_000, i
   return null
 }
 
-/** 关掉这个浏览器窗口（profile 留着，下次复用登录态） */
-export function closeSession(session) {
-  const pid = session?.child?.pid
+/**
+ * 关掉这个浏览器窗口。profile 留着，下次复用登录态。
+ *
+ * 两条路都要走：
+ *   ① CDP 的 `Browser.close` —— 走浏览器自己的退出流程，cookie 会被刷到磁盘
+ *      （profile 里没有落盘的 cookie，下次登录还得再来一次）
+ *   ② 兜底 kill —— ①在 2 秒内没关掉就强杀整棵进程树
+ *      （Windows 上 kill() 只杀主进程，渲染/GPU 子进程会留着占住 profile）
+ */
+export async function closeSession(session) {
+  if (!session) return
+
+  // ① 优雅关：Browser.close 走浏览器自己的退出流程
+  try {
+    const r = await fetch(`http://127.0.0.1:${session.port}/json/version`, { signal: AbortSignal.timeout(3000) })
+    const v = await r.json()
+    if (v?.webSocketDebuggerUrl) {
+      await new Promise((resolve) => {
+        const ws = new WebSocket(v.webSocketDebuggerUrl)
+        const done = () => {
+          try {
+            ws.close()
+          } catch {}
+          resolve()
+        }
+        const t = setTimeout(done, 2000)
+        ws.addEventListener(
+          "open",
+          () => {
+            try {
+              ws.send(JSON.stringify({ id: 1, method: "Browser.close" }))
+            } catch {}
+            // 给它 600ms 自己退，退不掉就走 ②
+            setTimeout(() => {
+              clearTimeout(t)
+              done()
+            }, 600)
+          },
+          { once: true },
+        )
+        ws.addEventListener(
+          "error",
+          () => {
+            clearTimeout(t)
+            done()
+          },
+          { once: true },
+        )
+      })
+    }
+  } catch {}
+
+  // ② 兜底：还活着就强杀整棵进程树
+  const pid = session.child?.pid
   if (!pid) return
   try {
     if (process.platform === "win32") {
-      // kill() 只杀主进程，渲染/GPU 子进程会留着占住 profile
-      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
+      await new Promise((resolve) => {
+        const k = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true })
+        k.on("exit", resolve)
+        k.on("error", resolve)
+        setTimeout(resolve, 3000)
+      })
     } else {
-      session.child.kill("SIGKILL")
+      try {
+        session.child.kill("SIGKILL")
+      } catch {}
     }
   } catch {}
 }
