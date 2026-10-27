@@ -460,6 +460,29 @@ export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
   }
 }
 
+// ── ④e 某个项目下的话题 ────────────────────────────────────────────
+//
+//   GET /api/v1/super-agent/projects/{id}/topics
+//   → { total, list:[{ id, chat_topic_id, chat_conversation_id, topic_name, … }] }
+//
+// 发消息要 chat_topic_id / chat_conversation_id；判断「说没说过话」也看它 ——
+// **不要用「有没有项目」判断**，项目在打开工作台时就会自动建。
+export async function fetchProjectTopics(token, org, projectId, host = SITES.cn.host) {
+  const res = await fetch(`${host}/api/v1/super-agent/projects/${projectId}/topics`, {
+    headers: headersFor(token, org, host),
+  })
+  const body = await read(res)
+  const d = body?.data ?? {}
+  const list = Array.isArray(d.list) ? d.list : []
+  return list.map((t) => ({
+    id: String(t.id ?? ""),
+    chatTopicId: String(t.chat_topic_id ?? ""),
+    chatConversationId: String(t.chat_conversation_id ?? ""),
+    name: String(t.topic_name ?? ""),
+    status: String(t.task_status ?? ""),
+  }))
+}
+
 // ── ④d 第一个工作区 ──────────────────────────────────────────────────
 //
 // 自动完成首任务要打开 `/<站点>/global/super/workspace/<id>`，这个 id 只有接口给。
