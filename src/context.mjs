@@ -37,17 +37,30 @@ export function siteCtx(SITE) {
   }
 }
 
-/** 把一条 flows/models 变成一个 magpie 模型条目 */
-export function modelEntry(c, id, name, vision, cost) {
+/**
+ * 把一条 flows/models 变成一个 magpie 模型条目。
+ *
+ * `opts.rate` / `opts.free` 是 **magpie 自己的字段**（从 codearts 插件里挖到的，
+ * packages/codearts/index.mjs 的 modelOf）：
+ *
+ *   free  boolean  → 名字后面画一个绿色的「免费」胶囊
+ *   rate  number   → 画一个灰色的倍率胶囊（0.09× 这种，就是网站上的「消耗系数」）
+ *
+ * 关键规则（codearts 原注释）：**free 的时候不给 rate** ——
+ *   免费模型不该再标一个倍率，两个胶囊并排没意义。
+ * 没有 rate 就什么都不画，正好符合「没有倍率就不显示」。
+ *
+ * ⚠ 别再用 name 拼倍率了：那样筛选框会连倍率一起匹配，
+ *   而且和真正的胶囊样式差得远。
+ */
+export function modelEntry(c, id, name, vision, opts = {}) {
+  const { rate = 0, free = false } = opts
   return {
     id,
     name,
     api: { id, url: c.BASE, npm: SDK },
     status: "active",
-    // cost 用「倍率」口径填（input_points / 2000），不是美元 —— magpie 会把
-    // 非零 cost 渲染成模型名后面的胶囊，这正是我们要的那个 0.01× 效果。
-    // 全零时宿主显示「免费」，那也是它自己的判断，别硬填假值去伪造成「免费」。
-    cost: cost || { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
     // 上下文窗口向 magpie 的模型库查 —— 两个模型接口都不返回它，
     // 早前一律填 256K，结果 agent 拿 256K 判断"放不下"，而实际是 1M
     limit: { context: contextOf(id), output: 64_000 },
@@ -59,5 +72,7 @@ export function modelEntry(c, id, name, vision, cost) {
       input: { text: true, image: !!vision },
       output: { text: true },
     },
+    ...(free ? { free: true } : {}),
+    ...(!free && Number(rate) > 0 ? { rate: Number(rate) } : {}),
   }
 }
