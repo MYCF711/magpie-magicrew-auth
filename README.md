@@ -22,7 +22,7 @@
 - **模型跟着账号走** —— 每次登录后按 `/api/v1/flows/models` 实时拉，账户当前能选什么就展示什么，生图和 embedding 不会混进来
 - **积分算得准** —— 余额读的是 `/api/v1/quota/points/total`；空号就显示空，不会被优先派活
 - **登录一次管 30 天** —— 网页 JWT 顶 30 天，`mgw_` api_key 每 2 小时自续，refresh_token 每次续期时自滚
-- **点一下就在浏览器里登** —— 第一个登录方法不带任何输入框，直接开官方登录页；官方页有什么方式就用什么（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉）
+- **点一下，全自动** —— 插件自己拉起浏览器停在官方登录页，你在里面登（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉都行），登录完成那一刻它自己把凭据读走，不用回来点任何东西
 - **登录方式还有两条备选** —— 手机号+密码走 API；或者直接粘 JWT + 组织码
 - **新手奖励自动领** —— 国内站 8 项里 7 项 PUT 即到账，每天跑一次幂等
 - **邀请码自动滚** —— 第一次注册带作者的码，之后每次登录都记住「上一个登录账号」的码，拿到新的就覆盖旧的
@@ -92,18 +92,19 @@
 
 在 magpie 的 **插件 → 发现** 搜 `magpie-magicrew-auth`，点**安装**。
 
-装完选站点，然后**点第一个「浏览器登录」** —— 不带输入框，直接开官方登录页：
+装完选站点，然后**点第一个「浏览器登录」** —— 没有任何输入框，插件自己把浏览器拉起来：
 
-1. 用你平时的方式登进去（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉都行）
-2. 登录完成后回到那个页面，F12 → Console，粘这一行回车：
+1. 浏览器窗口弹出，停在官方登录页
+2. 用你平时的方式登进去（手机号 / 密码 / Google / 邮箱验证码 / 飞书 / 钉钉都行）
+3. **登录完成那一刻它自己就接上了** —— 不用回来点任何按钮，不用开 DevTools
 
-```js
-copy(JSON.stringify({jwt:(()=>{try{return JSON.parse(localStorage["MAGIC:user:authorization"]).value}catch{return localStorage["MAGIC:user:authorization"]}})(),org:(()=>{try{return JSON.parse(localStorage["MAGIC:user:organizationCode"]).value}catch{return localStorage["MAGIC:user:organizationCode"]}})()}))
-```
+原理：插件不是调用系统浏览器，而是自己起一个 Edge / Chrome（独立 profile +
+`--remote-debugging-port`），所以登录成功后能用 CDP 在页面上下文里把它自己的
+localStorage 读走，拿到 JWT 和组织码，签完密钥就关窗。
 
-3. 插件自己从剪贴板读走，读到就完成 —— 不用回来点任何按钮
-
-> **为什么不能像别的插件那样纯自动？** 因为 magicrew 没有那条通道。它的登录类型只有 13 种、全是「拿凭据换 token」，没有设备码、没有插件授权、没有一次性 ticket；也没有 WorkBuddy 那种 `/v2/plugin/auth/state` + `/v2/plugin/auth/token` 协议。网页登录成功后 token 只在 `www.magicrew.ai` 的 localStorage 里，插件读不到别的源的存储。所以最短路径就是「开官方页 + 把结果送进剪贴板」。
+> **为什么必须自己拉浏览器？** 因为 magicrew 没有 OAuth 回调通道 —— 它的登录类型只有 13 种、全是「拿凭据换 token」，没有设备码、没有插件授权、没有一次性 ticket；也没有 WorkBuddy 那种 `/v2/plugin/auth/state` + `/v2/plugin/auth/token` 协议。网页登录成功后 token 只在 `www.magicrew.ai` 的 localStorage 里，而 magpie 打开的是你系统默认那个浏览器，插件够不到它的存储。自己起一个，就够得到了。
+>
+> 本机没装 Chrome / Edge 时自动降级：改用系统浏览器打开，登录完把凭证送进剪贴板，插件从剪贴板读。
 
 不想碰 Console 的话，另外两条：
 

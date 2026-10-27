@@ -400,3 +400,83 @@ linux   xclip -selection clipboard -o
 
 所以「登录后把自己的邀请码滚上去」这件事：密码登录滚得动，浏览器登录（剪贴板拿到的是网页那把）滚不动。
 实现上滚不动就安静保留旧值 —— 不报错、不挡登录。
+
+---
+
+## 十一、浏览器登录怎么做到全自动
+
+### 先说不能用 `opened: true` 的地方
+
+`opened: true` 的语义是「**我已经自己把页面开出来了，你别再开**」（HOOKS.md 陷阱 3，
+原文场景是 Grok 的 CLI 自己开页面）。所以：
+
+| authorize 里做了什么 | 该传什么 |
+|---|---|
+| 只返回 url，让 magpie 去开 | **不传** `opened` |
+| 自己 spawn 了浏览器 | `opened: true` |
+
+传错的后果很具体：**点了登录，什么都不弹**。本项目 0.2.0 的中间版本踩过这个坑 ——
+密码登录和浏览器登录都传了 `opened: true`，两处都点了没反应。
+
+### 自己拉浏览器 + CDP 读凭据
+
+```
+launchLoginBrowser(url)
+  → findBrowser()          Edge / Chrome / Brave / Chromium，按平台列路径逐个 existsSync
+  → spawn(exe, [
+      --user-data-dir=~/.cache/magpie/magicrew-login-profile,
+      --remote-debugging-port=0,      ← 0 = 让系统挑空闲端口
+      --no-first-run, --no-default-browser-check,
+      url,
+    ])
+  → 等 <user-data-dir>/DevToolsActivePort 出现，第一行是端口
+```
+
+⚠ 启动前**必须删掉** `DevToolsActivePort` —— 上一次残留的文件会让 `waitPort` 立刻
+返回一个已经失效的旧端口。
+
+```js
+waitForCreds(session, hostFragment)
+  → 每 1.5s：连 /json/list → 找 URL 含 hostFragment 的 page target
+    → WebSocket → Runtime.evaluate(READ_CREDS) → 有值就返回
+```
+
+`READ_CREDS` 一次求值取两个值：
+
+```js
+const pick = (k) => { const raw = localStorage.getItem(k); ... JSON.parse(raw).value ... }
+JSON.stringify({ jwt: pick("MAGIC:user:authorization"), org: pick("MAGIC:user:organizationCode") })
+```
+
+### 三个实测踩到的坑
+
+**① target 不能退回到 `pages[0]`。**
+浏览器刚起来时第一个 page target 还是 `about:blank`，在它上面访问 `localStorage`
+抛 SecurityError，被 `catch` 吞掉→看起来像「一直读不到」。必须只认 URL 匹配的 target，
+匹配不上返回 null 让轮询继续。实测：启动 → 页面就绪只需 **1.5 秒**，但必须等到它跳转。
+
+**② profile 目录不能删。**
+独立 profile 意味着用户在这个窗口里要重新登录一次（没有他日常浏览器的 cookie）。
+下次登录还用它，登录态就还在 —— 所以目录固定为
+`~/.cache/magpie/magicrew-login-profile`，只 `kill()` 进程，不删目录。
+
+**③ `authorize()` 里可以 await 启动浏览器（~270ms），但不能 await 用户操作。**
+`launchLoginBrowser` 实测 273ms 返回，可接受；`waitForCreds` 必须放到 `callback()` 里。
+
+### 实测数据（2026-10-27，本机 Edge）
+
+| 步骤 | 结果 |
+|---|---|
+| findBrowser | `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` |
+| launchLoginBrowser | 273 ms，port=55428 |
+| 页面就绪（location.host === www.magicrew.ai） | 1518 ms |
+| 写入两个 localStorage 后 waitForCreds | 1 ms 读到 |
+| localStorage.clear() 后 | 空串 |
+
+### 降级链
+
+```
+找到浏览器 → 自己拉 + CDP 读          全自动
+找不到     → magpie 开系统浏览器 + 剪贴板   用户粘一行
+都没有     → 报错，建议改用密码登录
+```

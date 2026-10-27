@@ -40,6 +40,7 @@ import {
 } from "./src/api.mjs"
 import { runCheckin } from "./src/tasks.mjs"
 import { ICON_BY_SITE } from "./src/icons.mjs"
+import { launchLoginBrowser, waitForCreds, closeSession } from "./src/cdp-login.mjs"
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
@@ -375,34 +376,65 @@ function makePlugin(SITE) {
         // ═══ ② 登录 ═══════════════════════════════════════════════════
         methods: [
           {
-            // ═══ ① 浏览器登录（推荐）═══════════════════════════════════════
+            // ═══ ① 浏览器登录（默认）═══════════════════════════════════════
             //
-            // 点一下就用系统浏览器打开官方登录页 —— 手机号 / 密码 / Google /
-            // 邮箱验证码 / 飞书 / 钉钉，官方页面有什么就能用什么，插件不掺和。
-            // 登录完粘一行 Console 命令，值进剪贴板，插件自己读回来。
+            // **插件自己拉浏览器**，独立 profile + `--remote-debugging-port=0`。
+            // 用户在官方登录页里用任何方式登（手机号 / 密码 / Google / 邮箱验证码 /
+            // 飞书 / 钉钉），登录成功后插件通过 CDP 在页面上下文里读 localStorage，
+            // 拿到 jwt + organizationCode，签密钥，关窗口。**零手动操作。**
+            //
+            // ⚠ 这里传 `opened: true` 是正当的：页面确实是我们自己开的，
+            //   告诉 magpie 别再开一次（HOOKS.md 陷阱 3，Grok CLI 同款理由）。
+            //   开不起来（本机没 Chrome/Edge）就不传，让 magpie 开系统浏览器，
+            //   退回「读剪贴板」那条路。
             type: "oauth",
             label: `${SHORT} 浏览器登录`,
             async authorize() {
-              // ⚠ 不能 await：读剪贴板要起 powershell，几百毫秒；authorize 必须立刻返回。
-              //   把「打开页面前的剪贴板」作为 promise 递下去，callback 里才落地。
-              const skipPromise = clipboardText()
+              const url = `${SITE.web}/login`
+              const hostFragment = new URL(SITE.web).hostname
+
+              // 自己拉一个能被 CDP 看进去的浏览器
+              const session = await launchLoginBrowser(url).catch(() => null)
+
+              // 降级路径要用的「打开前剪贴板」（不 await：起 powershell 要几百毫秒）
+              const skipPromise = session ? null : clipboardText()
+
               return {
-                url: `${SITE.web}/login`,
-                instructions: CLIP_HINT,
+                url,
+                ...(session ? { opened: true } : {}),
+                instructions: session
+                  ? "浏览器已打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。"
+                  : `没在本机找到 Chrome / Edge，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
                 method: "auto",
-                opened: true,
                 async callback() {
-                  const skip = (await skipPromise).trim()
-                  const got = await pollClipboard({ skip })
+                  let got = null
+                  let via = ""
+
+                  // ① 首选：从我们自己拉起来的浏览器里读
+                  if (session) {
+                    got = await waitForCreds(session, hostFragment)
+                    via = "cdp"
+                    closeSession(session)
+                  }
+
+                  // ② 降级：读剪贴板
+                  if (!got && skipPromise) {
+                    const skip = (await skipPromise).trim()
+                    got = await pollClipboard({ skip })
+                    via = "clipboard"
+                  }
+
                   if (!got) {
                     return {
                       type: "failed",
-                      error:
-                        "等了 5 分钟没在剪贴板里读到登录态 —— 那行 Console 命令粘了吗？（也可以改用「密码登录」或「登录态」两种方法）",
+                      error: session
+                        ? "浏览器开着了，但 5 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？"
+                        : "5 分钟内没拿到登录状态。可以改用「密码登录」或「登录态」两种方法。",
                     }
                   }
+
                   try {
-                    if (!got.org) throw new Error("剪贴板里只有 JWT，没看到组织码 —— 两样要一起复制")
+                    if (!got.org) throw new Error("只拿到 JWT，没有组织码")
                     // 真的验一次：读积分能过，说明 JWT + 组织码都对
                     await fetchPoints(got.jwt, got.org, SITE.host)
                     const key = await issueGatewayKey(got.jwt, got.org, SITE.host)
@@ -477,7 +509,8 @@ function makePlugin(SITE) {
                   : `${SITE.web}/login`,
                 instructions: `正在用手机号+密码登录…${inviteCode ? `（邀请码 ${inviteCode}）` : ""}`,
                 method: "auto",
-                opened: true,
+                // ⚠ 不传 opened：这个页面是 magpie 去开的。传 true = 「我已经开过了，你别开」，
+                //   结果就是「点了登录没弹网页」。HOOKS.md 陷阱 3。
                 async callback() {
                   let r
                   try {
