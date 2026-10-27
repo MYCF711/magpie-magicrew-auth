@@ -1,31 +1,26 @@
-// 签到 = 自动做完新手福利
+// 签到 = 每日登录积分 + 自动做完新手福利
 //
 // ═══════════════════════════════════════════════════════════════════════
-// 结论先说：不用浏览器
+// 两套机制，别混
 // ═══════════════════════════════════════════════════════════════════════
 //
-// 一开始从主 chunk 里只挖到埋点事件名（`onboarding_guide_step_click`），
-// 所以以为任务要靠前端导览判定。翻到 `onboarding-CZBI0pQt.js` 才发现
-// 真正的接口只有两行：
+// ① 每日登录积分 —— POST /api/v1/login-gift（无 body）
+//      两站同构，幂等，每天一次。国际站 +50/天，国内站 +200/天。
+//      当天已领 → granted:false「今日已领取登录积分」，HTTP 仍 200。
+//      **这才是真正的「每日签到」**，也是 0.3.7 及更早版本完全漏掉的那一块。
+//      来源：2026-10-27 用真实网页登录抓包得到（magicrew.ai 的 /login-gift）。
 //
-//   GET  /api/v1/onboarding/tasks
-//   PUT  /api/v1/onboarding/tasks/{code}/completion
-//
-// 8 项任务里 7 项 PUT 一下就完成、积分当场到账。只有 `first_ai_work`
-// 回 9303「该新人引导任务不支持手动完成」—— 那项得真的跑一次 AI 任务。
-//
-// 实测（2026-10-27）：1240 → 1540，+300，六项全部当场入账。
+// ② 新手福利任务 —— GET /api/v1/onboarding/tasks + PUT .../completion
+//      一次性收益，8 项里 7 项 PUT 即完成，first_ai_work 服务端不收手动完成。
+//      ⚠ 国际站这个接口恒返回 {participant_type:null, tasks:[]} —— 是「这个账号
+//        没被登记进引导计划」，不是「已经领完了」。0.3.7 把 0 项当成功上报，
+//        于是 msg 写着「新手福利 0 项已全部完成」，实际上什么都没做。
 //
 // ═══════════════════════════════════════════════════════════════════════
 //
-// 所以 magpie 的 auth.checkin 钩子做的事：
-//   ① 拉任务列表
-//   ② 把 PENDING 的挨个 PUT（跳过不支持手动的）
-//   ③ 报积分变化
-//
-// 每天跑一次，第一次就把 300 分拿完；之后每次都是 done。
+// 每天跑一次，两步都做，任一步失败不影响另一步。
 
-import { fetchPoints, fetchOnboardingTasks, completeOnboardingTask } from "./api.mjs"
+import { fetchPoints, claimLoginGift, fetchOnboardingTasks, completeOnboardingTask } from "./api.mjs"
 
 /** 已知不支持手动完成的任务，别再白试 */
 const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
@@ -48,71 +43,94 @@ export async function runCheckin(auth) {
     return { outcome: "failed", message: `读不到积分：${e?.message ?? e}` }
   }
 
+  const parts = []
+  let claimedAnything = false
+  let failed = false
+
+  // ── ① 每日登录积分 ────────────────────────────────────────────────
+  try {
+    const gift = await claimLoginGift(h.jwt, h.org, h.host)
+    if (gift.granted) {
+      claimedAnything = true
+      parts.push(`每日登录 +${gift.points}`)
+    } else {
+      parts.push("每日登录已领过")
+    }
+  } catch (e) {
+    failed = true
+    parts.push(`每日登录失败：${e?.message ?? e}`)
+  }
+
+  // ── ② 新手福利任务 ────────────────────────────────────────────────
   let tasks = []
+  let tasksErr = null
   try {
     tasks = await fetchOnboardingTasks(h.jwt, h.org, h.host)
   } catch (e) {
-    return { outcome: "failed", message: `读不到新手任务：${e?.message ?? e}` }
+    tasksErr = e
   }
 
-  const done = tasks.filter((t) => t.status === "COMPLETED" || t.rewardStatus === "GRANTED")
-  const pending = tasks.filter((t) => t.status !== "COMPLETED" && t.rewardStatus !== "GRANTED")
+  if (tasksErr) {
+    failed = true
+    parts.push(`新手任务读取失败：${tasksErr?.message ?? tasksErr}`)
+  } else if (!tasks.length) {
+    // ⚠ 空列表 ≠ 已完成。国际站这个接口对未登记账号恒返回空数组。
+    parts.push("本站无新手福利任务")
+  } else {
+    const pending = tasks.filter((t) => t.status !== "COMPLETED" && t.rewardStatus !== "GRANTED")
 
-  if (!pending.length) {
-    return {
-      outcome: "done",
-      message: `新手福利 ${tasks.length} 项已全部完成（当前积分 ${before}）`,
-    }
-  }
+    if (!pending.length) {
+      parts.push(`新手福利 ${tasks.length} 项均已领完`)
+    } else {
+      const claimed = []
+      const skipped = []
+      const taskFailed = []
 
-  // 挨个完成
-  const claimed = []
-  const skipped = []
-  const failed = []
+      for (const t of pending) {
+        if (NOT_MANUALLY_COMPLETABLE.has(t.code)) {
+          skipped.push(`${t.title}（${t.points} 分，要真跑一次 AI 任务）`)
+          continue
+        }
+        try {
+          const r = await completeOnboardingTask(h.jwt, h.org, t.code, h.host)
+          claimed.push({ code: t.code, title: t.title, points: r.points || t.points })
+        } catch (e) {
+          if (e?.code === CODE_NOT_SUPPORTED) {
+            skipped.push(`${t.title}（${t.points} 分，不支持手动完成）`)
+          } else {
+            taskFailed.push(`${t.code}: ${e?.message ?? e}`)
+          }
+        }
+        // 服务端限流留点余地
+        await new Promise((r) => setTimeout(r, 400))
+      }
 
-  for (const t of pending) {
-    if (NOT_MANUALLY_COMPLETABLE.has(t.code)) {
-      skipped.push(`${t.title}（${t.points} 分，要真跑一次 AI 任务）`)
-      continue
-    }
-    try {
-      const r = await completeOnboardingTask(h.jwt, h.org, t.code, h.host)
-      claimed.push({ code: t.code, title: t.title, points: r.points || t.points })
-    } catch (e) {
-      if (e?.code === CODE_NOT_SUPPORTED) {
-        skipped.push(`${t.title}（${t.points} 分，不支持手动完成）`)
-      } else {
-        failed.push(`${t.code}: ${e?.message ?? e}`)
+      if (claimed.length) {
+        claimedAnything = true
+        parts.push(`新手福利完成 ${claimed.length} 项：${claimed.map((c) => c.title).join("、")}`)
+      }
+      if (skipped.length) parts.push(`需手动：${skipped.join("、")}`)
+      if (taskFailed.length) {
+        failed = true
+        parts.push(`新手福利失败 ${taskFailed.length} 项：${taskFailed.join("；")}`)
       }
     }
-    // 服务端限流留点余地
-    await new Promise((r) => setTimeout(r, 400))
   }
 
+  // ── ③ 复读积分，报净变化 ──────────────────────────────────────────
   let after = before
   try {
     after = (await fetchPoints(h.jwt, h.org, h.host)).total
   } catch {}
 
   const gained = after - before
-  const parts = []
-  if (gained > 0) parts.push(`积分 +${gained}（${before} → ${after}）`)
-  else parts.push(`积分 ${after}（本次无变动）`)
-  if (claimed.length) parts.push(`完成 ${claimed.length} 项：${claimed.map((c) => c.title).join("、")}`)
-  if (skipped.length) parts.push(`需手动：${skipped.join("、")}`)
-  if (failed.length) parts.push(`失败 ${failed.length} 项：${failed.join("；")}`)
-
-  if (claimed.length) {
-    return {
-      outcome: "claimed",
-      credit: gained > 0 ? gained : undefined,
-      message: parts.join("。"),
-    }
-  }
+  const head = gained > 0 ? `积分 +${gained}（${before} → ${after}）` : `积分 ${after}（本次无变动）`
+  const msg = [head, ...parts].join("。")
 
   return {
-    outcome: failed.length ? "failed" : "done",
-    message: parts.join("。"),
+    outcome: claimedAnything ? "claimed" : failed ? "failed" : "done",
+    credit: gained > 0 ? gained : undefined,
+    message: msg,
   }
 }
 
