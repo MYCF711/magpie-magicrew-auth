@@ -116,7 +116,13 @@ export function makeMethods(c) {
       ],
       async authorize(inputs) {
         const phone = String(inputs?.phone || "").replace(/[\s-]/g, "")
-        if (!/^1\d{10}$/.test(phone)) return { type: "failed", error: "手机号不完整" }
+        // ⚠ authorize() 里**不能**返回 { type: "failed" }：magpie 把这里的返回值当作
+        //   「登录流程对象」，会去调它的 `.callback()` —— 少了这个函数就是一句
+        //   `callback is not a function`，用户只看到莫名其妙的报错。
+        //   实测触发路径：callback 里失败 → magpie 显示「重试」 → 点重试会**重新调
+        //   authorize** → 这次走到这条失败分支 → 返回没有 callback 的对象 → 崩。
+        //   ⇒ authorize 里失败一律抛异常。
+        if (!/^1\d{10}$/.test(phone)) throw new Error("手机号不完整")
 
         const vision = readVisionModel()
         const masked = phone.replace(/^(\d{3})\d{4}(\d{4})$/, "$1****$2")
@@ -202,7 +208,9 @@ export function makeMethods(c) {
         try {
           sent = await startSmsLogin(c, { mobile: phone })
         } catch (e) {
-          return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+          // 同上：这里也不能 return failed —— 点「重试」会重新走 authorize，
+          // 返回没有 callback 的对象会让 magpie 崩在 `.callback()`
+          throw new Error(String(e?.message ?? e).slice(0, 500))
         }
 
         return {
@@ -414,8 +422,9 @@ export function makeMethods(c) {
       async authorize(inputs) {
         const jwt = String(inputs?.jwt || "").trim().replace(/^Bearer\s+/i, "")
         const org = String(inputs?.org || "").trim()
-        if (!jwt.startsWith("eyJ")) return { type: "failed", error: "不是 JWT" }
-        if (!org) return { type: "failed", error: "没填组织码" }
+        // 同一条规矩：authorize 里失败只抛异常，不返回 { type: "failed" }
+        if (!jwt.startsWith("eyJ")) throw new Error("不是 JWT")
+        if (!org) throw new Error("没填组织码")
 
         const result = (async () => {
           await fetchPoints(jwt, org, c.host)
