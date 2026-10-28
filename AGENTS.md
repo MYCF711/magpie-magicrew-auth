@@ -53,7 +53,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 |---|---|---|---|
 | 1 | 改好了国内站，国际站用户报同样的错 | **两站是同一个 Go 服务、逐字符同构**，改一处就要两站都验；`SITES.cn` / `SITES.intl` 只是 host 不同 | internals 一 |
 | 2 | 国际站 `/v1/chat/completions` 回 `HTTP 500` + 22 字节裸文本（不是 JSON） | 国际站网关**强制**要 `organization-code` 头，缺了就是这个 500 | internals 一 / 五 |
-| 3 | 换了 key 之后老 key 立刻失效、用户被要求重登 | **签新 key 会吊销旧 key**，别在热路径上调签发；续期走 `src/keys.mjs` 的唯一出口 | internals 十三 |
+| 3 | 换了 key 之后老 key 立刻失效、用户被要求重登 | **「签新 key 会吊销旧 key」已被实测推翻（2026-10-28）** —— 见下方「最容易误信的旧说法」。仍然只留一把、只走 `src/keys.mjs` 的唯一出口，理由是**本地别分叉**，不是互相吊销 | internals 十四 |
 | 4 | 刷新 token 之后两处 refresh_token 不一致、用户莫名掉登录 | 只允许**一个**出口持有 refresh_token；`src/hooks/refresh.mjs` 绕过出口就会分叉 | internals 二 / 十四 |
 | 5 | agent 说「上下文放不下」，而实际模型能吃更长 | 上下文窗口**必须查 magpie 的模型库**，不能填保守值（早前一刀切 256K，实际 1M） | internals 十六 |
 | 6 | 流式回复拿到了，但 `usage` 永远是空、额度不扣 | 流式请求必须补 `stream_options.include_usage`，否则上游不回 usage | internals 十二 |
@@ -78,6 +78,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 症状 | 判据 | 出处 |
 |---|---|---|
 | 以为 checkin 会「顺带续 key」 | **从来没有**。`src/hooks/checkin.mjs` → `src/tasks.mjs` 全链路没 import 过 `ensureKey`；保活由 magpie 按 `refreshLead` 主动调 `auth.refresh` | internals 十四 · CHANGELOG 0.x |
+| 以为「签一把顶一把」、`key-store` 里的 key 会「时间没到就被顶掉」 | **已实测推翻（2026-10-28）**：同账号两把相隔 67 秒签的 key 同时有效；12 把 key 逐把探活，403 **全部**对应 `expiresAt` 已过（剩 -173～-541 分），没有一个「时间没到就失效」的样本。仍只留一把、只走唯一出口的理由是「本地别分叉」，不是「互相吊销」。据此加「跨账号挑活 key」的兜底 = 把别人的 key 交出去 | internals 十四 · 十五 |
 
 ---
 
