@@ -42,16 +42,19 @@ import { makeHeaders } from "./src/hooks/headers.mjs"
 
 /** 一个站点进，一个完整插件出 */
 function buildPlugin(c) {
-  return async (input) => {
-    // magpie 的 optionValues()：用户在 provider 设置里改的开关，实时读。
-    // ⚠ 用 options(provider) 而不是 option(provider,key)：后者对「还不知道的
-    // 选项」也返回 false，插件加载早期会把默认 true 误判成关闭。没有该键
-    // （老 magpie / 测试）时按默认 true。
-    /** 整份 options（页面写的邀请设置在这里） */
-    const getOpts = () => input?.magpie?.options?.(c.PROVIDER) ?? {}
+  return async (input, options = {}) => {
+
+    // 本插件保存的 options（页面写的 inviteBySite / inviteLock 都在这里）。
+    // ⚠ 2026-10-29 插桩实测：官方契约是工厂的**第二个参数**（HOOKS.md 一、
+    //   MULTI-PROVIDER.md L156：`(ctx, options) => ({...})`），且它就是
+    //   plugins.json 里那份完整 options。
+    //   而 `input.magpie.options(provider)` 实测**永远返回 {}** —— 作者原来
+    //   的 getLock（以及照抄的页面设置读取）都因此失效：登录流程永远读不到
+    //   页面设置，只能回落滚动码。这里以第二参数为准。
+    const getOpts = () => (options && typeof options === "object" ? options : {})
 
     const getLock = () => {
-      const vals = input?.magpie?.options?.(c.PROVIDER)
+      const vals = getOpts()
       if (vals && Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
       return true
     }

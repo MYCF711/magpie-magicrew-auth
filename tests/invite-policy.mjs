@@ -198,17 +198,29 @@ check("锁定关掉 → 标题不带上级", () => {
   assert.doesNotMatch(mobileLabel(() => false, () => ({})), /（上级/)
 })
 
-// ═══ ④ 锁定开关（provider 设置页里的那一项）═════════════════════════
-console.log("\ninviteLock 开关 —— buildPlugin 暴露，默认开")
+// ═══ ④ 锁定开关 + 工厂第二参数（官方契约：`(ctx, options)`）══════════
+console.log("\ninviteLock / 工厂第二参数 —— buildPlugin 暴露，默认开")
 
 await checkAsync("buildPlugin 暴露 inviteLock；锁定关掉时标题不带上级", async () => {
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  const on = await _internal.buildPlugin(c)({ magpie: { options: () => ({ inviteLock: true }) } })
-  const off = await _internal.buildPlugin(c)({ magpie: { options: () => ({ inviteLock: false }) } })
+  const on = await _internal.buildPlugin(c)({}, { inviteLock: true })
+  const off = await _internal.buildPlugin(c)({}, { inviteLock: false })
   assert.equal(on.auth.options[0].key, "inviteLock")
   assert.equal(on.auth.options[0].default, true)
   assert.match(on.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
   assert.doesNotMatch(off.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
+})
+
+await checkAsync("工厂第二参数就是页面 options —— 标题按它显示（死号同前规则）", async () => {
+  clearInvitePolicy(SITE)
+  const p = await _internal.buildPlugin(c)({}, {
+    inviteBySite: { [SITE]: { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" } },
+  })
+  assert.match(p.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级 138\*\*\*\*0000）/)
+  const dead = await _internal.buildPlugin(c)({}, {
+    inviteBySite: { [SITE]: { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" } },
+  })
+  assert.doesNotMatch(dead.auth.methods.find((m) => /手机号/.test(m.label)).label, /已删除/)
 })
 
 // ── 收尾 ───────────────────────────────────────────────────────────────
