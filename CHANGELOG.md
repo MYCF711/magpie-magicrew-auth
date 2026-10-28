@@ -32,6 +32,9 @@ hw.failed() == false
 
 账号于是永远留在轮换里，下一次请求继续撞同一个错误。
 
+> 已把 magpie 侧根因与修法报到 https://github.com/yetone/magpie/issues/4095 ——
+> 插件这一层是绕过，不是根修。
+
 ### 修法（插件层）
 
 `src/hooks/loader.mjs` 增加 `rewriteCreditRefusal()`：只在
