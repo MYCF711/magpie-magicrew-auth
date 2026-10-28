@@ -301,23 +301,25 @@ await (async () => {
   })
 })()
 
-// ── ⑦ 方法表：两条验证码方法都在，且顺序按站点 ───────────────────────
-console.log("\n⑦ auth.methods：国际站邮箱优先，国内站手机号优先")
+// ── ⑦ 方法表：国际站四条（邮箱优先），国内站三条（没有邮箱）──────────
+console.log("\n⑦ auth.methods：国际站 邮箱优先；国内站没有邮箱那条")
 
 const { MagicrewAuthPlugin, MagicrewIntlAuthPlugin } = await import("../index.mjs")
 const cn = await MagicrewAuthPlugin({ client: null, directory: "." })
 const intl = await MagicrewIntlAuthPlugin({ client: null, directory: "." })
 
-check("国内站：手机号 → 邮箱 → 浏览器 → 登录态", () => {
+check("国内站：手机号 → 浏览器 → 登录态，且**没有**邮箱方法", () => {
   const l = cn.auth.methods.map((m) => m.label)
+  assert.equal(l.length, 3, `应该 3 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /手机号验证码/)
-  assert.match(l[1], /邮箱验证码/)
-  assert.match(l[2], /浏览器登录/)
-  assert.match(l[3], /登录态/)
+  assert.match(l[1], /浏览器登录/)
+  assert.match(l[2], /登录态/)
+  assert.ok(!l.some((x) => /邮箱/.test(x)), "国内站登录页没有邮箱入口，别摆出来")
 })
 
 check("国际站：邮箱 → 手机号 → 浏览器 → 登录态", () => {
   const l = intl.auth.methods.map((m) => m.label)
+  assert.equal(l.length, 4, `应该 4 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /邮箱验证码/)
   assert.match(l[1], /手机号验证码/)
   assert.match(l[2], /浏览器登录/)

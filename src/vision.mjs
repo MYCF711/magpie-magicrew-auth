@@ -144,6 +144,23 @@ async function askClock(base, model, imageDataUrl, variant) {
       //   `content` 正常回 "10"。
       //   ⇒ 别按「答案就一个数字」去估这个值；它买的是模型的思考空间。
       max_tokens: 6000,
+      // ⚠ `reasoning_effort: "low"` —— 实测有据的省法（2026-10-29，同一模型同一批图，
+      //   每个配置各跑 6 轮）：
+      //
+      //     |            | 出数字 | 平均耗时 | 平均 tokens | 平均 reasoning |
+      //     | 不传        |  5/6  | 20.6 s   |   2343      |    3581 字     |
+      //     | low         |  6/6  |  8.4 s   |   1007      |    1646 字     |
+      //
+      //   更快、更省、而且**更稳**（不传的那一组有一次把 6000 token 全烧在思考上、
+      //   `content` 交白卷）。判出来的角度两者一致。
+      //
+      //   ⚠ 别指望「彻底不思考」——这个模型在网关侧关不掉，实测 12 组参数：
+      //     `enable_thinking:false` / `thinking_budget:0` → 思考**更长**且 content 空；
+      //     `reasoning_effort:"none"/"minimal"` → 比不传还长；
+      //     `thinking:{type:"disabled"}` / `chat_template_kwargs` / `extra_body` /
+      //     `reasoning:{enabled:false}` → 都只是小幅缩短，没有一个真的关掉。
+      //     要真不思考，只能换一个**非推理**的视觉模型（那由用户在 magpie 设置里选）。
+      reasoning_effort: "low",
       temperature: 0,
       messages: [
         {
@@ -188,8 +205,12 @@ export async function decideDegFromImage(imageDataUrl) {
   if (!base) return { ok: false, reason: "no-gateway", detail: "连不上 magpie 自己的网关（试过 3425/3426/8080）" }
 
   const img = await toPngDataUrl(imageDataUrl)
-  const a = await askClock(base, model, img, 0).catch((e) => ({ clock: null, text: String(e?.message ?? e) }))
-  const b = await askClock(base, model, img, 1).catch(() => ({ clock: null, text: "" }))
+  // ⚠ **两个判官并行**：串行等两次就把延迟叠成两倍（实测单次 5～20 秒），
+  //   而它们互不依赖 —— 一起发，耗时等于较慢的那一次。
+  const [a, b] = await Promise.all([
+    askClock(base, model, img, 0).catch((e) => ({ clock: null, text: String(e?.message ?? e) })),
+    askClock(base, model, img, 1).catch(() => ({ clock: null, text: "" })),
+  ])
 
   if (a.clock == null && b.clock == null) {
     return { ok: false, reason: "unparsable", detail: `${a.text} / ${b.text}` }
