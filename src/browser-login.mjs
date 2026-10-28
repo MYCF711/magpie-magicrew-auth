@@ -15,10 +15,10 @@
 // ⚠ 独立 profile 意味着用户要在这个窗口里登一次（没有他日常浏览器的 cookie）。
 //   **每次登录一个一次性 profile，用完删** —— 为什么不能复用，见下面 newProfileDir()。
 
-import { spawn } from "node:child_process"
+import { spawn, execFileSync } from "node:child_process"
 import { existsSync, readFileSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, basename } from "node:path"
 
 const BASE = () => join(homedir(), ".cache", "magpie")
 
@@ -264,7 +264,27 @@ async function waitPort(dir, timeoutMs = 8_000, aborted = null) {
  * @param {{candidates?: {name:string,path:string}[]}} [opts] 测试注入用
  * @returns {Promise<{port:number, dir:string, child:import("node:child_process").ChildProcess, name:string, exe:string}>}
  */
+/** 一次失败后就别再拉：冷却期内直接走手动登录，免得每次点都弹一堆窗口 */
+let cdpDownUntil = 0
+const CDP_COOLDOWN_MS = 30 * 60_000
+
+/**
+ * 拉起一次登录窗口。
+ *
+ * ⚠ 2026-10-29 实测（用户机器，Chrome 155 + 已有一个日常 Chrome 在跑）：
+ *   按原来那套参数 spawn 出去，浏览器把页面**转交给已运行实例**后自己 exit 0，
+ *   既不写 DevToolsActivePort，也不关它开出来的窗口 —— 而原代码会
+ *   「把所有候选浏览器都试一遍」，于是点一次「邮箱验证码登录」就弹好几个窗口。
+ *
+ *   参数集参照 GoogleChrome/chrome-launcher 的 DEFAULT_FLAGS（官方给自动化工具用的那套），
+ *   把扩展 / 组件更新 / 同步 / 首次运行向导 / 后台网络全关掉，
+ *   再补 `--remote-allow-origins=*`（新版 Chrome 连 CDP 的 WebSocket 要它）。
+ */
 export async function launchLoginBrowser(url, { candidates } = {}) {
+  // 冷却期内不再 spawn —— 本机接管不了就是接管不了，反复试只会反复弹窗
+  if (Date.now() < cdpDownUntil) {
+    throw new Error("本机浏览器不接受自动接管（刚才失败过，30 分钟内不再尝试），直接用手动登录")
+  }
   const list = (candidates ?? browserCandidates()).filter((c) => {
     try {
       return c?.path && existsSync(c.path)
@@ -279,21 +299,20 @@ export async function launchLoginBrowser(url, { candidates } = {}) {
   // 先扫掉上一次登录留下的临时 profile（含历史复用目录）—— 只做一次
   sweepProfiles()
 
-  const failures = []
-  for (const cand of list) {
-    let session = null
-    try {
-      session = await launchOne(cand, url)
-      return session
-    } catch (e) {
-      failures.push(`${cand.name}：${String(e?.message ?? e).slice(0, 160)}`)
-      // launchOne 自己已经收拾过失败的进程和目录，这里只管继续试下一个
-    }
+  // ⚠ 只试**第一个**能用的浏览器。
+  //   每个候选失败都会留下一个收不回来的窗口（浏览器把自己 exit 掉、窗口归已运行实例），
+  //   试 N 个就弹 N 个 —— 这正是「一下子弹出很多个浏览器」的来源。
+  //   第一个不行就交给调用方走手动登录，别再用窗口堆失败。
+  const cand = list[0]
+  try {
+    return await launchOne(cand, url)
+  } catch (e) {
+    // 记下这次失败：30 分钟内不再自动拉浏览器（想提前恢复就重启 magpie）
+    cdpDownUntil = Date.now() + CDP_COOLDOWN_MS
+    throw new Error(
+      `没能自己接管浏览器（${cand.name}：${String(e?.message ?? e).slice(0, 200)}）`,
+    )
   }
-
-  throw new Error(
-    `试过 ${list.length} 个浏览器都没能打开调试通道：\n` + failures.map((f) => `  · ${f}`).join("\n"),
-  )
 }
 
 /**
@@ -323,10 +342,28 @@ async function launchOne(cand, url) {
       [
         `--user-data-dir=${dir}`,
         "--remote-debugging-port=0",
+        // 新版 Chrome 连 CDP 的 WebSocket 要放行来源，否则 /json/* 能取到、WebSocket 连不上
+        "--remote-allow-origins=*",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-features=Translate,MediaRouter",
+        // ═══ 以下照抄 GoogleChrome/chrome-launcher 的 DEFAULT_FLAGS（只留跨平台、有意义的）═══
+        "--disable-features=Translate,OptimizationHints,MediaRouter,DialMediaRouteProvider,CalculateNativeWinOcclusion,InterestFeedContentSuggestions,CertificateTransparencyComponentUpdater,AutofillServerCommunication,PrivacySandboxSettings4",
+        "--disable-extensions",
+        "--disable-component-extensions-with-background-pages",
         "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-client-side-phishing-detection",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--disable-default-apps",
+        "--mute-audio",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-hang-monitor",
+        "--disable-prompt-on-repost",
+        "--disable-domain-reliability",
+        "--password-store=basic",
         url,
       ],
       // 某些国产浏览器不接受部分参数会直接退出，stdio 必须 ignore，
@@ -334,7 +371,7 @@ async function launchOne(cand, url) {
       { stdio: "ignore", detached: false, windowsHide: false },
     )
   } catch (e) {
-    await cleanupFailed({ dir })
+    await cleanupFailed({ dir, exe: cand.path })
     throw new Error(`进程起不来：${e?.message ?? e}`)
   }
 
@@ -347,7 +384,7 @@ async function launchOne(cand, url) {
 
   const port = await waitPort(dir, 8_000, () => exited !== null)
   if (!port) {
-    await cleanupFailed({ dir, child })
+    await cleanupFailed({ dir, child, exe: cand.path })
     throw new Error(
       exited !== null
         ? `进程启动后退出了（code ${exited}），没写出调试端口`
@@ -358,10 +395,50 @@ async function launchOne(cand, url) {
 }
 
 /** 失败收尾：杀进程 + 删目录，都不抛错 */
-async function cleanupFailed({ dir, child }) {
+/**
+ * Windows：按 `--user-data-dir` 精确杀进程。
+ *
+ * ⚠ 为什么不能只 kill(child)：实测浏览器会「父进程 exit 0、真正的窗口挂在另一批
+ *   子进程上」，child 早就没了，kill 落空 —— 于是每失败一次就多一个关不掉的窗口
+ *   （用户看到的就是「一下子弹出很多个浏览器」）。
+ *   profile 目录是一次性的、带随机后缀，按它匹配进程命令行既精确又不会误伤日常浏览器。
+ */
+function killByProfileDir(dir, exePath) {
+  if (process.platform !== "win32" || !dir) return 0
+  const name = basename(String(exePath || "chrome.exe")).replace(/'/g, "''")
+  const pattern = String(dir).replace(/'/g, "''")
   try {
-    child?.kill()
-  } catch {}
+    execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p = Get-CimInstance Win32_Process -Filter "Name='${name}'" | Where-Object { $_.CommandLine -like '*${pattern}*' }; ` +
+          `$p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count`,
+      ],
+      { stdio: "ignore", timeout: 10_000 },
+    )
+    return 1
+  } catch {
+    return 0
+  }
+}
+
+async function cleanupFailed({ dir, child, exe }) {
+  // 先按 profile 目录收（这一批才是真正开着窗口的进程），再补一刀 child 树
+  killByProfileDir(dir, exe)
+  try {
+    if (child?.pid && process.platform === "win32") {
+      execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" })
+    } else {
+      child?.kill()
+    }
+  } catch {
+    try {
+      child?.kill()
+    } catch {}
+  }
   if (!dir) return
   try {
     rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 })
