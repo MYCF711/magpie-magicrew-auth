@@ -1,17 +1,32 @@
-// 无头登录的底层：旋转验证码 + 手机验证码换取登录态
+// 无头登录的底层：旋转验证码 + 手机/邮箱验证码换取登录态
 //
 // 全部是**纯 HTTP**，不开浏览器、不读 localStorage。协议是从网页版
-// `SMSVerificationCodeForm` chunk 里逆出来的，每一步都实测过
+// `SMSVerificationCodeForm` / `LoginCoreForm` chunk 里逆出来的，每一步都实测过
 // （见 docs/internals.md「无头登录」一节）：
 //
-//   ① POST /captcha/generate   { account_type, mobile, state_code }
+//   ① POST /captcha/generate   { account_type, mobile, state_code }      手机
+//                              { account_type, email }                   邮箱
 //        → { token, image(data:image/webp;base64,…), expire_time }
 //   ② 算角度 → angle = enc(deg, n)
 //   ③ POST /captcha/verify     { token, angle, account_type, mobile, state_code }
+//                              { token, angle, account_type, email }
 //        → { verified: true, business_token: "biz_…" }
-//   ④ POST /v4/user/send-sms   { type, phone, state_code }
-//        + header `X-Captcha-Token: <business_token>`
-//   ⑤ POST /v4/user/login      { type: "phone_captcha", phone, state_code, code, device }
+//   ④ 发验证码（两条路**是两个端点**，别混）：
+//        手机 POST /v4/user/send-sms     { type, phone, state_code }
+//        邮箱 POST /v4/user/send-email   { email, type }
+//        + header `X-Captcha-Token: <business_token>`，type 都是 "account_login"
+//   ⑤ 换登录态（同样是两个端点）：
+//        手机 POST /v4/user/login        { type:"phone_captcha", phone, state_code, code, device }
+//        邮箱 POST /v4/user/login-email  { email, captcha, device }
+//
+// ⚠ 邮箱那条为什么走 `/v4/user/login-email` 而不是 `/v4/user/login`：
+//   实测（2026-10-28，两站）——往 `/v4/user/login` 发任何 type（email / email_captcha
+//   / email_code）都回 2000「phone 字段是必须的」，服务端根本不认邮箱。
+//   前端 `UserApi` 里也是两条独立方法：`loginByEmail()` → `/v4/user/login-email`，
+//   并且它显式 `delete("organization-code")`。
+//
+// ⚠ 邮箱那条的**验证码字段名是 `captcha`，不是 `code`** —— 实测发 `code` 回
+//   2000「captcha 字段是必须的」；发 `captcha` 回 2168「验证码错误」。
 //
 // ⚠ 三个域名各管一段，别混：
 //     www.<站点>            → 前端页面（只用来取 Origin，别的没用）
@@ -23,6 +38,34 @@
 //      · 「验证不存在或已过期」 expire_time 给 10 分钟
 //      · 「验证提交过于频繁」  连续批量提交会被拦
 //   ⇒ 不能枚举角度，一次要算准；失败就换图重来。
+//
+// ═══════════════════════════════════════════════════════════════════════
+// 那张旋转图到底能不能绕开（2026-10-29 逐条实测，别再来一遍）
+// ═══════════════════════════════════════════════════════════════════════
+//
+// 结论：**只有「这个号已注册」这一条免费通道**，其余一律必须看懂图。
+//
+// ① 已注册的号 —— 服务端**不出图**：`/captcha/generate` 直接回 `business_token`。
+//      实测：已注册邮箱 → business_token；没注册过的邮箱 → token + image。
+//      ⇒ 「把我已有的账号加进 magpie」根本不需要识图模型（见 headless.mjs 里
+//        startCodeLogin 的「先取图、再判模型」顺序）。
+//
+// ② 新号的答案**不在前端**，也不在图里：
+//      · 前端提交的 `angle` 就是**用户拖动的角度**（`verify(r)` → 这个文件里的
+//        encodeAngle），前端不知道正确答案 —— 知道的话就不会让你拖了；
+//      · 图里没有任何元数据：解剖 webp 只有 `VP8X` / `ALPH` / `VP8` 三个 chunk，
+//        没有 EXIF / XMP / ICC / 自定义块，字符串扫描也是空的；
+//      · 服务端强制：`verify` 不传 angle → 「angle 字段是必须的」；乱填 →
+//        「验证失败，请重试」；发码不带 `X-Captcha-Token`（哪怕带上账号自己的 JWT
+//        和 organization-code）→ 「需要验证码验证」。
+//      ⇒ 答案 = 服务端生成图时随机定的角度，存在它自己的会话里（10 分钟过期）。
+//        要过它只有两条路：识图模型，或人眼看。
+//
+// ③ 不经过验证码的登录入口只有两条，都不是邮箱验证码的替代品：
+//      · 手机号 + 密码 → `POST /api/v1/sessions {type:"phone_password"}`
+//      · 本机浏览器里已登录 → 读它的 localStorage（见 local-browser.mjs）
+//      邮箱 + 密码（`type:"email_password"`）端点认这个 type，但要账号**事先设过
+//      密码** —— 实测对一个已注册邮箱回 `33002 账号不存在`，不能当通用路。
 
 /** 服务端只认这一套 Unicode；错误码直接用数字，日志里好 grep */
 export const CAPTCHA_CODE = {
@@ -42,6 +85,33 @@ export const CAPTCHA_CODE = {
  */
 export function keewoodOf(site) {
   return site.id === "magicrew" ? "https://i-keewood-service.teamshare.cn" : "https://keewood-service.magicrew.ai"
+}
+
+/**
+ * 「这条链路在给谁发验证码」→ 服务端要的那几个字段。
+ *
+ * 手机和邮箱走的是**同一套 captcha 协议**，只有三处不同，全收敛在这里：
+ *   ① 标识字段：`mobile` + `state_code` vs `email`
+ *   ② `account_type`：`"mobile"` vs `"email"`
+ *   ③ 端点：`/v4/user/send-sms` + `/v4/user/login` vs
+ *      `/v4/user/send-email` + `/v4/user/login-email`
+ *
+ * ⚠ 邮箱**不带 `state_code`** —— 前端邮箱表单的初始值里就没有这个字段
+ *   （实测抓到的请求体逐字符是 `{"account_type":"email","email":"…"}`）。
+ *
+ * @param {{mobile?:string, stateCode?:string, email?:string}} ident
+ * @returns {{account_type:"mobile"|"email", mobile?:string, state_code?:string, email?:string}}
+ */
+export function identFields(ident = {}) {
+  const email = String(ident?.email ?? "").trim()
+  if (email) return { account_type: "email", email }
+  const mobile = String(ident?.mobile ?? "").replace(/[\s-]/g, "")
+  return { account_type: "mobile", mobile, state_code: ident?.stateCode || "+86" }
+}
+
+/** 这条链路是手机还是邮箱 —— 决定走哪两个端点 */
+export function identKind(ident = {}) {
+  return String(ident?.email ?? "").trim() ? "email" : "mobile"
 }
 
 /**
@@ -109,14 +179,12 @@ async function postJSON(url, body, { headers = {}, timeoutMs = 20_000 } = {}) {
   return { status: res.status, text, json }
 }
 
-/** ① 取图。返回 null 表示服务端认为这个号**已经注册**，直接给了 business_token（跳过验证） */
-export async function generateCaptcha(site, { mobile, stateCode = "+86" } = {}) {
+/** ① 取图。服务端认为这个号**已经注册**时直接给 business_token（跳过验证） */
+export async function generateCaptcha(site, ident = {}) {
   const host = keewoodOf(site)
-  const { json } = await postJSON(`${host}/captcha/generate`, {
-    account_type: "mobile",
-    mobile,
-    state_code: stateCode,
-  }, { headers: { origin: site.web } })
+  const { json } = await postJSON(`${host}/captcha/generate`, identFields(ident), {
+    headers: { origin: site.web },
+  })
 
   const data = json?.data ?? {}
   if (data.business_token) return { registered: true, businessToken: data.business_token }
@@ -131,16 +199,14 @@ export async function generateCaptcha(site, { mobile, stateCode = "+86" } = {}) 
   }
 }
 
-/** ③ 提交角度 */
-export async function verifyCaptcha(site, { token, deg, mobile, stateCode = "+86" }) {
+/** ③ 提交角度（手机 / 邮箱同一套，标识字段由 identFields 决定） */
+export async function verifyCaptcha(site, { token, deg, ...ident }) {
   const host = keewoodOf(site)
   const n = randomN()
   const { json } = await postJSON(`${host}/captcha/verify`, {
-    account_type: "mobile",
     token,
     angle: encodeAngle(deg, n),
-    mobile,
-    state_code: stateCode,
+    ...identFields(ident),
   }, { headers: { origin: site.web } })
 
   const data = json?.data ?? {}
@@ -149,28 +215,42 @@ export async function verifyCaptcha(site, { token, deg, mobile, stateCode = "+86
 }
 
 /**
- * ④ 发短信。businessToken 缺了/假的都会被打回来，所以它必须是真的。
+ * ④ 发验证码。businessToken 缺了/假的都会被打回来，所以它必须是真的。
  *
  * ⚠ `type` 是 **`"account_login"`**，不是 `"login"`、也不是登录枚举里的 `phone_captcha`。
  *   填错的表现是「服务异常，请联系管理员」(9999) —— 后端内部炸了，不是参数校验失败，
  *   所以从错误信息上完全看不出是 type 的问题。这个值是从浏览器真实请求里抓到的：
- *     {"type":"account_login","phone":"199…","state_code":"+86"}
- *   ⇒ 别再按直觉改它。
+ *     手机 {"type":"account_login","phone":"199…","state_code":"+86"}
+ *     邮箱 {"email":"…","type":"account_login"}
+ *   ⇒ 别再按直觉改它。两站实测：邮箱发 `type:"login"` 同样回 2000「服务异常」。
+ *
+ * ⚠ 邮箱和手机是**两个端点**：`/v4/user/send-email` vs `/v4/user/send-sms`。
+ *   把邮箱发去 send-sms 会 404（`/v4/user/send-sms` 只认 phone）。
  */
-export async function sendSms(site, { phone, stateCode = "+86", businessToken, type = "account_login" }) {
+export async function sendCode(site, ident = {}, { businessToken, type = "account_login" } = {}) {
   const host = keewoodOf(site)
-  const { json } = await postJSON(`${host}/v4/user/send-sms`, {
-    type,
-    phone,
-    state_code: stateCode,
-  }, { headers: { origin: site.web, "X-Captcha-Token": businessToken || "" } })
+  const f = identFields(ident)
+  const isEmail = f.account_type === "email"
+  const path = isEmail ? "/v4/user/send-email" : "/v4/user/send-sms"
+  const body = isEmail
+    ? { email: f.email, type }
+    : { type, phone: f.mobile, state_code: f.state_code }
+
+  const { json } = await postJSON(`${host}${path}`, body, {
+    headers: { origin: site.web, "X-Captcha-Token": businessToken || "" },
+  })
 
   if (json?.code === CAPTCHA_CODE.OK) return { ok: true }
-  return { ok: false, message: json?.message ?? "发送短信失败" }
+  return { ok: false, message: json?.message ?? "发送验证码失败" }
+}
+
+/** 旧签名兼容：手机号发短信 */
+export async function sendSms(site, { phone, stateCode = "+86", businessToken, type = "account_login" }) {
+  return sendCode(site, { mobile: phone, stateCode }, { businessToken, type })
 }
 
 /**
- * ⑤ 验证码换登录态。
+ * ⑤ 验证码换登录态（手机 / 邮箱两个端点）。
  *
  * ⚠ `device` 是必须的，而且结构是一层层试出来的：
  *     缺 device        → 「系统异常」(9999)
@@ -179,7 +259,7 @@ export async function sendSms(site, { phone, stateCode = "+86", businessToken, t
  *     { id, name }     → 放行，返回 2168「验证码错误」
  *   ⇒ { id: 64 位 hex, name: "web" } 就够。
  *
- * ⚠ `auto_register` / `redirect` 一个都不能省（这是网页表单的初始值，抠出来的）：
+ * ⚠ 手机那条的 `auto_register` / `redirect` 一个都不能省（这是网页表单的初始值，抠出来的）：
  *
  *     { phone, state_code, code, auto_register: true,
  *       type: "phone_captcha", redirect: window.location.href }
@@ -188,27 +268,50 @@ export async function sendSms(site, { phone, stateCode = "+86", businessToken, t
  *   · `redirect` 是**当前页面的 URL**，服务端从它上面取 `?invitation=<码>`。
  *     ⇒ **邀请码是靠 redirect 传的，不是独立字段**。这就是为什么浏览器登录的
  *       URL 必须带 `?invitation=`：不带，新注册的号就没有邀请关系。
+ *
+ * ⚠ 邮箱那条**验证码字段叫 `captcha`，不叫 `code`**（实测：发 code 回
+ *   2000「captcha 字段是必须的」；发 captcha 回 2168「验证码错误」）。
+ *   端点也不同：`/v4/user/login-email`，前端调它时会先 `delete("organization-code")`。
+ *   `auto_register` / `redirect` 前端没传，但我们**照传** —— 实测多这两个字段
+ *   服务端不报错（仍回 2168），而新号注册和邀请码都指着它们。
  */
-export async function loginBySmsCode(
+export async function loginByCode(
   site,
-  { phone, stateCode = "+86", code, device, autoRegister = true, redirect },
+  { code, device, autoRegister = true, redirect, ...ident },
 ) {
   const host = keewoodOf(site)
-  const body = {
-    type: "phone_captcha",
-    phone,
-    state_code: stateCode,
-    code,
-    auto_register: autoRegister,
-    device: device ?? { id: makeDeviceId(), name: "web" },
-  }
+  const f = identFields(ident)
+  const isEmail = f.account_type === "email"
+
+  const body = isEmail
+    ? {
+        email: f.email,
+        captcha: code,
+        auto_register: autoRegister,
+        device: device ?? { id: makeDeviceId(), name: "web" },
+      }
+    : {
+        type: "phone_captcha",
+        phone: f.mobile,
+        state_code: f.state_code,
+        code,
+        auto_register: autoRegister,
+        device: device ?? { id: makeDeviceId(), name: "web" },
+      }
   if (redirect) body.redirect = redirect
 
-  const { json, status, text } = await postJSON(`${host}/v4/user/login`, body, {
-    headers: { origin: site.web },
-  })
+  const { json, status, text } = await postJSON(
+    `${host}${isEmail ? "/v4/user/login-email" : "/v4/user/login"}`,
+    body,
+    { headers: { origin: site.web } },
+  )
 
   return { json, status, text }
+}
+
+/** 旧签名兼容：手机号验证码换登录态 */
+export async function loginBySmsCode(site, { phone, stateCode = "+86", ...rest }) {
+  return loginByCode(site, { mobile: phone, stateCode, ...rest })
 }
 
 /** 64 位 hex，形状与网页版 cus.device_id 一致 */
