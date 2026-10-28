@@ -41,7 +41,17 @@ import { makeHeaders } from "./src/hooks/headers.mjs"
 
 /** 一个站点进，一个完整插件出 */
 function buildPlugin(c) {
-  return async () => {
+  return async (input) => {
+    // magpie 的 optionValues()：用户在 provider 设置里改的开关，实时读。
+    // ⚠ 用 options(provider) 而不是 option(provider,key)：后者对「还不知道的
+    // 选项」也返回 false，插件加载早期会把默认 true 误判成关闭。没有该键
+    // （老 magpie / 测试）时按默认 true。
+    const getLock = () => {
+      const vals = input?.magpie?.options?.(c.PROVIDER)
+      if (vals && Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
+      return true
+    }
+
     // 卡片标题与文案不在这里做 —— 那是 registry 条目的职责。
     // 插件不写 magpie 自己的缓存目录：那份文件属于 magpie，插件只读不写。
     return {
@@ -53,7 +63,17 @@ function buildPlugin(c) {
         maxConcurrency: 4,
         refreshLead: REFRESH_LEAD_MS,
 
-        methods: makeMethods(c),
+        options: [
+          {
+            key: "inviteLock",
+            label: "锁定邀请上级（签到不再覆盖）",
+            description:
+              "打开：新号固定挂在选定的邀请码下；关闭：跟随最后一个登录 / 签到的账号（会漂移）。",
+            default: true,
+          },
+        ],
+
+        methods: makeMethods(c, getLock),
         refresh: makeRefresh(c),
         loader: makeLoader(c),
         usage: makeUsage(c),

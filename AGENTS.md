@@ -75,6 +75,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 22 | 同一账号有的请求 200、有的 403 `token无效`（`retryable=false`），换个时间又好了 | key 有两条签发路径时 store 与 magpie 各存一把，**静态挑一把必有一半踩空**。0.3.29 起 `keyCandidates()` 把 store 两槽 + `auth.access` 逐把打 chat，命中的写回 store；全被拒才交 402 让 magpie 换号。判据：`GET /v1/models` 对死 key **放行**，逐把探活必须用 `/v1/chat/completions` | CHANGELOG 0.3.29 · `tests/key-failover.mjs` |
 | 23 | 插件列表里别人有「已自动更新」徽章，magicrew 没有 | magpie 只自动更新包名以 `@magpie-community/` 开头的包（`internal/plugin/updates.go` 的 `Official()` 硬编码前缀）；第三方 npm / git 源永远只提示。本插件用 `src/auto-maintenance.mjs` 复刻：读 `plugin-updates.json` 的 `waiting` → 调 `magpie plugin update` → 成功后补 `updated[]`（徽章读它）。判据：`plugin-updates.json` 的 waiting 有 `package:"Magicrew", git:true`；`findMagpieExe()` 能解析到 magpie 可执行文件。⚠ 更新后要重启 magpie 才加载新代码 | CHANGELOG 0.3.30 · `tests/auto-maintenance.mjs` |
 | 24 | 新装插件后没有任何签到记录，`plugin-checkin.json` 里没有 magicrew | magpie 的 `PluginCheckinOn()`：`pluginCheckins` 没有显式值时默认 **false**（只有 WorkBuddy / Trae / MiniMax / Qoder 有内置开关）。插件只能在加载时把 `settings.json` 的 `pluginCheckins[provider]` 补成 true —— **只在键不存在时补**，用户显式 false 不覆盖。判据：`settings.json` 的 `pluginCheckins` 有 `magicrew` / `magicrew-intl` 键 | CHANGELOG 0.3.30 · `src/auto-maintenance.mjs` |
+| 25 | 邀请上级选了某个账号，第二天签到后又变回别的号 | 旧版 `rollInvite` 每天覆盖滚动文件。0.3.32 起策略在**锁定开关打开时**优先（provider 设置「锁定邀请上级」，默认开）；锁定关掉则回落到滚动。判据：`~/.cache/magpie/magicrew-invite-policy-<site>.json` 是 fixed/custom，且开关开着；`tests/invite-policy.mjs` 锁死 | CHANGELOG 0.3.32 · `src/store.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
