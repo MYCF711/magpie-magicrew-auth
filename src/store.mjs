@@ -7,10 +7,9 @@
 //
 // ⚠ 这不是「状态管理」，是缓存：删掉全部，插件照样能跑（只是要重新登录一次）。
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
-import { fileURLToPath } from "node:url"
 import { fetchOwnInviteCode, SITES } from "./api.mjs"
 
 function cacheDir() {
@@ -215,7 +214,6 @@ export function writeInvitePolicy(siteId, policy) {
         at: new Date().toISOString(),
       }),
     )
-    syncInvitePage() // 页面上的「当前」跟着刷新
   } catch {}
 }
 
@@ -255,7 +253,6 @@ export function noteAccountCode(siteId, org, code, accountId) {
     const f = inviteCodesPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, JSON.stringify(all))
-    syncInvitePage() // 页面清单跟着刷新
   } catch {}
 }
 
@@ -294,108 +291,6 @@ export function backfillInviteCodes() {
     }
   })()
   return backfillPromise
-}
-
-/**
- * 把「有哪些账号、各自的邀请码、当前策略」写进 page/codes.js。
- *
- * 插件页面是沙箱：没有 fetch、读不到磁盘，也读不到账号（magpie 只给它 usage / providers）。
- * 所以清单靠这里预先生成一份静态脚本，页面 <script src="codes.js"> 直接读 —— 与
- * agent-purge 的 gen-personas.mjs 是同一个套路。
- */
-/**
- * org → 便于辨认的名字（打码手机号 / 邮箱），从 magpie 自己的账号文件**只读**。
- * 页面要显示「178****697（IV…）」，而 rollInvite 只拿得到 org，所以在这里补。
- */
-function readAccountLabels() {
-  const out = {}
-  try {
-    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
-    for (const v of Object.values(raw || {})) {
-      const org = String(v?.org || "")
-      const id = String(v?.accountId || "")
-      if (org && id && !out[org]) out[org] = id
-    }
-  } catch {}
-  return out
-}
-
-/**
- * 删除账号后的确定性清理：码缓存去掉死号；滚动码若属死号一并清掉
- * （不清掉的话，缓存一清 inviteToUse 就查不到归属，反判成「归属不明」保留）。
- *
- * ⚠ 新号竞态保护（2026-10-29 实测复现）：注册登录时 rollInvite 先记码，
- *   magpie 把新号写进 plugin-auth.json 在**之后** —— 此刻 liveOrgs 看不到新号，
- *   直接清理会把刚记的码当死号删掉，页面要等下次登录/签到才有它。
- *   所以 **10 分钟内记录的条目不参与清理**；这窗口内 inviteToUse 的死号门
- *   （owner 死→回落）仍然兜底。
- * 账号文件读不到（liveOrgs === null）时不动，避免误清。
- */
-const FRESH_ACCOUNT_MS = 10 * 60_000
-
-export function pruneDeadAccounts(siteId) {
-  const live = liveOrgs(siteId)
-  if (!live || !live.size) return null
-  const codes = readAccountCodes(siteId)
-  const fresh = (v) => {
-    try {
-      return Date.now() - Date.parse(v?.at || "") < FRESH_ACCOUNT_MS
-    } catch {
-      return false
-    }
-  }
-  const dead = Object.keys(codes).filter((org) => !live.has(org) && !fresh(codes[org]))
-  if (!dead.length) return { dead: [], rollingCleared: false }
-  let rollingCleared = false
-  const rollingNow = readInvite(siteId)
-  if (rollingNow && dead.some((org) => codes[org]?.code === rollingNow)) {
-    try {
-      unlinkSync(invitePath(siteId))
-      rollingCleared = true
-    } catch {}
-  }
-  const kept = { ...codes }
-  for (const org of dead) delete kept[org]
-  try {
-    const f = inviteCodesPath(siteId)
-    mkdirSync(dirname(f), { recursive: true })
-    writeFileSync(f, JSON.stringify(kept))
-  } catch {}
-  return { dead, rollingCleared }
-}
-
-export function syncInvitePage({ root: target } = {}) {
-  try {
-    const root = target || dirname(dirname(fileURLToPath(import.meta.url)))
-    // 仓库里的测试/开发不生成（否则 page/codes.js 会脏工作区）；发布包装有 .git 才写。
-    // 显式传 root（测试）时不受这个保护限制。
-    if (!target && (process.env.MAGICREW_NO_PAGE_SYNC === "1" || existsSync(join(root, ".git")))) return
-    const labels = readAccountLabels()
-    const sites = {}
-    for (const site of ["magicrew", "magicrew-intl"]) {
-      const live = liveOrgs(site)
-      pruneDeadAccounts(site)
-      let codes = readAccountCodes(site)
-      for (const [org, v] of Object.entries(codes)) {
-        if (v && !v.accountId && labels[org]) v.accountId = labels[org]
-      }
-      const pol = readInvitePolicy(site)
-      const rolling = readInvite(site)
-      const ownerOf = (code) => Object.keys(codes).find((o) => codes[o]?.code === code) || ""
-      sites[site] = {
-        codes,
-        policy: pol,
-        // 当前选择指向已删除的账号 —— 页面据此提示，登录侧已自动回退
-        policyStale: Boolean(live && live.size && pol.mode === "fixed" && pol.org && !live.has(pol.org)),
-        rolling,
-        rollingStale: Boolean(live && live.size && rolling && ownerOf(rolling) && !live.has(ownerOf(rolling))),
-        author: AUTHOR_INVITE[site] || "",
-      }
-    }
-    const f = join(root, "page", "codes.js")
-    mkdirSync(dirname(f), { recursive: true })
-    writeFileSync(f, "window.MAGICREW_CODES = " + JSON.stringify({ at: new Date().toISOString(), sites }) + ";\n")
-  } catch {}
 }
 
 /** 滚动请求最多等这么久 —— 登录流程不能被它拖死 */

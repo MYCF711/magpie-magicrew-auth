@@ -1,18 +1,18 @@
-// 邀请上级策略 —— 纯离线测试
+// 邀请上级 —— 纯离线测试（0.3.36：登录页一个数字文本框）
 //
 //   node tests/invite-policy.mjs
 //
-// 钉住邀请设置的存储层与解析链路（0.3.32 页面版）：
-//   · 策略三态 auto / fixed / custom；锁定开关关掉时一律回落到滚动
-//   · 登录用码的来源优先级：页面 options（inviteBySite）→ 文件策略 → 滚动 → 作者码
-//   · 账号被删（org 不在 plugin-auth.json）→ fixed/滚动码作废，自动回落
-//   · 按钮标题（inviteTag）与登录真正用的码同源，死号不显示
+// 钉住：
+//   · 策略 auto / fixed / custom；作者码 org 为空、死号自动回落
+//   · 数字方法：0=我的（作者 MYCF711），1..N=账号（按账号名排序），-1=自动，
+//     留空 / 不存在数字回退 0
+//   · 对照表写进 prompt message；ask 每次按最新账号清单生成
+//   · backfillInviteCodes 给老账号补码
 //
 // 隔离 HOME，不碰真实策略/账号文件，不联网。
-// （设置入口自页面版起不在 methods 里 —— 见 page/，那里是纯前端，无断言价值。）
 
 import assert from "node:assert/strict"
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -32,12 +32,9 @@ const {
   writeInvitePolicy,
   clearInvitePolicy,
   inviteToUse,
-  pruneDeadAccounts,
-  syncInvitePage,
   backfillInviteCodes,
 } = await import("../src/store.mjs")
-const { makeMethods, inviteFromOptions } = await import("../src/hooks/methods.mjs")
-const { _internal } = await import("../index.mjs")
+const { makeMethods } = await import("../src/hooks/methods.mjs")
 const { siteCtx, SITES } = await import("../src/context.mjs")
 
 const c = siteCtx(SITES.cn)
@@ -46,7 +43,6 @@ const AUTHOR = AUTHOR_INVITE[SITE]
 const ACCOUNT_CODE = "IVACCOUNT001"
 const ROLLING = "IVROLLING001"
 
-/** 一个已登录账号的邀请码记录（rollInvite 平时写的） */
 function seedCodes() {
   writeFileSync(
     join(CACHE, `magicrew-invite-codes-${SITE}.json`),
@@ -56,11 +52,9 @@ function seedCodes() {
     }),
   )
 }
-/** 滚动文件（老行为） */
 function seedRolling() {
   writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: ROLLING, at: "x" }))
 }
-/** magpie 的账号文件（只读它拿账号名；liveOrgs 也读它判断账号死活） */
 function seedAuth() {
   writeFileSync(
     join(CONFIG, "plugin-auth.json"),
@@ -70,7 +64,6 @@ function seedAuth() {
     }),
   )
 }
-
 seedCodes()
 seedRolling()
 seedAuth()
@@ -101,7 +94,7 @@ async function checkAsync(name, fn) {
 }
 
 // ═══ ① 存储层 ════════════════════════════════════════════════════════
-console.log("邀请策略存储 —— auto / fixed / custom 与锁定")
+console.log("邀请策略存储 —— auto / fixed / custom")
 
 check("默认是 auto", () => {
   clearInvitePolicy(SITE)
@@ -136,7 +129,13 @@ check("authorInvite 就是作者码", () => {
   assert.equal(authorInvite(SITE), AUTHOR)
 })
 
-// ═══ ② 账号被删（liveOrgs）══════════════════════════════════════════
+check('旧 org:"author" 读成空 org（作者不是账号）', () => {
+  writeInvitePolicy(SITE, { mode: "fixed", code: AUTHOR, org: "author", accountId: "MYCF711" })
+  assert.equal(readInvitePolicy(SITE).org, "")
+  assert.equal(inviteToUse(SITE, true), AUTHOR)
+})
+
+// ═══ ② 死号回退 ══════════════════════════════════════════════════════
 console.log("\n账号删除后的回落 —— fixed/滚动码不作废就注册落空")
 
 check("fixed 指向已删除的账号 → 回落滚动", () => {
@@ -162,136 +161,85 @@ check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
   assert.equal(inviteToUse(SITE, true), ROLLING)
 })
 
-check("账号文件读不到 → 不校验，行为与从前一致", () => {
-  const authFile = join(CONFIG, "plugin-auth.json")
-  const keep = readFileSync(authFile, "utf8")
-  rmSync(authFile, { force: true })
-  writeInvitePolicy(SITE, { mode: "fixed", code: "IVWHATEVER001", org: "orgGONE", accountId: "x" })
-  assert.equal(inviteToUse(SITE, true), "IVWHATEVER001")
-  writeFileSync(authFile, keep)
-})
+// ═══ ③ 数字方法 ══════════════════════════════════════════════════════
+console.log("\n邀请上级（数字）—— 0=作者，1..N=账号，-1=自动")
 
-// ═══ ②′ 账号删除 / 新号注册竞态（pruneDeadAccounts）════════════════
-console.log("\n删除账号的清理 与 新号注册的竞态保护")
-
-check("死号（老条目）→ 从缓存清掉；滚动码属它 → 一并清掉", () => {
-  const OLD = "2026-10-01T00:00:00Z"
-  writeFileSync(
-    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
-    JSON.stringify({
-      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: OLD },
-      orgDEAD: { code: "IVDEADROLL01", accountId: "已删除", at: OLD },
-    }),
-  )
-  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: "IVDEADROLL01", at: "x" }))
-  const r = pruneDeadAccounts(SITE)
-  assert.deepEqual(r, { dead: ["orgDEAD"], rollingCleared: true })
-  const cache = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
-  assert.deepEqual(Object.keys(cache), ["orgA"])
-  assert.equal(existsSync(join(CACHE, `magicrew-invite-${SITE}.json`)), false)
-  seedRolling()
-})
-
-check("新号竞态：刚记录（auth 文件还没有它）→ 不清", () => {
-  const NOW = new Date().toISOString()
-  writeFileSync(
-    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
-    JSON.stringify({
-      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: NOW },
-      orgNEW: { code: "IVNEWCODE001", accountId: "832****143", at: NOW },
-    }),
-  )
-  const r = pruneDeadAccounts(SITE)
-  assert.deepEqual(r, { dead: [], rollingCleared: false })
-  const cache = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
-  assert.equal(cache.orgNEW.code, "IVNEWCODE001")
-})
-
-check("滚动码属于刚注册的新号 → 不清", () => {
-  const NOW = new Date().toISOString()
-  writeFileSync(
-    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
-    JSON.stringify({ orgNEW: { code: "IVNEWCODE001", accountId: "832****143", at: NOW } }),
-  )
-  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: "IVNEWCODE001", at: "x" }))
-  const r = pruneDeadAccounts(SITE)
-  assert.deepEqual(r, { dead: [], rollingCleared: false })
-  assert.equal(existsSync(join(CACHE, `magicrew-invite-${SITE}.json`)), true)
-  seedCodes()
-  seedRolling()
-})
-
-// ═══ ③ 按钮标题与登录同源 ═══════════════════════════════════════════
-console.log("\n按钮标题（inviteTag）—— 与登录真正用的码同一个来源")
-
-function mobileLabel(getLock, getOpts) {
-  return makeMethods(c, getLock, getOpts).find((m) => /手机号/.test(m.label)).label
+function inviteMethod() {
+  return makeMethods(c).find((m) => m.type === "api" && String(m.label).includes("邀请上级"))
 }
 
-check("页面选了活账号 → 标题带它的名字", () => {
-  const opts = { inviteBySite: { [SITE]: { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" } } }
-  assert.match(mobileLabel(() => true, () => opts), /（上级 138\*\*\*\*0000）/)
+check("message 列出 0=我的 / -1=自动 / 1=账号（按账号名排序）", () => {
+  const msg = inviteMethod().prompts[0].message
+  assert.match(msg, /-1 = 自动/)
+  assert.match(msg, /0 = 我的（作者 MYCF711）/)
+  assert.match(msg, /1 = 138\*\*\*\*0000（IVACCOUNT001）/)
+  assert.doesNotMatch(msg, /author-duplicate/)
 })
 
-check("页面选了已删除的账号 → 标题不显示它，回落文件策略", () => {
-  clearInvitePolicy(SITE)
-  const opts = { inviteBySite: { [SITE]: { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" } } }
-  assert.doesNotMatch(mobileLabel(() => true, () => opts), /已删除/)
+check("ask 每次按最新清单生成；已填 invite 后不再问", async () => {
+  const m = inviteMethod()
+  const p = await m.ask({})
+  assert.equal(p.type, "text")
+  assert.match(p.message, /IVACCOUNT001/)
+  assert.equal(await m.ask({ invite: "1" }), null)
 })
 
-check("文件策略 fixed → 标题带策略里的账号；策略指向死号 → 不带", () => {
+await checkAsync("填 0 → 作者码，org 为空", async () => {
+  const r = await inviteMethod().authorize({ invite: "0" })
+  assert.equal(r.type, "failed")
+  const pol = readInvitePolicy(SITE)
+  assert.equal(pol.mode, "fixed")
+  assert.equal(pol.code, AUTHOR)
+  assert.equal(pol.org, "")
+  assert.equal(pol.accountId, "MYCF711")
+})
+
+await checkAsync("填 1 → 第一个账号", async () => {
+  await inviteMethod().authorize({ invite: "1" })
+  const pol = readInvitePolicy(SITE)
+  assert.equal(pol.mode, "fixed")
+  assert.equal(pol.code, ACCOUNT_CODE)
+  assert.equal(pol.org, "orgA")
+  assert.equal(pol.accountId, "138****0000")
+})
+
+await checkAsync("填 -1 → auto", async () => {
+  await inviteMethod().authorize({ invite: "-1" })
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
+})
+
+await checkAsync("留空 → 0（作者码）", async () => {
+  await inviteMethod().authorize({ invite: "" })
+  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
+  assert.equal(readInvitePolicy(SITE).mode, "fixed")
+})
+
+await checkAsync("不存在的数字 / 非数字 → 回退 0（作者码）", async () => {
+  await inviteMethod().authorize({ invite: "99" })
+  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
+  await inviteMethod().authorize({ invite: "abc" })
+  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
+})
+
+await checkAsync("已保存提示里带账号与码", async () => {
+  const r = await inviteMethod().authorize({ invite: "1" })
+  assert.match(r.error, /138\*\*\*\*0000/)
+  assert.match(r.error, /IVACCOUNT001/)
+})
+
+check("标题与当前策略同源（固定时带上级，auto 不带）", () => {
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  assert.match(mobileLabel(() => true, () => ({})), /（上级 138\*\*\*\*0000）/)
-  writeInvitePolicy(SITE, { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" })
-  assert.doesNotMatch(mobileLabel(() => true, () => ({})), /已删除/)
+  const label = makeMethods(c).find((m) => /手机号/.test(m.label)).label
+  assert.match(label, /（上级 138\*\*\*\*0000）/)
+  writeInvitePolicy(SITE, { mode: "auto" })
+  const auto = makeMethods(c).find((m) => /手机号/.test(m.label)).label
+  assert.doesNotMatch(auto, /（上级/)
 })
 
-check("锁定关掉 → 标题不带上级", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  assert.doesNotMatch(mobileLabel(() => false, () => ({})), /（上级/)
-})
+// ═══ ④ backfill ══════════════════════════════════════════════════════
+console.log("\nbackfillInviteCodes —— 老账号补码")
 
-// ═══ ④ 锁定开关 + 工厂第二参数（官方契约：`(ctx, options)`）══════════
-console.log("\ninviteLock / 工厂第二参数 —— buildPlugin 暴露，默认开")
-
-await checkAsync("buildPlugin 读第二参数 inviteLock；锁定关掉时标题不带上级", async () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  const on = await _internal.buildPlugin(c)({}, { inviteLock: true })
-  const off = await _internal.buildPlugin(c)({}, { inviteLock: false })
-  assert.match(on.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
-  assert.doesNotMatch(off.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
-})
-
-await checkAsync("页面选码 + 锁定关闭 → 登录仍回到滚动（页面选择不作数）", async () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: "IVKEEP000001", org: "orgA", accountId: "138****0000" })
-  const opts = { inviteBySite: { [SITE]: { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" } } }
-  assert.equal(inviteFromOptions(c, () => opts, () => false), ROLLING)
-  assert.equal(inviteFromOptions(c, () => opts, () => true), ACCOUNT_CODE)
-  const auto = { inviteBySite: { [SITE]: { mode: "auto", code: "" } } }
-  assert.equal(inviteFromOptions(c, () => auto, () => true), ROLLING)
-})
-
-await checkAsync("页面按站点写 inviteLockBySite，优先于全局 inviteLock", async () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  const off = await _internal.buildPlugin(c)({}, { inviteLock: true, inviteLockBySite: { [SITE]: false } })
-  assert.doesNotMatch(off.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
-  const on = await _internal.buildPlugin(c)({}, { inviteLock: false, inviteLockBySite: { [SITE]: true } })
-  assert.match(on.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
-})
-
-await checkAsync("工厂第二参数就是页面 options —— 标题按它显示（死号同前规则）", async () => {
-  clearInvitePolicy(SITE)
-  const p = await _internal.buildPlugin(c)({}, {
-    inviteBySite: { [SITE]: { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" } },
-  })
-  assert.match(p.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级 138\*\*\*\*0000）/)
-  const dead = await _internal.buildPlugin(c)({}, {
-    inviteBySite: { [SITE]: { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" } },
-  })
-  assert.doesNotMatch(dead.auth.methods.find((m) => /手机号/.test(m.label)).label, /已删除/)
-})
-
-await checkAsync("backfillInviteCodes 给老账号补码（只补缺口）", async () => {
+await checkAsync("给 plugin-auth 里有 JWT 的账号补码", async () => {
   const orig = globalThis.fetch
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ code: 1000, data: { invite_code: "IVBACK000001" } }), {
@@ -308,29 +256,6 @@ await checkAsync("backfillInviteCodes 给老账号补码（只补缺口）", asy
     globalThis.fetch = orig
     seedCodes()
   }
-})
-
-check("syncInvitePage 生成 codes.js（作者 / 账号 / 策略）", () => {
-  const root = join(FAKE, "pkgroot")
-  mkdirSync(join(root, "page"), { recursive: true })
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
-  syncInvitePage({ root })
-  const text = readFileSync(join(root, "page", "codes.js"), "utf8")
-  assert.match(text, /^window\.MAGICREW_CODES = /)
-  const data = JSON.parse(text.replace(/^window\.MAGICREW_CODES = /, "").replace(/;\s*$/, ""))
-  assert.equal(data.sites[SITE].author, AUTHOR)
-  assert.equal(data.sites[SITE].codes.orgA.code, ACCOUNT_CODE)
-  assert.equal(data.sites[SITE].policy.mode, "fixed")
-})
-
-check("页面包含作者项与按站点的锁定复选框；package 打包 page/", () => {
-  const page = readFileSync(new URL("../page/app.js", import.meta.url), "utf8")
-  assert.match(page, /我的（作者 MYCF711）/)
-  assert.match(page, /inviteLockBySite/)
-  assert.match(page, /锁定（签到不再覆盖）/)
-  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
-  assert.ok(pkg.files.includes("page"))
-  assert.equal(pkg.magpie.page.file, "page/index.html")
 })
 
 // ── 收尾 ───────────────────────────────────────────────────────────────

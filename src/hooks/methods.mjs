@@ -31,6 +31,9 @@ import {
 import {
   inviteToUse,
   liveOrgs,
+  authorInvite,
+  readAccountCodes,
+  writeInvitePolicy,
   readSession,
   writeSession,
   noteLoginFailure,
@@ -161,37 +164,7 @@ function orgDead(c, org) {
   return Boolean(live && live.size && !live.has(org))
 }
 
-/**
- * 页面 options 里的邀请设置（inviteBySite[siteId]），带死号校验。
- *   · auto              → 显式覆盖文件策略，走滚动 / 作者码
- *   · fixed 指向死号     → 降级成 auto（页面已提示，登录侧自动回退）
- *   · fixed/custom 活    → 用它
- * 没设置（null）才回落文件策略。
- */
-function optionInvite(c, getOpts) {
-  try {
-    const per = getOpts?.()?.inviteBySite?.[c.id]
-    if (!per || typeof per !== "object") return null
-    if (per.mode === "auto") return { mode: "auto", code: "", org: "", accountId: "" }
-    if ((per.mode === "fixed" || per.mode === "custom") && String(per.code || "").trim()) {
-      if (per.mode === "fixed" && orgDead(c, per.org)) {
-        return { mode: "auto", code: "", org: "", accountId: "" }
-      }
-      return per
-    }
-  } catch {}
-  return null
-}
-
-export function inviteFromOptions(c, getOpts, getLock = () => true) {
-  const per = optionInvite(c, getOpts)
-  if (!per) return null
-  // 页面上的「锁定」关掉 → 页面选中的码也不作数，回到滚动 / 作者码
-  if (getLock() === false || per.mode === "auto") return inviteToUse(c.id, false)
-  return per.code
-}
-
-function makeCodeMethod(c, kind, getLock = () => true, getOpts = () => ({})) {
+function makeCodeMethod(c, kind) {
   const isEmail = kind === "email"
   const what = isEmail ? "邮箱" : "手机号"
   /** 官方登录页上那个 tab 的名字 —— 回退到浏览器时要说清楚点哪个 */
@@ -215,7 +188,7 @@ function makeCodeMethod(c, kind, getLock = () => true, getOpts = () => ({})) {
 
   return {
     type: "oauth",
-    label: `${c.SHORT} ${what}验证码${inviteTag(c, getLock, getOpts)}`,
+    label: `${c.SHORT} ${what}验证码${inviteTag(c)}`,
     prompts: [
       isEmail
         ? {
@@ -246,7 +219,7 @@ function makeCodeMethod(c, kind, getLock = () => true, getOpts = () => ({})) {
       // ⚠ 无头这条路**没有**「打开带邀请码的页面」这一步，所以邀请码只能靠
       //   `redirect` 传 —— 网页表单的初始值里 redirect 就是 window.location.href，
       //   服务端从它上面取 `?invitation=`。少了它，新注册的号就没有邀请关系。
-      const inviteCode = inviteFromOptions(c, getOpts, getLock) ?? inviteToUse(c.id, getLock())
+      const inviteCode = inviteToUse(c.id)
       const loginUrl = inviteCode
         ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
         : `${c.web}/login`
@@ -377,24 +350,6 @@ function makeCodeMethod(c, kind, getLock = () => true, getOpts = () => ({})) {
   }
 }
 
-// ═══ 邀请上级：选择 / 自定义 ═════════════════════════════════════════
-//
-// 默认行为（auto）是「用最后一个登录 / 签到的号的码」，但它会漂移 ——
-// 每天 00:00 签到最后跑的那个号会把文件覆盖掉。这里让用户注册时就能定死。
-//
-// 界面（magpie 的 prompts 只有 select / text 两种控件，没有复合控件）：
-//   · select = 展开的按钮列表：我的（作者 MYCF711）→ 自动 → 已登录账号
-//   · text   = 自定义码
-//   · 锁定   = provider 的 auth.options 开关（真正的开关，magpie 设置页可见）
-//
-// 为什么不做「一个文本框 + 展开按钮」：prompts 没有把两者合成一个控件的口子；
-// 硬拼要写插件页面/面板，而页面读不到账号邀请码（PageReads 只给
-// usage:summary / providers:list，不含账号）。两个单步入口最稳。
-//
-// 选项靠 `magicrew-invite-codes-<site>.json` 填 —— 那是签到 / 登录时
-// `rollInvite` 顺手记下来的（每个账号每天都会跑一次签到，所以不会过期）。
-// 这里**不能**发请求：prompts 的 options 是同步生成的。
-
 /**
  * 面板标题后缀 —— 让「当前挂在谁名下」在选登录方式那一屏就能看见。
  * （那张面板只能显示 methods 的 label，插件没有别的可写位置。）
@@ -402,14 +357,7 @@ function makeCodeMethod(c, kind, getLock = () => true, getOpts = () => ({})) {
  * ⚠ 值在插件加载时算一次；改完设置要重启 magpie 才会刷新标题。
  *   设置本身是立即生效的，标题只是个提示。
  */
-function inviteTag(c, getLock = () => true, getOpts = () => ({})) {
-  if (getLock() === false) return ""
-  // 页面里选过就按页面的走 —— 与登录时真正用的是同一个来源（含死号校验）
-  const per = optionInvite(c, getOpts)
-  if (per) {
-    if (per.mode === "auto") return ""
-    return "（上级 " + (per.accountId || per.org || per.code) + "）"
-  }
+function inviteTag(c) {
   const pol = readInvitePolicy(c.id)
   if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code && !orgDead(c, pol.org)) {
     return `（上级 ${pol.accountId || pol.code}）`
@@ -417,7 +365,42 @@ function inviteTag(c, getLock = () => true, getOpts = () => ({})) {
   return ""
 }
 
-export function makeMethods(c, getLock = () => true, getOpts = () => ({})) {
+
+// ═══ 邀请上级：登录页一个按钮 + 一个数字文本框 ═══════════════════════
+//
+// 用户要的是「一个文本框就够」：0 = 我的（作者 MYCF711），1..N = 已登录账号
+// （按账号名排序），-1 = 自动（跟随最后一个登录 / 签到的号）；留空 / 不存在的
+// 数字回退 0。
+//
+// magpie 的 prompts 只有 text / select，没有「右边实时显示对应账号」的复合控件；
+// 所以把「0=…；1=…」的对照表写进 message，用户填数字、下一步后回一条已保存说明。
+//
+// 用 ask（而不是静态 prompts）是为了每次打开都按最新账号清单生成对照表 ——
+// 插件加载时 backfill 可能还没跑完。
+
+function inviteEntries(c) {
+  const out = []
+  const author = authorInvite(c.id)
+  if (author) out.push({ n: 0, label: "我的（作者 MYCF711）", code: author, org: "", accountId: "MYCF711" })
+  const codes = readAccountCodes(c.id)
+  const rows = Object.entries(codes)
+    .filter(([, v]) => v?.code && v.code !== author)
+    .sort((a, b) => String(a[1].accountId || a[0]).localeCompare(String(b[1].accountId || b[0]), "zh"))
+  for (const [org, v] of rows) {
+    out.push({ n: out.length, label: String(v.accountId || org), code: v.code, org, accountId: String(v.accountId || org) })
+  }
+  return out
+}
+
+function inviteMessage(c) {
+  const entries = inviteEntries(c)
+  const parts = ["邀请上级：填数字后点下一步", "-1 = 自动（跟随最后一个登录 / 签到的号）"]
+  for (const e of entries) parts.push(`${e.n} = ${e.label}（${e.code}）`)
+  parts.push("留空 / 不存在的数字 = 0")
+  return parts.join("；")
+}
+
+export function makeMethods(c) {
   // 顺序 = magpie 登录方式列表里的顺序。
   //
   // ⚠ **邮箱验证码只有国际站有**，国内站不给。实测两件事：
@@ -429,18 +412,18 @@ export function makeMethods(c, getLock = () => true, getOpts = () => ({})) {
   //   只会让用户填完邮箱撞一个看不懂的错。
   const codeMethods =
     c.id === "magicrew-intl"
-      ? [makeCodeMethod(c, "email", getLock, getOpts), makeCodeMethod(c, "mobile", getLock, getOpts)]
-      : [makeCodeMethod(c, "mobile", getLock, getOpts)]
+      ? [makeCodeMethod(c, "email"), makeCodeMethod(c, "mobile")]
+      : [makeCodeMethod(c, "mobile")]
 
   return [
     ...codeMethods,
 
     {
       type: "oauth",
-      label: `${c.SHORT} 浏览器登录${inviteTag(c, getLock, getOpts)}`,
+      label: `${c.SHORT} 浏览器登录${inviteTag(c)}`,
       async authorize(inputs) {
         // 邀请码两条路都要出现：登录页的 URL，以及最终注册时服务端读到的那份
-        const inviteCode = inviteFromOptions(c, getOpts, getLock) ?? inviteToUse(c.id, getLock())
+        const inviteCode = inviteToUse(c.id)
         const url = inviteCode
           ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
           : `${c.web}/login`
@@ -651,6 +634,39 @@ export function makeMethods(c, getLock = () => true, getOpts = () => ({})) {
               org,
             }
           },
+        }
+      },
+    },
+
+    // ── 邀请上级：只存设置、不登录；一个数字文本框 ────────────────
+    {
+      type: "api",
+      keyless: true,
+      label: `${c.SHORT} 邀请上级`,
+      prompts: [{ type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }],
+      async ask(inputs) {
+        if (inputs && Object.prototype.hasOwnProperty.call(inputs, "invite")) return null
+        return { type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }
+      },
+      async authorize(inputs) {
+        const raw = String(inputs?.invite ?? "").trim()
+        const n = raw === "" ? 0 : Number(raw)
+        if (n === -1) {
+          writeInvitePolicy(c.id, { mode: "auto" })
+          return { type: "failed", error: "已保存：自动（新号跟随最后一个登录 / 签到的号）。这一步只存设置，不登录、不新增账号。" }
+        }
+        const entries = inviteEntries(c)
+        if (!entries.length) return { type: "failed", error: "没有可用的邀请码（还没登录过账号）" }
+        const pick = Number.isInteger(n) && n >= 0 ? entries[n] ?? entries[0] : entries[0]
+        writeInvitePolicy(c.id, {
+          mode: "fixed",
+          code: pick.code,
+          org: pick.n === 0 ? "" : pick.org,
+          accountId: pick.n === 0 ? "MYCF711" : pick.accountId,
+        })
+        return {
+          type: "failed",
+          error: `已保存：新号挂在 ${pick.label}（${pick.code}）。这一步只存设置，不登录、不新增账号。`,
         }
       },
     },
