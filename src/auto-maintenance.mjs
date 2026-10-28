@@ -28,7 +28,7 @@
 //
 // 两个动作都是**尽力而为**：失败不抛、不拖慢签到/额度/登录。
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, copyFileSync } from "node:fs"
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, copyFileSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname, basename } from "node:path"
 import { execFileSync, spawn } from "node:child_process"
@@ -37,6 +37,7 @@ const PKG_NAME = "Magicrew"
 const AUTO_DIR = () => join(homedir(), ".config", "magpie")
 const CACHE_DIR = () => join(homedir(), ".cache", "magpie")
 const THROTTLE_MS = 6 * 3600_000 // 同一次更新失败后，6 小时内不再试
+const LOCK_MS = 10 * 60_000 // 一个更新进程最多占用 10 分钟
 
 function readJson(path, fallback) {
   try {
@@ -111,6 +112,33 @@ export function readAutoState(site, { cacheDir = CACHE_DIR() } = {}) {
 function writeAutoState(site, state, { cacheDir = CACHE_DIR() } = {}) {
   try {
     writeJsonAtomic(join(cacheDir, `magicrew-auto-${site}.json`), state)
+  } catch {}
+}
+
+// 两个 provider（magicrew / magicrew-intl）会在同一时刻各自跑 config，
+// 各调一次 kick。全局锁保证「magpie plugin update」只有一个进程在跑。
+function updateLockPath(cacheDir) {
+  return join(cacheDir, "magicrew-auto-update.lock")
+}
+
+function lockHeld(cacheDir, now) {
+  try {
+    const v = JSON.parse(readFileSync(updateLockPath(cacheDir), "utf8"))
+    return now - Number(v?.at || 0) < LOCK_MS
+  } catch {
+    return false
+  }
+}
+
+function takeLock(cacheDir, now) {
+  try {
+    writeJsonAtomic(updateLockPath(cacheDir), { pid: process.pid, at: now })
+  } catch {}
+}
+
+function releaseLock(cacheDir) {
+  try {
+    unlinkSync(updateLockPath(cacheDir))
   } catch {}
 }
 
@@ -206,6 +234,8 @@ export async function kick(c, opts = {}) {
       return { skipped: "no-magpie-exe", waiting }
     }
     if (opts.dryRun) return { wouldRun: exe, waiting }
+    if (lockHeld(cacheDir, now)) return { skipped: "locked", waiting }
+    takeLock(cacheDir, now)
 
     let child
     try {
@@ -216,10 +246,12 @@ export async function kick(c, opts = {}) {
         env: process.env,
       })
     } catch (e) {
+      releaseLock(cacheDir)
       writeAutoState(c.id, { ...state, lastAttempt: now, latest: waiting.latest, reason: String(e?.message ?? e) }, { cacheDir })
       return { skipped: "spawn-failed", error: String(e?.message ?? e) }
     }
     child.on?.("exit", (code) => {
+      releaseLock(cacheDir)
       if (code === 0) {
         noteUpdated(pkg, waiting.version, waiting.latest, { dir })
         writeAutoState(c.id, {
