@@ -82,6 +82,24 @@ export async function ensureKey(c, getAuth, { leadMs } = {}) {
   } catch {}
   const account = accountOf(auth)
 
+  // ⭐ magpie 手里的 access 才是**最新**的那把，先用它。
+  //
+  // 2026-10-28 实测（本机）：
+  //   plugin-auth.json 里的 access   到期 16:38  → ✅ 上游认
+  //   key-store 槽 a                  到期 昨天21:55 → ❌ 已被「签一把顶一把」顶掉
+  //   key-store 槽 b                  到期 15:55   → ❌ 同上
+  //
+  // 也就是说 store 里的两把都可能是**过期时间还没到、但服务端已经不认**的旧货。
+  // 而 isFresh 只看时间不看有效性，于是每次都拿废 key 去撞 —— 上游回
+  // 403「token无效」，网关报成「超级麦吉 did not stream: token无效」。
+  //
+  // store 的价值是「magpie 没给 access 时自己顶上」，不是「优先」——
+  // 它写进去的时机比 magpie 的续期晚不了，守不住最新那把。
+  const fromAuth = auth?.access
+    ? { apiKey: auth.access, expiresAt: Number(auth.expires) || 0 }
+    : null
+  if (fromAuth && isFresh(fromAuth, leadMs)) return fromAuth
+
   const st = readStore(c.id, account)
   const cur = currentKey(st)
   if (isFresh(cur, leadMs)) return cur
