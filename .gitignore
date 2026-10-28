@@ -4,3 +4,4 @@ node_modules/
 _*
 _probe/
 .tmp_*
+page/codes.js

@@ -19,7 +19,7 @@ const $ = (id) => document.getElementById(id);
 
 function currentOf(siteId) {
   const per = state.options?.inviteBySite?.[siteId];
-  if (per && (per.mode === "fixed" || per.mode === "custom") && per.code) return per;
+  if (per && ["auto", "fixed", "custom"].includes(per.mode)) return per;
   const pol = data()[siteId]?.policy;
   if (pol && (pol.mode === "fixed" || pol.mode === "custom") && pol.code) return pol;
   return { mode: "auto", code: "" };
@@ -55,7 +55,12 @@ function render() {
     // 当前选择指向已删除的账号（登录侧已自动回退）—— 页面上要说明白
     const warn = document.createElement("div");
     warn.className = "hint";
-    if (info.policyStale && (cur.mode === "fixed" || cur.mode === "custom") && cur.code === info.policy?.code) {
+    const pageDead = cur.mode === "fixed" && cur.org && !codes[cur.org] && cur.code !== (info.author || "");
+    if (pageDead) {
+      warn.textContent = "⚠ 页面选的账号已不在已登录列表里，新号会自动回退到滚动 / 作者码。重新选一个账号或点「自动」。";
+      warn.style.color = "#f2b277";
+      sec.appendChild(warn);
+    } else if (info.policyStale && (cur.mode === "fixed" || cur.mode === "custom") && cur.code === info.policy?.code) {
       warn.textContent = "⚠ 当前固定的账号已删除，新号会自动回退到滚动 / 作者码。点「自动」或重新选一个账号。";
       warn.style.color = "#f2b277";
       sec.appendChild(warn);
@@ -77,6 +82,15 @@ function render() {
       chips.appendChild(b);
     };
 
+    const author = info.author || "";
+    if (author) {
+      mkChip("我的（作者 MYCF711）", cur.mode === "fixed" && cur.code === author, () => {
+        state.pick[site.id] = { mode: "fixed", code: author, org: "", accountId: "MYCF711" };
+        render();
+        save(site.id);
+      });
+    }
+
     mkChip("自动（滚动）", cur.mode === "auto", () => {
       state.pick[site.id] = { mode: "auto", code: "" };
       render();
@@ -84,7 +98,7 @@ function render() {
     });
 
     for (const [org, v] of Object.entries(codes)) {
-      if (!v?.code) continue;
+      if (!v?.code || v.code === author) continue;
       const who = v.accountId || org;
       mkChip(`${who}（${v.code}）`, cur.code === v.code && cur.mode !== "auto", () => {
         state.pick[site.id] = { mode: "fixed", code: v.code, org, accountId: v.accountId || "" };
@@ -105,8 +119,8 @@ function render() {
     btn.textContent = "保存自定义码";
     btn.onclick = () => {
       const code = input.value.trim().toUpperCase();
-      if (!/^IV[A-Z0-9]{6,}$/.test(code)) {
-        setStatus("邀请码格式不对：应以 IV 开头、至少 8 位", "bad");
+      if (!/^IV[A-Z0-9]{10}$/.test(code)) {
+        setStatus("邀请码格式不对：应以 IV 开头、共 12 位", "bad");
         return;
       }
       state.pick[site.id] = { mode: "custom", code };
@@ -115,6 +129,15 @@ function render() {
     };
     custom.append(input, btn);
     sec.appendChild(custom);
+
+    const lockWrap = document.createElement("label");
+    lockWrap.className = "lock";
+    const lock = document.createElement("input");
+    lock.type = "checkbox";
+    lock.checked = lockOf(site.id);
+    lock.onchange = () => saveLock(site.id, lock.checked);
+    lockWrap.append(lock, document.createTextNode(" 锁定（签到不再覆盖）"));
+    sec.appendChild(lockWrap);
 
     if (!Object.keys(codes).length) {
       const hint = document.createElement("div");
@@ -182,6 +205,23 @@ async function save(siteId) {
   const base = { ...(state.options || {}) };
   const bySite = { ...(base.inviteBySite || {}), [siteId]: pick };
   await queueSave({ inviteBySite: bySite }, "已保存 —— 下一个新号就按这个走");
+}
+
+function lockOf(siteId) {
+  const by = state.options?.inviteLockBySite;
+  if (by && typeof by === "object" && Object.prototype.hasOwnProperty.call(by, siteId)) {
+    return by[siteId] !== false;
+  }
+  if (state.options && Object.prototype.hasOwnProperty.call(state.options, "inviteLock")) {
+    return state.options.inviteLock !== false;
+  }
+  return true;
+}
+
+async function saveLock(siteId, on) {
+  const base = { ...(state.options || {}) };
+  const by = { ...(base.inviteLockBySite || {}), [siteId]: !!on };
+  await queueSave({ inviteLockBySite: by }, on ? "已锁定：签到不再覆盖" : "已解锁：跟随最后一个登录/签到的号");
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

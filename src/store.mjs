@@ -7,7 +7,7 @@
 //
 // ⚠ 这不是「状态管理」，是缓存：删掉全部，插件照样能跑（只是要重新登录一次）。
 
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -186,10 +186,12 @@ export function readInvitePolicy(siteId) {
   try {
     const v = JSON.parse(readFileSync(invitePolicyPath(siteId), "utf8"))
     const mode = ["auto", "fixed", "custom"].includes(v?.mode) ? v.mode : "auto"
+    const org = String(v?.org || "").trim()
     return {
       mode,
       code: String(v?.code || "").trim(),
-      org: String(v?.org || "").trim(),
+      // 旧版把作者码存成 org:"author"；作者不是账号，按「无 org」处理
+      org: org === "author" ? "" : org,
       accountId: String(v?.accountId || "").trim(),
       at: String(v?.at || ""),
     }
@@ -208,7 +210,7 @@ export function writeInvitePolicy(siteId, policy) {
       JSON.stringify({
         mode,
         code: String(policy?.code || "").trim(),
-        org: String(policy?.org || "").trim(),
+        org: String(policy?.org || "").trim() === "author" ? "" : String(policy?.org || "").trim(),
         accountId: String(policy?.accountId || "").trim(),
         at: new Date().toISOString(),
       }),
@@ -325,8 +327,12 @@ export function pruneDeadAccounts(siteId) {
   return { dead, rollingCleared }
 }
 
-export function syncInvitePage() {
+export function syncInvitePage({ root: target } = {}) {
   try {
+    const root = target || dirname(dirname(fileURLToPath(import.meta.url)))
+    // 仓库里的测试/开发不生成（否则 page/codes.js 会脏工作区）；发布包装有 .git 才写。
+    // 显式传 root（测试）时不受这个保护限制。
+    if (!target && (process.env.MAGICREW_NO_PAGE_SYNC === "1" || existsSync(join(root, ".git")))) return
     const labels = readAccountLabels()
     const sites = {}
     for (const site of ["magicrew", "magicrew-intl"]) {
@@ -349,7 +355,7 @@ export function syncInvitePage() {
         author: AUTHOR_INVITE[site] || "",
       }
     }
-    const f = join(dirname(dirname(fileURLToPath(import.meta.url))), "page", "codes.js")
+    const f = join(root, "page", "codes.js")
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, "window.MAGICREW_CODES = " + JSON.stringify({ at: new Date().toISOString(), sites }) + ";\n")
   } catch {}

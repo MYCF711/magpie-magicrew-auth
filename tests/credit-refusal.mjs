@@ -199,6 +199,31 @@ await checkAsync("上游 400 schema 错误 → loader 原样交给 magpie 400", 
   assert.equal(await res.text(), body)
 })
 
+await checkAsync("上游 413 HTML → loader 翻译成 JSON 人话", async () => {
+  globalThis.fetch = async () =>
+    new Response("<html><body>413 Request Entity Too Large</body></html>", {
+      status: 413,
+      headers: { "content-type": "text/html" },
+    })
+  const loader = await makeLoader(siteCtx(SITES.cn))(() => ({
+    org: "acc1",
+    access: KEY,
+    refresh: "",
+    expires: Date.now() + 3_600_000,
+    jwt: "x".repeat(350),
+  }))
+  const res = await loader.fetch(`${loader.baseURL}/chat/completions`, {
+    method: "POST",
+    body: JSON.stringify({ model: "deepseek-v4.1-flash" }),
+  })
+  assert.equal(res.status, 413)
+  assert.match(res.headers.get("content-type") || "", /application\/json/)
+  const body = await res.json()
+  assert.equal(body.error.type, "payload_too_large")
+  assert.match(body.error.message, /8 MB/)
+  assert.match(body.error.message, /换账号无效/)
+})
+
 // 收尾
 globalThis.fetch = ORIG.fetch
 for (const [k, v] of Object.entries(ORIG)) {
