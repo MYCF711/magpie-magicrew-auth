@@ -362,6 +362,33 @@ await checkAsync("全部被拒 → 402，body 说明本账号几把都挂", asyn
   assert.match(body.error.message, /magpie 换下一个账号/)
 })
 
+await checkAsync("全被拒 → 用 refresh_token 自愈一把再试（0.3.33）", async () => {
+  seed("heal", {
+    current: "a",
+    refreshToken: "rt-heal",
+    keys: { a: { apiKey: K("a"), expiresAt: FAR }, b: { apiKey: K("b"), expiresAt: FAR } },
+    at: "x",
+  })
+  const tried = []
+  globalThis.fetch = async (url, init) => {
+    const u = String(url)
+    if (u.includes("/api/v1/model-gateway/tokens")) {
+      return json200({ code: 1000, data: { api_key: K("n"), refresh_token: "rt-new", api_key_expires_at: FAR } })
+    }
+    const key = String(init?.headers?.authorization || "").replace(/^Bearer /, "")
+    tried.push(key.slice(4, 7))
+    if (key === K("n")) return json200({ choices: [{ message: { content: "ok" } }] })
+    return json200({ code: 403, message: "token无效" })
+  }
+  const loader = await loaderFor("heal", { access: K("c"), expires: FAR, refresh: "" })
+  const res = await loader.fetch(`${loader.baseURL}/chat/completions`, { method: "POST", body: "{}" })
+  assert.equal(res.status, 200)
+  assert.deepEqual(tried, ["aaa", "bbb", "ccc", "nnn"])
+  assert.equal(dump("heal").current, "b")
+  assert.equal(dump("heal").keys.b.apiKey, K("n"))
+  assert.equal(dump("heal").refreshToken, "rt-new")
+})
+
 await checkAsync("HTTP 403 → 也逐把试（不能只看 HTTP 200 JSON）", async () => {
   seed("load3", {
     current: "a",
