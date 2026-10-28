@@ -1185,3 +1185,60 @@ HTTP 400
 2. **插件宿主是运行时从 `~/.cache/magpie/bun/install-cache/` 加载的**，
    不在 `plugin-host/host-*.js` 里；magpie 更新插件后会换目录（目录名带 commit hash），
    要改当前实际加载的那个。
+
+---
+
+## 十八、上游 400「可用积分已不足」：插件改写成 402
+
+### 症状
+
+多账号（同 provider 三号，余额 6,467 / 82 / 0 积分）时，一个账号被会话亲和留在
+回复链上，一轮把余额烧穿，上游回 HTTP **400**：
+
+```
+超级麦吉: 非常抱歉，当前对话需要调用大模型 / 付费工具，您的可用积分已不足。
+您可以点击右上角「用户头像」，通过「充值」通道补充积分，完成后即可继续对话。
+```
+
+DSH 显示「本轮运行失败」；trace 里只有两次 try（都在那个账号），余额 6,467 的账号一次没问。
+
+### 根因（magpie 0.1.1899 / origin main `69626580`）
+
+`internal/gateway/routing.go` 的 `failure()` 能认出（`creditWords` 命中「充值」）：
+
+```go
+creditWords = ...|余额|欠费|充值|账户.*(不足|停)
+case status == 402, creditWords.Match(body) && ...:
+    return failCredit
+```
+
+但 `internal/gateway/fallback.go` 的 `retryable()` 400/422 分支只查 `quotaWords`：
+
+```go
+case status == 400, status == 422:
+    return quotaWords.Match(body) || unservedWords.Match(body) || ...
+```
+
+`quotaWords` 不含「积分」「充值」。⇒ `retryable(400, body) == false` ⇒
+`hw.failed() == false` ⇒ 走不到 `!last && hw.failed()` 的换号分支，也不记 `Rest`。
+
+### 插件修法（0.3.26）
+
+`src/hooks/loader.mjs` 的 `rewriteCreditRefusal()`：只在 **400/422 + 文案命中
+「积分/余额不足」** 时改写成 **402 Payment Required**，body 原样。402 在 magpie
+的 `retryable()` 里无条件 true、`failure(402)` 也是 `failCredit`，于是会 rest 该账号
+30 分钟并继续问同 provider 的下一个账号 / 组的下一个成员。
+
+边界：`schema` 400、参数 400、200、402 一律原样透传；不读成功流（只克隆错误响应）。
+`tests/credit-refusal.mjs` 18 个断言锁死，含 `makeLoader().fetch` 的端到端用例。
+
+> 这是**绕过**，不是 magpie 根修。根修建议 `retryable()` 的 400/422 分支补
+> `creditWords.Match(body)`（或直接 `failure(status, body) == failCredit`）；
+> 已报 yetone/magpie#4095。
+
+### 为什么这是插件能做的边界
+
+插件能改上游响应（loader 的 `fetch` 返回 Response），改不了 magpie 的 `retryable()`。
+把「支付问题」伪装成语义正确的 402，比让每个用户手动避开耗尽账号现实；等 magpie 修好后，
+这段转换仍然无害（402 本来就是正确的语义）。
+

@@ -1,14 +1,18 @@
 // ④ auth.loader(getAuth) —— 请求接管
 //
 // 返回 baseURL / apiKey / headers / fetch(a,b)，magpie 拿它发真实请求。
-// 这是唯一能改请求体的地方。本项目用它干两件事：
+// 这是唯一能改请求体和上游错误状态的地方。本项目用它干三件事：
 //
 //   · 国际站网关强制要 organization-code（国内站不要），不带就是
 //     HTTP 500 "Internal Server Error."（22 字节纯文本，不是 JSON）
 //   · 推理模型低于 512 的 max_tokens 会被 reasoning 吃光，content 返回空串
+//   · 上游用 HTTP 400 报「可用积分已不足」：这个 400 在 magpie 的
+//     retryable() 里不被识别为可重试（400 分支只查 quotaWords，而这条文案
+//     命中的是 creditWords 的「充值」），于是整轮直接失败、账号也不 rest。
+//     插件把它改写为语义正确的 402 Payment Required，让 magpie 换下一个账号。
 //
-// ⚠ 不要在这里读流、不要重试换号、不要手拼 x-api-key ——
-//   前两件 magpie 做了，第三件看 SDK 包自动加。见 README「最小交付面」。
+// ⚠ 不要在这里读流、不要手拼 x-api-key ——
+//   流由 magpie 处理，头由 SDK 包自动加。见 README「最小交付面」。
 
 import { ensureKey, accountOf } from "../keys.mjs"
 
@@ -223,6 +227,62 @@ export function rewriteRequestBody(raw) {
   return changed ? JSON.stringify(j) : raw
 }
 
+// ═══ 上游「积分/余额不足」的 400 → 402 ═══════════════════════════════════
+//
+// 实测（2026-10-28 23:38，magpie 0.1.1899，DSH 走 group）：
+//
+//   try #1  magicrew@181****710  200  fail=loop   （模型自己绕圈，不是账号）
+//   try #2  magicrew@181****710  400  fail=credit
+//           body: 超级麦吉: 非常抱歉，当前对话需要调用大模型 / 付费工具，
+//                 您的可用积分已不足。…通过「充值」通道补充积分…
+//   route   done=true status=400   ← 第三个账号（余额 6,467）一次都没被问
+//
+// magpie 的 failure() 已经把这条归成 failCredit（creditWords 命中「充值」），
+// 但 retryable() 的 400/422 分支只查 quotaWords（quota|余额|额度|欠费|…），
+// 不含「积分」「充值」⇒ hw.failed() 为 false ⇒ 走不到 `!last && hw.failed()`
+// 的换账号分支，连 rest 都不记。账号于是永远留在轮换里，下一轮继续撞。
+//
+// 修法只改插件这一层：400/422 + 这条文案 → 402 Payment Required。
+// 402 在 magpie 的 retryable() 里无条件 true，failure(402) 也是 failCredit，
+// 会 rest 该账号 30 分钟并继续问同 provider 的下一个账号（或组的下一个成员）。
+// body 原样保留，最终错误文案不变。
+//
+// 注意：只转换「上游拒绝」这一个语义；400 的 schema 错误、参数错误绝不碰。
+const CREDIT_EXHAUSTED = /(?:积分|余额)(?:已|额度)?不足|可用积分不足|insufficient\s+(?:credit|credits|balance|fund|funds|point|points)|(?:credit|credits|point|points|balance)\s+(?:is\s+|are\s+)?(?:insufficient|exhausted)|out\s+of\s+(?:credit|credits|points?|balance)/i
+
+/** 这条错误文案是不是「账户没钱了」（而不是请求本身有问题） */
+export function isCreditExhausted(text) {
+  return CREDIT_EXHAUSTED.test(String(text ?? ""))
+}
+
+/**
+ * 把上游的「积分/余额不足」400/422 改写成 402，让 magpie 的 `retryable()`
+ * 愿意换下一个账号；其余响应原样返回（同一个 Response 对象）。
+ *
+ * @param {Response} res
+ * @returns {Promise<Response>}
+ */
+export async function rewriteCreditRefusal(res) {
+  if (!res || (res.status !== 400 && res.status !== 422)) return res
+  let text
+  try {
+    // 只克隆错误响应：成功响应（尤其是 SSE）不能在这里读，否则会破坏流
+    text = await res.clone().text()
+  } catch {
+    return res
+  }
+  if (!isCreditExhausted(text)) return res
+  const headers = new Headers(res.headers)
+  // body 已由 undici 解压，原 content-encoding/length 不再成立
+  headers.delete("content-length")
+  headers.delete("content-encoding")
+  return new Response(text, {
+    status: 402,
+    statusText: "Payment Required",
+    headers,
+  })
+}
+
 export function makeLoader(c) {
   return async (getAuth) => {
     const auth = await getAuth()
@@ -266,12 +326,12 @@ export function makeLoader(c) {
         // 四处请求体改写，全在 rewriteRequestBody 里（那里有实测出处）
         body = rewriteRequestBody(body)
 
-        return fetch(url, {
+        return rewriteCreditRefusal(await fetch(url, {
           method: init?.method ?? "POST",
           headers,
           body,
           signal: init?.signal ?? req?.signal ?? AbortSignal.timeout(300_000),
-        })
+        }))
       },
     }
   }
