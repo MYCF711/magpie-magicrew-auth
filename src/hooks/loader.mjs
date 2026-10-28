@@ -14,7 +14,7 @@
 // ⚠ 不要在这里读流、不要手拼 x-api-key ——
 //   流由 magpie 处理，头由 SDK 包自动加。见 README「最小交付面」。
 
-import { ensureKey, accountOf, keyCandidates, adoptKey } from "../keys.mjs"
+import { ensureKey, accountOf, keyCandidates, adoptKey, renewViaStore } from "../keys.mjs"
 
 /**
  * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
@@ -562,6 +562,22 @@ export function makeLoader(c) {
             await res.body?.cancel()
           } catch {}
         }
+
+        // 全被拒 —— 很可能是 key 被别处顶掉（同一账号在别处又登了一次，服务端换发）。
+        // 手里有 refresh_token 就续一把、再给一次机会：这是唯一能从 403 自愈的路，
+        // 否则这把 key 会一直「没过期但已失效」，直到 30 分钟 rest 结束还是它。
+        try {
+          if (accountOf(fresh) !== "default") {
+            const renewed = await renewViaStore(c, fresh)
+            if (renewed?.apiKey) {
+              const res = await sendWith(renewed.apiKey)
+              if (!(await isKeyRejected(res))) {
+                adoptKey(c, fresh, renewed.apiKey, renewed.expiresAt)
+                return rewriteCreditRefusal(res)
+              }
+            }
+          }
+        } catch {}
 
         // 这个账号的 key 全被拒。上游给的是 403「token无效」，magpie 会判成
         // 「不可重试」直接抛给客户端（ZCode 显示 auth_failed / token无效）。
