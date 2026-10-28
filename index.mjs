@@ -31,7 +31,7 @@
 
 import { SITES, siteCtx, REFRESH_LEAD_MS } from "./src/context.mjs"
 import { makeConfig } from "./src/hooks/config.mjs"
-import { syncInvitePage, backfillInviteCodes } from "./src/store.mjs"
+import { backfillInviteCodes } from "./src/store.mjs"
 import { makeMethods } from "./src/hooks/methods.mjs"
 import { makeRefresh } from "./src/hooks/refresh.mjs"
 import { makeLoader } from "./src/hooks/loader.mjs"
@@ -42,38 +42,10 @@ import { makeHeaders } from "./src/hooks/headers.mjs"
 
 /** 一个站点进，一个完整插件出 */
 function buildPlugin(c) {
-  return async (input, options = {}) => {
-
-    // 本插件保存的 options（页面写的 inviteBySite / inviteLockBySite 都在这里）。
-    // ⚠ 2026-10-29 插桩实测：官方契约是工厂的**第二个参数**（HOOKS.md 一、
-    //   MULTI-PROVIDER.md L156：`(ctx, options) => ({...})`），且它就是
-    //   plugins.json 里那份完整 options。
-    //   而 `input.magpie.options(provider)` 实测**永远返回 {}** —— 作者原来
-    //   的 getLock（以及照抄的页面设置读取）都因此失效：登录流程永远读不到
-    //   页面设置，只能回落滚动码。这里以第二参数为准。
-    const getOpts = () => (options && typeof options === "object" ? options : {})
-
-    const getLock = () => {
-      const vals = getOpts()
-      // 页面按站点写 inviteLockBySite；旧的全局 inviteLock 作为后备
-      const by = vals?.inviteLockBySite
-      if (by && typeof by === "object" && Object.prototype.hasOwnProperty.call(by, c.PROVIDER)) {
-        return by[c.PROVIDER] !== false
-      }
-      if (Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
-      return true
-    }
-
-    // 卡片标题与文案不在这里做 —— 那是 registry 条目的职责。
-    // 插件不写 magpie 自己的缓存目录：那份文件属于 magpie，插件只读不写。
+  return async () => {
     return {
-      // 页面清单（page/codes.js）在 config 时刷新 —— 放这里而不是 buildPlugin：
-      // 测试会直接调 buildPlugin，不能让测试往仓库里写生成物
+      // 老用户升级上来时码缓存可能是空的：延迟补一次（只补缺口，失败静默）
       config: (cfg) => {
-        try {
-          syncInvitePage()
-        } catch {}
-        // 老用户升级上来时码缓存可能是空的：延迟补一次（只补缺口，失败静默）
         try {
           const t = setTimeout(() => backfillInviteCodes().catch(() => {}), 20_000)
           t.unref?.()
@@ -87,7 +59,7 @@ function buildPlugin(c) {
         maxConcurrency: 4,
         refreshLead: REFRESH_LEAD_MS,
 
-        methods: makeMethods(c, getLock, getOpts),
+        methods: makeMethods(c),
         refresh: makeRefresh(c),
         loader: makeLoader(c),
         usage: makeUsage(c),
