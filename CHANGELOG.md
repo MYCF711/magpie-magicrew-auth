@@ -1,5 +1,55 @@
 # 更新记录
 
+## 0.3.26 — 2026-10-28
+
+**积分耗尽的 400 不再让整轮对话失败：改写成 402，让 magpie 换下一个账号**
+
+### 症状
+
+三个「超级麦吉」账号（余额 6,467 / 82 / 0 积分）接在同一个路由组里。余额 82 的账号
+被会话亲和（affinity）留在回复链上，一轮对话把它烧到负数，上游回：
+
+```
+HTTP 400
+超级麦吉: 非常抱歉，当前对话需要调用大模型 / 付费工具，您的可用积分已不足。
+您可以点击右上角「用户头像」，通过「充值」通道补充积分，完成后即可继续对话。
+```
+
+DSH 界面显示「本轮运行失败」，magpie 的 trace 里只有两次 try —— 都在
+`magicrew@181****710`，余额 6,467 的 `magicrew`（189****051）**一次都没被问**。
+
+### 根因
+
+magpie 的 `failure()` 已经能认出这条错误（`creditWords` 命中「充值」）并把
+`try.Fail` 记成 `credit`；但 `retryable()` 的 `status == 400, 422` 分支只查
+`quotaWords`，而 `quotaWords` 不含「积分」「充值」。于是：
+
+```
+hw.failed() == false
+  ⇒ 走不到 `!last && hw.failed()` 的换账号分支
+  ⇒ 不 rest、不换号、直接把 400 交给客户端
+```
+
+账号于是永远留在轮换里，下一次请求继续撞同一个错误。
+
+### 修法（插件层）
+
+`src/hooks/loader.mjs` 增加 `rewriteCreditRefusal()`：只在
+**400/422 + 文案确认是「积分/余额不足」** 时把状态码改成 `402 Payment Required`，
+body 原样保留。402 在 magpie 的 `retryable()` 里无条件可重试、`failure(402)` 也是
+`failCredit`，因此会 rest 该账号 30 分钟并继续问同 provider 的下一个账号 / 组的下一个成员。
+
+边界钉死：schema 错误的 400、参数错误的 400、200/402 响应一律原样透传，不读成功流。
+
+### 验证
+
+- `tests/credit-refusal.mjs`：18 个断言 —— 中文真实文案 / 英文 insufficient credits /
+  余额不足 / schema 400 不命中 / 参数 400 不命中 / 402 与 200 不碰 / content-length 与
+  content-encoding 被丢掉 / **端到端**：拦全局 fetch，`makeLoader().fetch` 收到 400 积分
+  不足时交给 magpie 的是 402，收到 schema 400 时仍是 400。
+- `tests/body-rewrite.mjs` 36 通过、`tests/account-fallback.mjs` 10 通过。
+- 两站共用同一 Go 服务与同一错误文案（AGENTS 坑 1），逻辑按站点无关实现。
+
 ## 0.3.25 — 2026-10-28
 
 **0.3.24 的 schema 扫描范围收窄：只走 schema 位置**
