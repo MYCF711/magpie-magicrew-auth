@@ -822,7 +822,7 @@ store  槽 a    expires 2026-10-28T14:41:03.000Z   → 200
 不管吊销机制是什么，**只留一把、只有一个出口**这个设计依然成立 ——
 理由从「否则互相吊销」改成「否则本地会分叉，说不清手里那把是不是服务端认的」。
 
-### 保活链路（2026-10-27 逐版本核对后的实况）
+### 保活链路（0.3.29 起；2026-10-29 逐版本核对）
 
 ```
 每次请求前   ensureKey(c, getAuth)          ← src/hooks/loader.mjs
@@ -831,12 +831,26 @@ store  槽 a    expires 2026-10-28T14:41:03.000Z   → 200
                             ├─ 有 refresh_token → PUT 换新的 → 覆盖落盘
                             └─ 没有 / 失败     → 退回 magpie 存的那把
 
+             keyCandidates(c, auth)        ← 同一账号的 store 两槽 + auth.access
+               └─ 逐把打 /v1/chat/completions；被拒换下一把，命中写回 store（adoptKey）
+
 到期前 10 分钟 auth.refresh(auth)           ← magpie 按 refreshLead 主动调度
-               └─ src/hooks/refresh.mjs 直接调 api.refreshGatewayKey(auth.refresh)
-                  ⚠ 不经过 keys.mjs，也不读 key-store
+               └─ src/hooks/refresh.mjs → keys.mjs 的 renewViaStore()
+                  与 ensureKey 共用 renewOnce 锁和同一个 key-store；
+                  refresh_token 先试 store 那份、再试 magpie 那份（升级兼容）
 
 每天一次     checkin → runCheckin()         ← 领积分 / 补首任务 / 新手福利，**不碰 key**
 ```
+
+⚠ 0.3.29 之前 refresh.mjs 自己调 `api.refreshGatewayKey(auth.refresh)`、不写 key-store：
+两条签发路径各存一把 key，而 key 只活 2 小时，两条路各自续到哪把、哪把已经过期，
+本地并不一致。2026-10-29 实测 5 个国际站账号里 3 个「静态挑一把」踩空，表现是
+403 `token无效` 且 `retryable=false`（magpie 不换号，整轮直接抛给客户端）。
+`keyCandidates()` 的逐把试与 `renewViaStore()` 的收敛就是为这两条路分别兜底。
+
+⚠ 别把这里读成「服务端同一账号只认最新签发的那把」—— 2026-10-28 的受控实验
+已经推翻过：同账号相隔 67 秒签的两把同时有效；12 把逐把探活，403 全部对应
+`expiresAt` 已过。真正失效的是**手里那把过期了**，不是后来签的把它顶掉了。
 
 ### checkin 现在做四件事（0.3.11 起）
 

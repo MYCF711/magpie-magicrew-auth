@@ -1,5 +1,98 @@
 # 更新记录
 
+## 0.3.29 — 2026-10-29
+
+**同一账号多把 key 逐把试 · 全部被拒改 402 · 续期收敛到 key-store**
+
+（核心改动来自 PR #12，作者 @baijiu666；合入时补了五处，见文末「合入时补的五处」。）
+
+### 症状
+
+ZCode 经 magpie 网关调 `magicrew-intl/deepseek-v4.1-flash` 整轮失败：
+
+```
+provider_code=403  reason=auth_failed  status=403  retryable=false
+界面显示：token无效
+```
+
+`retryable=false` ⇒ magpie 不换号，错误直接抛给客户端。同一 provider 下其他账号明明还有余额。
+
+### 根因：key 有两条签发路径，本地各存一把、静态挑一把
+
+- `src/hooks/refresh.mjs` —— magpie 的续期，签发后只交给 magpie，**不写** key-store
+- `src/keys.mjs` 的 `ensureKey` —— 请求路径自己续期，写 key-store
+
+两边各存一把；api_key 只活 2 小时，两条路各自什么时候续、续到哪把，本地并不一致。
+静态挑其中一把，踩空就是 403「token无效」。
+
+PR 提交者 2026-10-29 逐把打 `/v1/chat/completions` 实测（5 个国际站账号）：
+
+| 账号 | `auth.access` | store 当前槽 |
+|---|---|---|
+| magicrew-intl | ✅ | ❌ |
+| magicrew-intl#z983c8 | ✅ | ❌ |
+| magicrew-intl#3oqx5z | ❌ | ✅ |
+| magicrew-intl#h2mcxi | ❌ | ✅ |
+| magicrew-intl#8amjca | ❌ | ❌ |
+
+**5 个里 3 个两路状态不一致，方向还各不相同** —— 静态顺序（先 store 或先 auth）都救不了。
+
+⚠ 不要把这条读成「服务端同一账号只认最新签发的那把」—— 2026-10-28 的受控实验
+已经推翻过这个说法：同账号相隔 67 秒签的两把同时有效；12 把逐把探活，403 **全部**
+对应 `expiresAt` 已过。真正的失效原因是**手里那把过期了**，而两条路径让本地不知道
+自己手里的是哪把。逐把试解决的是这个「不知道」。
+
+补一条取证经验：对这种死 key，`GET /v1/models` 是**放行**的，只有 chat 才 403。逐把探活必须用 chat。
+
+### 修法（三处）
+
+1. **`src/keys.mjs` 新增 `keyCandidates()`** —— 同一账号的所有候选 key（store 当前槽 / 另一槽 / `auth.access`），去重后按 `expiresAt` 倒序。到期越晚 = 签发越晚 = 越可能是活着的那把。配套 `adoptKey()` 把命中的那把写回 store。
+
+2. **`src/hooks/loader.mjs` 逐把试 + 全挂改 402** —— `isKeyRejected()` 认两种形态：`HTTP 403`，以及 **`HTTP 200` + `{"code":403,"message":"token无效"}`**（绝大多数是这种，只看状态码会漏）。全部被拒时返回 **402** 而不是 403 —— 402 在 magpie 里是 `failCredit`，会把这个账号 rest 30 分钟、去问下一个账号 / 组的下一个成员，与 0.3.26「积分不足改写 402」同一条通路。SSE 一律不碰。
+
+3. **`src/hooks/refresh.mjs` 收敛到 key-store** —— 改调 `renewViaStore()`，由 store 统一持有 `refresh_token` 并写回新 key，magpie 拿到的是同一把；且与 `ensureKey` 共用 `renewOnce` 锁（按 siteId+account 去重），避免两条路径同时续期、后到的那次用废 token 被误判成「登录已失效」。
+
+### 验证（PR 提交者实测，2026-10-29）
+
+`makeLoader().fetch` 直接喂真实账号（不经过 magpie）：
+
+```
+① store 那把已死 / auth 活的（z983c8） → HTTP 200 ✅
+② 两把都死（8amjca）                  → HTTP 402 + 可读原因（交给 magpie 换号）
+③ auth 已死 / store 活的（h2mcxi）     → HTTP 200 ✅
+```
+
+全账号跑一遍：国际站 5/5 → 200；国内站 `magicrew` / `lky0b4` / `0ok4oa` → 200；`4rm3fp`（积分 -28）→ 402「可用积分已不足」（0.3.26 的改写，正确）。
+
+经网关三条链路 `magicrew/…`、`magicrew-intl/…`、`group/never-stuck` 全部 200。
+
+### 验证（合入后复核，2026-10-29 02:15）
+
+两站各取真实账号（国际 `magicrew-intl#m2orth` / 国内 `magicrew#3wbzad`），隔离 HOME、
+复制真实 key 构造四场景，用 magpie 自带的 bun 直打上游：
+
+| 场景 | 国际站 | 国内站 |
+|---|---|---|
+| A 基线（store 活 + auth 活） | 200 | 200 |
+| B store 死 / auth 活 | 200，且写回 store 另一槽 | 200，且写回 |
+| C store 活 / auth 死 | 200（命中 store 那把，不重写） | 200 |
+| D 三把全死 | 402 + 可读原因 | 402 + 可读原因 |
+
+`tests/key-failover.mjs` 25 条断言把以上全部离线钉死（`node tests/key-failover.mjs` 退出 0）。
+
+### 边界
+
+- 不跨账号借身份：只用**本账号**的 key；本账号全挂就交 402 让 magpie 决定换谁，与 0.3.23 `accountFor()` 的保守立场一致
+- 只有第一把被拒时才会多发请求；命中那把只走 1 次
+
+### 合入时补的五处
+
+1. **`renewViaStore` 会试两处 refresh_token** —— 升级上来的第一次续期，store 那份可能早被旧的 `refresh.mjs` 轮换废了；只认 store 会让用户莫名被要求重新登录。现在 store → `auth.refresh` 依次试，谁活谁写回。
+2. **`adoptKey` 空 store 时保留 `auth.refresh`** —— 首次接管、续期失败但 `auth.access` 还能用时，PR 初版写回 store 会丢掉 refresh_token，2 小时后没人能续。
+3. **`isKeyRejected` 只认业务错误码** —— PR 初版用文本正则，正常回复正文里恰好出现 `unauthorized` / `token无效` 就会被当成 key 拒绝，白白重发（可能重复计费）。现在先 `JSON.parse`，只看 `code` / `message` 字段；有 `choices` 的正常响应绝不判。
+4. **被拒响应的 body 显式取消** —— 逐把试时，每条死连接的响应体不会一直挂着等 GC。
+5. **`refresh.mjs` 不再要求 `auth.refresh` 存在** —— refresh_token 只躺在 key-store 里时（`ensureKey` 续过、magpie 那份已轮换），PR 初版直接 `return undefined`，key 到期就掉登录。
+
 ## 0.3.28 — 2026-10-29
 
 **邮箱验证码登录（内置）· 已有账号不再过旋转图 · 识图模型被 `max_tokens` 饿死的修复**

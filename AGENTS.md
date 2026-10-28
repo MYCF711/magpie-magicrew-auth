@@ -54,7 +54,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 1 | 改好了国内站，国际站用户报同样的错 | **两站是同一个 Go 服务、逐字符同构**，改一处就要两站都验；`SITES.cn` / `SITES.intl` 只是 host 不同 | internals 一 |
 | 2 | 国际站 `/v1/chat/completions` 回 `HTTP 500` + 22 字节裸文本（不是 JSON） | 国际站网关**强制**要 `organization-code` 头，缺了就是这个 500 | internals 一 / 五 |
 | 3 | 换了 key 之后老 key 立刻失效、用户被要求重登 | **「签新 key 会吊销旧 key」已被实测推翻（2026-10-28）** —— 见下方「最容易误信的旧说法」。仍然只留一把、只走 `src/keys.mjs` 的唯一出口，理由是**本地别分叉**，不是互相吊销 | internals 十四 |
-| 4 | 刷新 token 之后两处 refresh_token 不一致、用户莫名掉登录 | 只允许**一个**出口持有 refresh_token；`src/hooks/refresh.mjs` 绕过出口就会分叉 | internals 二 / 十四 |
+| 4 | 刷新 token 之后两处 refresh_token 不一致、用户莫名掉登录 | 只允许**一个**出口持有 refresh_token；`src/hooks/refresh.mjs` 必须走 `keys.mjs` 的 `renewViaStore()`（0.3.29 起已收敛，与 `ensureKey` 共用 `renewOnce` 锁和同一个 key-store）。若改回自调 `refreshGatewayKey` 就会分叉 | internals 二 / 十四 |
 | 5 | agent 说「上下文放不下」，而实际模型能吃更长 | 上下文窗口**必须查 magpie 的模型库**，不能填保守值（早前一刀切 256K，实际 1M） | internals 十六 |
 | 6 | 流式回复拿到了，但 `usage` 永远是空、额度不扣 | 流式请求必须补 `stream_options.include_usage`，否则上游不回 usage | internals 十二 |
 | 7 | 模型被标成免费、Free first 一直派到它 | `free` 只认厂商声明（`input_points === 0`），**不能从 `rate === 0` 反推**；价格缺失 = 不列，不猜 | internals 十六 · HOOKS 十一之二 |
@@ -72,6 +72,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 19 | 单轮回 `400 ... tools.N.function.parameters/properties/functions/items: invalid JSON Schema`，但请求里**没有**空 `items` | 上游对 **`items` 子树内部**比根节点严：`anyOf`/`oneOf`/`allOf`/`not`/`const`/`if`+`then`+`else`/`{}` 全 400，**tuple 形式的 `items`（数组）国际站拒**，而同样形态放在顶层 parameters 里 200。命中来源是 **MCP 工具 schema**（REA MCP 7 个工具的 `functions` 数组）。判据：同一请求只把 `items` 子树里的 `anyOf` 摊平 → 200；改完**必须复查没留下空 `{}`**（删 `not`/`const` 会删空）。⚠ **上游 2026-10-29 00:25 起放宽了这层校验（raw 也 200），同一夜里还出现过波动** —— 判要不要改写请看 `_probe/items-subtree-stability.mjs` 的多轮统计，别信单次探针。改写已做（`loosenItemsSchema`，**只动 `items` 子树**、顶层 union 不动） | internals 十七 · `tests/body-rewrite.mjs` · `_probe/items-subtree-upstream.mjs` |
 | 20 | 邮箱验证码登录报「phone 字段是必须的」或「captcha 字段是必须的」 | 邮箱和手机是**两套端点**：发信 `/v4/user/send-email` vs `/send-sms`，换登录态 `/v4/user/login-email` vs `/login`；邮箱那条验证码字段叫 **`captcha`**（不是 `code`）。判据：往 `/v4/user/login` 发任何 type 都回「phone 字段是必须的」 | `src/captcha.mjs` 头 · CHANGELOG 0.3.28 |
 | 21 | 无头登录「旋转验证连试 4 张图都没过」，而这号本来就是自己的 | 先分清两件事：① **已注册的号服务端根本不出图**（`/captcha/generate` 对已注册账号直接回 `business_token`）—— 所以必须**先取图、再判识图模型**，一上来就 `if (!vision) throw` 会把这条免费通道堵死；② 识图模型 `max_tokens` 太小会把推理答案饿死（`workbuddy/deepseek-v4.1-flash` 给 400 → `content:null`，判官抓空串） | CHANGELOG 0.3.28 · `src/vision.mjs` |
+| 22 | 同一账号有的请求 200、有的 403 `token无效`（`retryable=false`），换个时间又好了 | key 有两条签发路径时 store 与 magpie 各存一把，**静态挑一把必有一半踩空**。0.3.29 起 `keyCandidates()` 把 store 两槽 + `auth.access` 逐把打 chat，命中的写回 store；全被拒才交 402 让 magpie 换号。判据：`GET /v1/models` 对死 key **放行**，逐把探活必须用 `/v1/chat/completions` | CHANGELOG 0.3.29 · `tests/key-failover.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
