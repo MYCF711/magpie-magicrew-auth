@@ -1119,7 +1119,7 @@ POST /v1/chat/completions
 它与 `max_tokens`、`stream_options`、`items: {}` 四处改写共用**一次** `JSON.parse`；
 没改到时返回原始字符串（省一次序列化 —— 54 工具的请求体可达上百 KB）。
 
-边界由 `tests/body-rewrite.mjs` 钉住（31 个断言）：非布尔一律换、布尔一律不动、
+边界由 `tests/body-rewrite.mjs` 钉住（36 个断言）：非布尔一律换、布尔一律不动、
 其余字段一字不动、没改到就不重新序列化。
 
 ### 二、`items: {}` → `400 invalid JSON Schema`
@@ -1157,8 +1157,13 @@ HTTP 400
 `items: {}` 删掉是**严格等价**，不是降级放宽；`items: true` 同理。
 `items: false`（"数组必须为空"）语义不同，不能删，原样留着。
 
-**修法**：`loosenEmptyItems()` 递归删 `items: {}` 与 `items: true`，与
+**修法**：`loosenEmptyItems()` 删 `items: {}` 与 `items: true`，与
 `loosenAdditionalProperties()` 在同一个 `rewriteRequestBody` 里各跑一遍。
+
+两者共用 `walkSchema()`，**只进入真正的 schema 位置**（`properties` 等映射的**值**、
+`allOf` / `anyOf` / `oneOf`、`items` / `additionalProperties` / `not` / `if` 等），
+不扫键名，也不扫 `enum` / `default` / `const`。否则一个恰好叫 `items` 或
+`additionalProperties` 的工具参数会被当成关键字误删/误改（0.3.24 的教训，0.3.25 修）。
 
 **端到端验证**（2026-10-28）：同一份 41 工具请求
 `raw → 400 tools.40.../items`；过 `rewriteRequestBody` 后 `→ 200`。
