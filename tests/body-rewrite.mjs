@@ -14,6 +14,7 @@ import assert from "node:assert/strict"
 import {
   loosenAdditionalProperties,
   loosenEmptyItems,
+  loosenItemsSchema,
   rewriteRequestBody,
 } from "../src/hooks/loader.mjs"
 
@@ -342,6 +343,150 @@ check("JSON null / 数组字面量不炸", () => {
   assert.equal(rewriteRequestBody("null"), "null")
   const arr = '["tools"]'
   assert.equal(rewriteRequestBody(arr), arr)
+})
+
+console.log("\nloosenItemsSchema —— items 子树内部：union 关键字与空 schema")
+
+// ⚠ 这一组对应 2026-10-28 的真实报障：REA MCP 工具（mcp__rea__build_call_path 等）
+// 的 `functions` 数组参数里，元素 schema 用了 `anyOf`/`oneOf`/`const`，
+// 还有 `{}` 空 schema。上游对 **items 子树内部** 这些形态一律回
+// `items: invalid JSON Schema`，而顶层 parameters 里同样的 `anyOf` 却收。
+// ⇒ 0.3.25 的 loosenEmptyItems（只删 items 自己的 {}）救不了这一类。
+const REA_FUNCTIONS_ITEMS = {
+  type: "object",
+  properties: {
+    subject: {
+      anyOf: [
+        {
+          oneOf: [
+            { type: "object", properties: { name: { type: "string", minLength: 1 } }, additionalProperties: false },
+            { type: "object", properties: { name: { type: "string" } }, additionalProperties: false },
+          ],
+        },
+        { type: "null" },
+      ],
+    },
+    architecture: { anyOf: [{ type: "string", enum: ["x86", "arm64"] }, { type: "null" }] },
+    confidence: { type: "string", enum: ["observed", "derived"] },
+    raw_result: { anyOf: [{}, { type: "null" }] },
+    normalized_result: {},
+    kind: { const: "text" },
+    not_: { not: { type: "string" } },
+  },
+  required: ["subject", "confidence"],
+  additionalProperties: false,
+}
+
+check("items 子树里的 anyOf 被摊平（取第一分支）", () => {
+  const p = { type: "object", properties: { functions: { type: "array", items: structuredClone(REA_FUNCTIONS_ITEMS) } } }
+  assert.equal(loosenItemsSchema(p), true)
+  const items = p.properties.functions.items
+  assert.equal(items.properties.subject.anyOf, undefined)
+  assert.equal(items.properties.subject.oneOf, undefined)
+  assert.equal(items.properties.architecture.anyOf, undefined)
+})
+
+check("items 子树里的空 schema {} 被换成 {type:object}", () => {
+  const p = { type: "object", properties: { functions: { type: "array", items: structuredClone(REA_FUNCTIONS_ITEMS) } } }
+  loosenItemsSchema(p)
+  const items = p.properties.functions.items
+  assert.deepEqual(items.properties.normalized_result, { type: "object", additionalProperties: true })
+})
+
+check("items 子树里的 const 被删（上游不认）", () => {
+  const p = { type: "object", properties: { functions: { type: "array", items: structuredClone(REA_FUNCTIONS_ITEMS) } } }
+  loosenItemsSchema(p)
+  assert.equal(p.properties.functions.items.properties.kind.const, undefined)
+})
+
+check("items 子树里的 not 被删（上游不认）", () => {
+  const p = { type: "object", properties: { functions: { type: "array", items: structuredClone(REA_FUNCTIONS_ITEMS) } } }
+  loosenItemsSchema(p)
+  assert.equal(p.properties.functions.items.properties.not_.not, undefined)
+})
+
+check("顶层 parameters 的 anyOf 不动（上游收它）", () => {
+  const p = {
+    type: "object",
+    properties: { a: { anyOf: [{ type: "string" }, { type: "null" }] } },
+  }
+  assert.equal(loosenItemsSchema(p), false)
+  assert.ok(p.properties.a.anyOf)
+})
+
+check("items 子树里没有 union / 空 schema → 不改", () => {
+  const p = {
+    type: "object",
+    properties: {
+      functions: {
+        type: "array",
+        items: { type: "object", properties: { a: { type: "string", pattern: "^x$" } }, additionalProperties: false },
+      },
+    },
+  }
+  assert.equal(loosenItemsSchema(p), false)
+})
+
+check("items 子树之外的空 schema 不动（那是 properties 的值，不是 schema 关键字）", () => {
+  const p = { type: "object", properties: { x: {} } }
+  assert.equal(loosenItemsSchema(p), false)
+  assert.deepEqual(p.properties.x, {})
+})
+
+check("items 子树里的 enum / pattern / minLength 等原样保留", () => {
+  const p = {
+    type: "object",
+    properties: {
+      functions: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            a: { type: "string", pattern: "^ev_[a-f0-9]{64}$", minLength: 1 },
+            b: { type: "string", enum: ["x", "y"] },
+            c: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
+          },
+          additionalProperties: false,
+        },
+      },
+    },
+  }
+  assert.equal(loosenItemsSchema(p), false)
+  assert.deepEqual(p.properties.functions.items.properties.a, { type: "string", pattern: "^ev_[a-f0-9]{64}$", minLength: 1 })
+  assert.deepEqual(p.properties.functions.items.properties.c, { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 })
+})
+
+check("真实报障形态：rewriteRequestBody 改写后 items 里不再有 union / 空 schema", () => {
+  const raw = JSON.stringify({
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "mcp__rea__build_call_path",
+          parameters: {
+            type: "object",
+            properties: { functions: { minItems: 1, type: "array", items: REA_FUNCTIONS_ITEMS } },
+            required: ["functions"],
+            additionalProperties: false,
+          },
+        },
+      },
+    ],
+  })
+  const out = JSON.parse(rewriteRequestBody(raw))
+  const items = out.tools[0].function.parameters.properties.functions.items
+  const bad = []
+  const walk = (node) => {
+    if (Array.isArray(node)) return node.forEach(walk)
+    if (!node || typeof node !== "object") return
+    for (const [k, v] of Object.entries(node)) {
+      if (["anyOf", "oneOf", "allOf", "not", "const"].includes(k)) bad.push(k)
+      if (k === "items") walk(v)
+    }
+  }
+  walk(items)
+  assert.deepEqual(bad, [])
+  assert.notDeepEqual(items.properties.normalized_result, {})
 })
 
 console.log(`\n${pass} 通过 · ${fail} 失败`)

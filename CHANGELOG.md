@@ -1,5 +1,75 @@
 # 更新记录
 
+## 0.3.26 — 2026-10-28
+
+**修 `items` 子树内部的 union / 空 schema 导致的整轮 400**
+
+### 症状
+
+DSH 经 magpie 网关调用 DeepSeek-V4.1-Flash 时整轮失败：
+
+```
+本轮运行失败 400: {"code":null,"message":"超级麦吉: HTTP 400 请求错误:
+{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ properties/functions/items: invalid JSON Schema; check the schema keywords
+ and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+0.3.24 已修过 `items: {}`，但这一类**没被覆盖** —— 0.3.24 只删 `items`
+**自己**的空对象，而这里出问题的是 `items` **内部**的 schema。
+
+### 根因（2026-10-28 实测，同一把 key、同一份请求、只改一个字段）
+
+上游的 JSON Schema 校验器对**数组元素的 schema** 比对根节点更严。放在
+**顶层 parameters** 里上游**收**（200）的形态，放进 `items` 子树就一律 400：
+
+| `items` 内部的形态 | 结果 |
+|---|---|
+| `anyOf` / `oneOf` / `allOf` | **400** |
+| `not` | **400** |
+| `const` | **400** |
+| `{}`（空 schema） | **400** |
+| `type` / `enum` / `pattern` / `minLength` / `minItems` / `format` / `$ref` / 数值边界 | 200 |
+| 顶层 parameters 里的 `anyOf` | 200 |
+
+命中来源是**MCP 服务器**的工具 schema：REA MCP（`mcp__rea__build_call_path`、
+`mcp__rea__compare_application_versions` 等 **7 个工具**）的 `functions` 数组参数，
+元素 schema 用了 `anyOf: [{…}, {type:"null"}]`（可选参数的标准写法）、`oneOf`，
+还有 `{}` 空 schema。一份 65 工具的请求里 7 个工具中招 ⇒ 整轮 400。
+
+### 修法
+
+`src/hooks/loader.mjs` 新增 `loosenItemsSchema()`，只作用于 **`items` 子树**：
+
+```
+anyOf / oneOf / allOf  → 取第一个分支内联（分支本身先递归修）
+not                    → 删除
+const                  → 删除
+{}                     → {type:"object",additionalProperties:true}
+```
+
+三处都是**降级放宽**（方向安全：宁可约束松一点，也不要整轮失败）：
+
+- union 取第一分支：`anyOf:[{…},{type:"null"}]` 的第一分支正是「非空」那个；
+- `const` 删除 ⇒ 「只能是这一个值」变「任意值」，放宽；
+- `not` 无等价物，删掉同样是放宽；
+- `{}` → `{type:"object",additionalProperties:true}` **严格等价**（空 schema
+  本来就是「任意」）。
+
+⚠ 顶层 parameters 的 union **不动** —— 上游收它，动了白白丢约束。
+
+递归同样遵守 schema 位置纪律（`properties` 的值 / union 的分支 / `items` 的值……），
+不碰 `enum` / `default` / `examples` 里的字面值。
+
+### 验证
+
+- `tests/body-rewrite.mjs`：45 个断言（新增 9 个：union 摊平、空 schema 换形状、
+  `const`/`not` 删除、顶层 union 不动、合法关键字原样保留、真实报障形态）。
+- 端到端：真实 65 工具请求体（从 DSH 会话日志还原，含 7 个中招的 REA 工具）
+  原样 → 400 `tools.42…/items`；过 `rewriteRequestBody` → **200**。
+  国内站 `magicrew`（实测）；国际站 `magicrew-intl` 与国内站同构。
+
 ## 0.3.25 — 2026-10-28
 
 **0.3.24 的 schema 扫描范围收窄：只走 schema 位置**

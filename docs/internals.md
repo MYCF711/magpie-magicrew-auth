@@ -1169,6 +1169,85 @@ HTTP 400
 `raw → 400 tools.40.../items`；过 `rewriteRequestBody` 后 `→ 200`。
 国内站、国际站都验过。
 
+### 三、`items` **子树内部**的 union / 空 schema → `400 invalid JSON Schema`
+
+**症状**（2026-10-28，DSH 经 magpie 网关调 DeepSeek-V4.1-Flash）：
+
+```
+本轮运行失败 400: {"code":null,"message":"超级麦吉: HTTP 400 请求错误:
+{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ properties/functions/items: invalid JSON Schema; check the schema keywords
+ and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+**报错路径与上面第二节一模一样，但请求里根本没有空的 `items`** —— 这是本节存在的理由。
+0.3.24 的 `loosenEmptyItems()` 只删 `items` **自己**的空对象，管不到 `items` **内部**。
+
+#### 根因：上游对数组元素的 schema 比对根节点更严
+
+**实测**（2026-10-28，同一把 key、同一份请求、只改这一个字段）：
+
+| 位置 | 形态 | 结果 |
+|---|---|---|
+| `items` 内部 | `anyOf` | **400** |
+| `items` 内部 | `oneOf` | **400** |
+| `items` 内部 | `allOf` | **400** |
+| `items` 内部 | `not` | **400** |
+| `items` 内部 | `const` | **400** |
+| `items` 内部 | `{}`（空 schema） | **400** |
+| `items` 内部 | `type` / `enum` / `pattern` / `minLength` / `minItems` / `format` / `$ref` / 数值边界 | 200 |
+| **顶层 parameters** | `anyOf` | **200** |
+
+⇒ **同样形态放在顶层上游收，放进 `items` 子树就炸**。这条边界是本节的关键：
+改写必须精确落在 `items` 之下，全局摊平 union 会白白丢掉顶层那些上游**认**的约束。
+
+#### 命中来源：MCP 工具的 schema
+
+不是客户端手写，而是 **MCP 服务器**声明的工具 schema。REA MCP 的
+`mcp__rea__build_call_path`、`mcp__rea__compare_application_versions` 等
+**7 个工具**的 `functions` 数组参数，元素 schema 用了：
+
+- `anyOf: [{…}, {type:"null"}]` —— 可选参数的标准写法；
+- `oneOf` —— 同类互斥分支；
+- `{}` —— 空 schema（如 `normalized_result`、`raw_result` 的分支）。
+
+一份 65 工具的请求里 7 个工具中招 ⇒ **整轮 400**（上游一次只报第一个坏位置，
+所以报错里的 `tools.N` 序号会随工具表顺序变 —— 别拿序号定位问题）。
+
+#### 修法：`loosenItemsSchema()`
+
+只作用于 `items` 子树：
+
+```
+anyOf / oneOf / allOf  → 取第一个分支内联（分支本身先递归修）
+not                    → 删除
+const                  → 删除
+{}                     → {type:"object",additionalProperties:true}
+```
+
+三处都是**降级放宽**，方向安全（宁可约束松一点，也不要整轮失败）：
+
+- union 取第一分支：`anyOf:[{…},{type:"null"}]` 的第一分支正是「非空」那个；
+- `const` 删除 ⇒ 「只能是这一个值」变「任意值」，放宽；
+- `not` 无等价物，删掉同样是放宽；
+- `{}` → `{type:"object",additionalProperties:true}` **严格等价**
+  （空 schema 本来就是「任意」）。
+
+递归同样遵守 schema 位置纪律（`walkSchema` 那套 `SCHEMA_MAPS` / `SCHEMA_LIST` /
+`SCHEMA_ONE`）：只进 `properties` 的**值**、union 的**分支**、`items` 的**值**……
+不碰 `enum` / `default` / `examples` 里的字面值。
+
+#### 端到端验证（2026-10-28）
+
+真实 65 工具请求体（从 DSH 会话日志还原，含 7 个中招的 REA 工具）：
+
+- 原样 → `400 tools.42.../items`；
+- 过 `rewriteRequestBody` → **200**。
+
+单点复现同样成立：`items` 内部 `{x:{anyOf:[{type:"string"}]}}` → 400；
+`{x:{type:"string"}}` → 200；顶层 `{x:{anyOf:[{type:"string"}]}}` → 200。
+
 ### 为什么算插件的事，不算客户端的事
 
 按规范 `{}` 与 `true` 等价，客户端没写错；**上游的兼容性不足**。
