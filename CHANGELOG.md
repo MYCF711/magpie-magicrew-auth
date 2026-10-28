@@ -1,5 +1,64 @@
 # 更新记录
 
+## 0.3.30 — 2026-10-29
+
+**默认开启自动签到 · 插件自身自动更新**
+
+### 一、默认开启自动签到
+
+magpie 的插件签到开关 `pluginCheckins` 默认是**关**的：`PluginCheckinOn()`
+在没有显式值时只跟随厂商内置开关（WorkBuddy / Trae / MiniMax / Qoder），
+magicrew 没有内置开关，于是新装插件不会自动签到。
+
+插件加载时读 `~/.config/magpie/settings.json`：**只有这个 provider 从未被
+用户设置过**，才补一个 `pluginCheckins[provider] = true`。用户显式关掉的
+（false）绝不覆盖；settings.json 读不出来也不覆盖。config 钩子先补一次，
+usage 钩子再兜一次（防止 magpie 启动时把内存里的旧 settings 写回）。
+
+### 二、插件自身自动更新
+
+magpie 的自动更新只认 `@magpie-community/*`（源码 `internal/plugin/updates.go`
+的 `Official()` 硬编码这个前缀）—— 第三方插件无论 npm 源还是 git 源，都只会
+在插件列表里提示「有新提交」，等用户点更新。这就是为什么社区包（Qoder、
+CodeArts、商汤小浣熊、OpenCode Zen Free）有「已自动更新」徽章，而本插件没有。
+
+插件没法改 magpie 的判断，只能在插件侧复刻同一套机制：
+
+1. `config` 加载 15 秒后、以及每次签到成功后，读 magpie 写好的
+   `~/.config/magpie/plugin-updates.json`，看 `waiting` 里有没有
+   `package === "Magicrew" && git === true` 的自己；
+2. 有就调本机 magpie 的 CLI：`magpie plugin update`（进程树里找 magpie，
+   也可以用环境变量 `MAGPIE_EXE` 明示；找不到就记 `no-magpie-exe` 并放弃，
+   不伪造徽章）；
+3. CLI 成功退出（code 0）后，在 `plugin-updates.json` 的 `updated[]` 里补一条
+   `{package:"Magicrew", from, to, at}` —— magpie 的「已自动更新」徽章
+   （`plugin.LastUpdated()`）读的就是这个记录。
+
+节流：同一版本 6 小时内最多试一次；成功后按 `to` 版本记住不再重复。所有失败
+都只写状态文件，不影响签到/额度/登录。
+
+### 边界（必须知道）
+
+- `magpie plugin update` 是 CLI 进程内的 `plugin.Update()`，会重装**所有**
+  非路径插件；它不会重启正在运行的 magpie —— 更新文件后，下次启动 magpie
+  才会加载新代码。插件列表的「已自动更新」徽章会立即出现（读的是文件记录）。
+- 找不到 magpie 可执行文件时不会自动更新，也不会显示徽章；设 `MAGPIE_EXE`
+  可指定。
+- 这一步是插件对 magpie 的两个配置文件（settings.json / plugin-updates.json）
+  的读写 —— magpie 没有给插件提供这两个能力的 API（GUI API 只服务于它自己的
+  WebView，不是 TCP 端口）。写 settings 只在「该键不存在」时发生，且先备份为
+  `settings.json.bak-magicrew-auto`。
+
+### 验证
+
+- `tests/auto-maintenance.mjs` 20 条断言 0 失败：默认签到只补缺失、显式 false
+  不覆盖、坏 JSON 不覆盖；`pickSelfUpdate` 只认自己且只认 git；`noteUpdated`
+  去重/截断；`kick` 的 no-update / no-exe / throttled / done / dryRun / 成功
+- 本机真实 `plugin-updates.json` 的 dryRun：命中 `Magicrew 272b812 → 050b0f4`，
+  解析到 `E:\Downloads\magpie-windows-amd64.exe`；`ensureCheckinDefault` 对
+  `magicrew` / `magicrew-intl` 均返回 explicit:true（已是用户开着的，不改）
+- `magpie plugin list` CLI 正常（只读）
+
 ## 0.3.29 — 2026-10-29
 
 **同一账号多把 key 逐把试 · 全部被拒改 402 · 续期收敛到 key-store**

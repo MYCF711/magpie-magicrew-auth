@@ -25,13 +25,23 @@
 // 宿主支持余额之前的临时协议，见 CHANGELOG 0.3.20。
 
 import { fetchPoints, SITES } from "../api.mjs"
+import { ensureCheckinDefault } from "../auto-maintenance.mjs"
 
 // 每日登录积分：国内 +200/天、国际 +50/天（实测，见 docs/internals.md）。
 // 今日批次的分母，只用于展示「今日还剩 / 今日额度」。
 const DAILY_LOGIN_GIFT = { cn: 200, intl: 50 }
 
 export function makeUsage(c) {
+  let ensuredCheckin = false
   return async (getAuth) => {
+    // config 已经补过默认签到；这里再兜一次 —— magpie 启动时可能先
+    // Save 了内存里的旧 settings，把 config 那次覆盖掉。只补「从未设置过」的。
+    if (!ensuredCheckin) {
+      ensuredCheckin = true
+      try {
+        ensureCheckinDefault(c.PROVIDER)
+      } catch {}
+    }
     const auth = await getAuth()
     if (!auth) return { error: "未登录", windows: [] }
     try {
