@@ -36,8 +36,22 @@ async function isKeyRejected(res) {
     return false
   }
   if (text.length > 8192) return false
-  if (/"code"\s*:\s*(401|403)\b/.test(text)) return true
-  return /token无效|token 无效|invalid token|unauthorized/i.test(text)
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return false
+  }
+  // 只认**业务错误码**。正常 chat 完成的 JSON 是 {choices:[…]}，没有顶层 code；
+  // 用文本正则会把模型回复里恰好出现的 "unauthorized" 当成 key 拒绝 ——
+  // 那会白白重发请求（可能重复计费），甚至最后把正常响应丢掉换成 402。
+  const code = Number(body?.code ?? body?.error?.code)
+  if (code === 401 || code === 403) return true
+  const msg = String(body?.message ?? body?.error?.message ?? "")
+  if (!msg) return false
+  if (/token无效|token 无效|invalid token/i.test(msg)) return true
+  // 兜底：只有 message、没有 code 的少量形态；有 choices 的正常响应绝不判
+  return !Array.isArray(body?.choices) && /unauthorized/i.test(msg)
 }
 
 /**
@@ -525,9 +539,11 @@ export function makeLoader(c) {
           })
 
         // 同一账号可能握着两把 key（magpie 的 refresh 一条、插件 store 一条），
-        // 服务端只认最新签发的那把 —— 静态挑必然有一半踩空，只能逐把试。
+        // 哪把还有效本地无法预判 —— 静态挑必然有一半踩空，只能逐把试。
         // 详见 src/keys.mjs 的 keyCandidates 注释（2026-10-29 五个账号的实测表）。
-        const cands = await keyCandidates(c, getAuth)
+        // 传 fresh 而不是 getAuth：候选与下面 adoptKey 必须落在同一个账号上，
+        // 不能让两次 getAuth() 返回不同结果。
+        const cands = await keyCandidates(c, fresh)
         if (!cands.length) throw new Error(`${c.SHORT} 未登录（拿不到可用的 key）`)
 
         for (const cand of cands) {
@@ -540,6 +556,11 @@ export function makeLoader(c) {
             }
             return rewriteCreditRefusal(res)
           }
+          // 这把被拒：响应不再使用，显式取消 body —— 否则逐把试时
+          // 每条死连接的响应体都挂着，等 GC 才释放。
+          try {
+            await res.body?.cancel()
+          } catch {}
         }
 
         // 这个账号的 key 全被拒。上游给的是 403「token无效」，magpie 会判成
@@ -550,8 +571,8 @@ export function makeLoader(c) {
           JSON.stringify({
             error: {
               message:
-                `${c.SHORT}：本账号的 ${cands.length} 把密钥均已被上游拒绝，已切换到下一个账号。` +
-                `（该站只认最新签发的 key；持续出现请重新登录这个账号）`,
+                `${c.SHORT}：本账号的 ${cands.length} 把密钥均已被上游拒绝，已交给 magpie 换下一个账号。` +
+                `（常见于登录 / 续期分叉；请重新登录这个账号）`,
               type: "account_unavailable",
               code: 402,
             },
