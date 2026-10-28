@@ -113,11 +113,18 @@ function writeInvite(siteId, code) {
   return c
 }
 
-/** 这次登录该带的邀请码：策略 → 记录 → 作者码 */
-function inviteToUse(siteId) {
-  const pol = readInvitePolicy(siteId)
-  if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) return pol.code
+/** 这次登录该带的邀请码：锁定 → 策略 → 记录 → 作者码 */
+function inviteToUse(siteId, locked = true) {
+  if (locked) {
+    const pol = readInvitePolicy(siteId)
+    if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) return pol.code
+  }
   return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
+}
+
+/** 作者自己的码（「我的」那一项） */
+export function authorInvite(siteId) {
+  return AUTHOR_INVITE[siteId] || ""
 }
 
 // ═══ 邀请上级策略 ═══════════════════════════════════════════════════
@@ -160,10 +167,11 @@ export function writeInvitePolicy(siteId, policy) {
   try {
     const f = invitePolicyPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
+    const mode = ["auto", "fixed", "custom"].includes(policy?.mode) ? policy.mode : "auto"
     writeFileSync(
       f,
       JSON.stringify({
-        mode: policy?.mode === "auto" ? "auto" : policy?.mode,
+        mode,
         code: String(policy?.code || "").trim(),
         org: String(policy?.org || "").trim(),
         accountId: String(policy?.accountId || "").trim(),

@@ -1,5 +1,51 @@
 # 更新记录
 
+## 0.3.32 — 2026-10-29
+
+**邀请上级可固定 / 自定义（PR #13，作者 @baijiu666）**
+
+### 你看到的
+
+登录方式列表里多了两个入口：
+
+- **`超级麦吉 邀请上级`** —— 展开的按钮列表，第一项是「我的（作者 MYCF711）」，
+  接着是「自动（跟随最后一个登录 / 签到的号）」，然后是每个已登录账号
+  （手机号/邮箱打码 + 自己的邀请码）
+- **`超级麦吉 邀请上级：自定义码`** —— 文本框，IV 开头 12 位；留空不改
+
+另外 provider 设置里多了一个开关：
+
+- **`锁定邀请上级（签到不再覆盖）`**，默认开。打开时新号固定挂在选定的码下；
+  关掉就回到「跟随最后一个登录/签到的账号」。
+
+两个入口都只落盘 + 回一条「已保存」，不登录、不新增账号
+（`authorize` 返回 `{ type: "failed" }` 是 magpie 唯一不建号的出口）。
+
+### 为什么不是「一个文本框 + 展开按钮」
+
+magpie 的 `prompts` 只有两种控件：`select`（一排按钮）和 `text`（输入框），
+没有把两者合成一个控件的口子；要真正做组合控件只能写插件页面/面板，而页面
+**读不到账号邀请码**（`PageReads` 只给 `usage:summary` / `providers:list`，
+不含账号）。所以用两个单步入口，最稳。
+
+### 实现
+
+- `src/store.mjs`：`readInvitePolicy` / `writeInvitePolicy` /
+  `magicrew-invite-codes-<site>.json`；`inviteToUse(siteId, locked)` 在锁定时
+  优先策略，否则回落到滚动文件；`authorInvite()` 给「我的」。
+- `src/hooks/methods.mjs`：两个 `api + keyless` 入口；`inviteChoices()` 生成
+  作者 → 自动 → 各账号的列表；`accountLabel()` 只认本站点的 provider key。
+- `index.mjs`：`auth.options` 声明 `inviteLock`，用 `input.magpie.options()` 读
+  （不是 `option()` —— 后者对未知键也返回 false，加载早期会把默认 true 误判成关）。
+
+### 合入时改的
+
+- PR 原列表第一项是「保持当前」；改成「我的（作者 MYCF711）」在第一位，并补上作者码。
+- `accountLabel` 原来用 `startsWith(siteId)`，`magicrew` 会把 `magicrew-intl#…`
+  也算进来；改成 `k === siteId || k.startsWith(siteId + "#")`。
+- 增加「锁定邀请上级」开关（PR 只有 fixed/custom 就默认覆盖，没有显式锁）。
+- 补 `tests/invite-policy.mjs` 17 条断言。
+
 ## 0.3.31 — 2026-10-29
 
 **自动更新加全局锁（0.3.30 补丁）**
