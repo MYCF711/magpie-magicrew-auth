@@ -68,6 +68,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 15 | 接 ZCode / Claude Code 系客户端，带工具的请求回 `400 {"error":{"message":"模型响应失败","code":4017}}` | **上游的 `additionalProperties` 只认布尔值，任何对象形态都拒** —— 不只是 `{}`，`{type:"string"}` 这种有约束的 schema 一样 400（两个模型逐行一致）。判据：同一请求只把该字段换成 `true` → 200。改写已在 `rewriteRequestBody` 里做（非布尔一律换 true；**这是降级放宽、会丢约束**，取舍见 internals 十七） | internals 十七 · `tests/body-rewrite.mjs` |
 | 16 | 网关路径（agent 从 magpie 的 `/v1` 进来）报 `502 did not stream: token无效`，而 provider 显示已登录 | auth 里没带 org → `accountOf()` 落 `"default"` → 读不到真实账号的 key 槽 → 只能用 `auth.access`，它过了 2 小时就 403。`accountFor()` 已在**恰好一个真实账号**时兜到它；**多账号不猜**（猜错就是拿别人的 key 扣别人的积分） | internals 十四 · 十五 · `tests/account-fallback.mjs` |
 | 17 | 单轮回 `400 ... tools.N.function.parameters/properties/functions/items: invalid JSON Schema` | 上游不接受**空 schema 对象**当 `items`：`items:{}` 必 400，`items:{description:"x"}` 却 200。判据：同一请求只删 `items:{}` → 200。改写已做（删 `items:{}` / `true`，**严格等价**；`false` 不动） | internals 十七 · `tests/body-rewrite.mjs` |
+| 18 | 单轮回 `400 ... tools.N.function.parameters/properties/functions/items: invalid JSON Schema`，但请求里**没有**空 `items` | 上游对 **`items` 子树内部**比根节点严：`anyOf`/`oneOf`/`allOf`/`not`/`const`/`{}` 全 400，而**同样形态放在顶层 parameters 里 200**。命中来源是 **MCP 工具 schema**（REA MCP 7 个工具的 `functions` 数组）。判据：同一请求只把 `items` 子树里的 `anyOf` 摊平 → 200。改写已做（`loosenItemsSchema`，**只动 `items` 子树**、顶层 union 不动） | internals 十七 · `tests/body-rewrite.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
