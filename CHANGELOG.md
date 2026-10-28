@@ -1,5 +1,102 @@
 # 更新记录
 
+## 0.3.27 — 2026-10-29
+
+**修 `items` 子树内部的 union / 空 schema 导致的整轮 400**
+
+（内容来自 PR #10，作者 @Jet；合入时补了三处漏洞，见「合入时补的三处」。）
+
+### 症状
+
+DSH 经 magpie 网关调用 DeepSeek-V4.1-Flash 时整轮失败：
+
+```
+本轮运行失败 400: {"code":null,"message":"超级麦吉: HTTP 400 请求错误:
+{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ properties/functions/items: invalid JSON Schema; check the schema keywords
+ and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+0.3.24 已修过 `items: {}`，但这一类**没被覆盖** —— 0.3.24 只删 `items`
+**自己**的空对象，而这里出问题的是 `items` **内部**的 schema。
+
+### 根因（2026-10-29 实测，直打上游、同一把 key、同一份请求、只改一个字段）
+
+上游的 JSON Schema 校验器对**数组元素的 schema** 比对根节点更严。放在
+**顶层 parameters** 里上游**收**（200）的形态，放进 `items` 子树就一律 400：
+
+| `items` 内部的形态 | 结果 |
+|---|---|
+| `anyOf` / `oneOf` / `allOf` | **400** |
+| `not` / `const` | **400** |
+| `if` + `then`（`else` 同理） | **400** |
+| `{}`（空 schema） | **400** |
+| `items` 本身是**数组**（draft-04 tuple 形式） | 国内站 200 / **国际站 400** |
+| `type` / `enum` / `pattern` / `minLength` / `minItems` / `format` / `$ref` / 数值边界 | 200 |
+| `type:["object","string","number","boolean","array","null"]` | 200 ← 「任意值」的合法写法 |
+| 顶层 parameters 里的 `anyOf` / `const` / `not` / `{}` | 200 |
+
+命中来源是**MCP 服务器**的工具 schema：REA MCP（`mcp__rea__build_call_path`、
+`mcp__rea__compare_application_versions` 等 **7 个工具**）的 `functions` 数组参数，
+元素 schema 用了 `anyOf: [{…}, {type:"null"}]`（可选参数的标准写法）、`oneOf`，
+还有 `{}` 空 schema。一份 65 工具的请求里 7 个工具中招 ⇒ 整轮 400。
+
+### 修法
+
+`src/hooks/loader.mjs` 新增 `loosenItemsSchema()`，只作用于 **`items` 子树**：
+
+```
+anyOf / oneOf / allOf  → 取一个分支内联（分支本身先递归修），优先取非纯 null 的分支
+not / const            → 删除
+if / then / else       → 删除
+{}                     → {type:["object","string","number","boolean","array","null"]}
+items 是数组（tuple）   → {type:[同上]}
+```
+
+全部是**降级放宽**（方向安全：宁可约束松一点，也不要整轮失败）：
+
+- union 取一个分支：`anyOf:[{…},{type:"null"}]` 取到的正是「非空」那个。
+  ⚠ 顺序反过来（null 在前）时要跳过 null 分支 —— 照抄第一个会把「可选」压成
+  「只能 null」，那是**收紧**；
+- `const` 删除 ⇒ 「只能是这一个值」变「任意值」，放宽；
+- `not` / `if+then+else` 无等价物，删掉同样是放宽；
+- `{}` → 六类型 `type` 数组：与空 schema **严格等价**（六种 JSON 类型全覆盖），
+  而 `{}` / `true` 在这层都被上游拒，只能落成这个显式写法。
+
+⚠ 顶层 parameters 的 union **不动** —— 上游收它，动了白白丢约束。
+
+递归同样遵守 schema 位置纪律（`properties` 的值 / union 的分支 / `items` 的值……），
+不碰 `enum` / `default` / `examples` 里的字面值。
+
+### 合入时补的三处（PR 初版的漏洞）
+
+1. **删 `not` / `const` 会删成空节点** —— 初版只把 ``{}` 当空 schema 处理，删完没复查，
+   于是 `{const:"x"}` 变成 `{}` 留在 `items` 子树里，**改写后仍然 400**（实测：
+   `items/not` 与 `items/const` 两例 raw=400 → 改写后 400）。现在删除后统一补
+   「任意值」，两例都变成 200。
+2. **`{}` 曾被改成 `{type:"object",additionalProperties:true}`** —— 那不是等价改写，
+   是把「任意值」收紧成「只能是对象」。改成六类型 `type` 数组。
+3. **`if` / `then` / `else` 与 tuple 形式的 `items` 没被覆盖** —— 前者在 `items` 子树里
+   实测 400，后者国际站 400；两者现在都处理。
+
+### 验证
+
+- `tests/body-rewrite.mjs`：**48 个断言**（初版 45 个；新增断言覆盖删空补位、
+  `if/then` 删除、null 在前的 union、tuple 形式）。
+- 端到端（00:19~00:24 实测，那时上游还在拒）：真实报障形态的 65 工具请求体
+  （58 填充 + 7 个中招的 REA 工具）**国内站** 原样 → 400、过 `rewriteRequestBody` → **200**；
+  **国际站** 原样 → 400（`tools.58…/items`）、过 `rewriteRequestBody` → **200**。
+  单点矩阵：21 个形态 × raw/改写后 × 两站，所有 `items` 子树非法形态 400 → 200，
+  顶层对照形态保持 200，合法关键字原样保留。
+- ⚠ **上游在 00:25~00:29 之间放宽了这层校验**：同一批形态的 raw 请求随后也回 200
+  （含真实报障形态）。同一夜里 `tuple` 形式与 `if+then` 还出现过 200/400 波动。
+  ⇒ 这个改写现在是**保险**，不是必需；上游随时可能收回去。
+  判「要不要改写」请看多轮统计，别信单次探针。
+- 复跑：`_probe/items-subtree-upstream.mjs`（`[cn|intl]`）、
+  `_probe/items-subtree-stability.mjs`（`N 轮`，输出 `400 次数 / 轮数`）。
+
+
 ## 0.3.26 — 2026-10-28
 
 **积分耗尽的 400 不再让整轮对话失败：改写成 402，让 magpie 换下一个账号**

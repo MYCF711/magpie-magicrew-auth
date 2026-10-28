@@ -1169,6 +1169,128 @@ HTTP 400
 `raw → 400 tools.40.../items`；过 `rewriteRequestBody` 后 `→ 200`。
 国内站、国际站都验过。
 
+### 三、`items` **子树内部**的 union / 空 schema → `400 invalid JSON Schema`
+
+**症状**（2026-10-28，DSH 经 magpie 网关调 DeepSeek-V4.1-Flash）：
+
+```
+本轮运行失败 400: {"code":null,"message":"超级麦吉: HTTP 400 请求错误:
+{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ properties/functions/items: invalid JSON Schema; check the schema keywords
+ and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+**报错路径与上面第二节一模一样，但请求里根本没有空的 `items`** —— 这是本节存在的理由。
+0.3.24 的 `loosenEmptyItems()` 只删 `items` **自己**的空对象，管不到 `items` **内部**。
+
+#### 根因：上游对数组元素的 schema 比对根节点更严
+
+**实测**（2026-10-28~29，直打上游、同一把 key、同一份请求、只改这一个字段；
+复跑脚本 `_probe/items-subtree-upstream.mjs`，稳定性统计 `_probe/items-subtree-stability.mjs`）：
+
+| 位置 | 形态 | 结果 |
+|---|---|---|
+| `items` 内部 | `anyOf` / `oneOf` / `allOf` | **400** |
+| `items` 内部 | `not` / `const` | **400** |
+| `items` 内部 | `if` + `then`（`else` 同理） | **400** |
+| `items` 内部 | `{}`（空 schema） | **400** |
+| `items` 内部 | `items` 本身是**数组**（draft-04 tuple 形式） | 国内站 200 / **国际站 400**（两站不一致） |
+| `items` 内部 | `type` / `enum` / `pattern` / `minLength` / `minItems` / `format` / `$ref` / 数值边界 | 200 |
+| `items` 内部 | `type:["object","string","number","boolean","array","null"]` | 200（**「任意值」的合法写法**） |
+| **顶层 parameters** | `anyOf` / `const` / `not` / `{}` | **200** |
+
+⇒ **同样形态放在顶层上游收，放进 `items` 子树就炸**。这条边界是本节的关键：
+改写必须精确落在 `items` 之下，全局摊平 union 会白白丢掉顶层那些上游**认**的约束。
+
+⇒ 还有一条纪律：**「任意值」不能写成 `{type:"object"}`** —— 那会把「任意」收紧成
+「只能是对象」。`{}` 与 `true` 在这层都被拒，只能落成显式的六类型 `type` 数组。
+
+#### 命中来源：MCP 工具的 schema
+
+不是客户端手写，而是 **MCP 服务器**声明的工具 schema。REA MCP 的
+`mcp__rea__build_call_path`、`mcp__rea__compare_application_versions` 等
+**7 个工具**的 `functions` 数组参数，元素 schema 用了：
+
+- `anyOf: [{…}, {type:"null"}]` —— 可选参数的标准写法；
+- `oneOf` —— 同类互斥分支；
+- `{}` —— 空 schema（如 `normalized_result`、`raw_result` 的分支）。
+
+一份 65 工具的请求里 7 个工具中招 ⇒ **整轮 400**（上游一次只报第一个坏位置，
+所以报错里的 `tools.N` 序号会随工具表顺序变 —— 别拿序号定位问题）。
+
+#### 修法：`loosenItemsSchema()`
+
+只作用于 `items` 子树：
+
+```
+anyOf / oneOf / allOf  → 取一个分支内联（分支本身先递归修）
+                          ⚠ 优先取**非纯 null** 的分支 —— `anyOf:[{…},{type:"null"}]`
+                            取第一个正好；顺序反过来时照抄第一个会把「可选」压成
+                            「只能 null」，那是收紧
+not / const            → 删除
+if / then / else       → 删除
+{}                     → {type:["object","string","number","boolean","array","null"]}
+items 是数组（tuple）   → {type:[同上]}   ← 国际站对数组形式回 400
+```
+
+全部是**降级放宽**，方向安全（宁可约束松一点，也不要整轮失败）：
+
+- union 取一个分支：`anyOf:[{…},{type:"null"}]` 的分支正是「非空」那个；
+- `const` 删除 ⇒ 「只能是这一个值」变「任意值」，放宽；
+- `not` / `if+then+else` 无等价物，删掉同样是放宽；
+- `{}` → 六类型 `type` 数组：**与空 schema 严格等价**（六种 JSON 类型全覆盖 = 任意值），
+  不是「等价于 `{type:"object"}`」—— 那会收紧。
+
+⚠ **删除会删空节点**：`{const:"x"}`、`{not:{…}}`、`{if:…,then:…}` 删完就成 `{}`，
+而空 schema 在 `items` 子树里**仍然 400**。所以删完必须在同一个函数里再查一次空对象并补成
+「任意值」—— 漏了这一步，改写看起来生效、实际仍然整轮 400（PR #10 初版就漏在这里，
+`not` / `const` 两例改写后实测仍 400）。
+
+递归同样遵守 schema 位置纪律（`walkSchema` 那套 `SCHEMA_MAPS` / `SCHEMA_LIST` /
+`SCHEMA_ONE`）：只进 `properties` 的**值**、union 的**分支**、`items` 的**值**……
+不碰 `enum` / `default` / `examples` 里的字面值。
+
+#### 端到端验证（2026-10-29）
+
+真实报障形态的 65 工具请求体（58 个填充 + 7 个中招的 REA 工具，脚本里现成构造）：
+
+| 站点 | 原样 | 过 `rewriteRequestBody` |
+|---|---|---|
+| 国内站 `i-magic-service.letsmagic.cn`（deepseek-v4.1-flash） | `400 … invalid JSON Schema` | **200** |
+| 国际站 `magic-service.magicrew.ai`（deepseek-v4.1-flash） | `400 … tools.58…/items` | **200** |
+
+单点矩阵（21 个形态 × raw / 改写后，两站各跑一遍）：**所有 `items` 子树非法形态
+400 → 200**，顶层对照形态保持 200 不动，合法关键字（`enum` / `pattern` / `$ref`）原样保留。
+
+复跑方式：
+
+```bash
+# 国内站（node 直连即可）
+node ./_probe/items-subtree-upstream.mjs
+# 国际站（node 连不上该域名，用 magpie 自带的 bun）
+~/.cache/magpie/bun/1.4.4/magpie-bun.exe ./_probe/items-subtree-upstream.mjs intl
+# 稳定性统计（同一形态连发 N 轮，判「恒 400」还是「偶发」）
+node ./_probe/items-subtree-stability.mjs 3 cn
+```
+
+⚠ **上游的校验会变，别把单次探针当定论**。2026-10-29 这一夜实测到的完整时间线：
+
+| 本地时间（UTC+8） | 站点 | `items` 子树非法形态（A 组 7 个） | tuple 形式 / `if+then` |
+|---|---|---|---|
+| 00:19 | 国内 | **稳定 400**（7/7） | 200 / 400 |
+| 00:24 | 国际 | **稳定 400**（7/7） | 200 / 400 |
+| 00:29（3 轮 ×21 形态统计） | 国内 | 已全变 **200** | 200 |
+| 00:35 | 国内 | 仍全 **200**（含真实报障形态的 raw） | 200 |
+
+⇒ 上游在 00:25~00:29 之间放宽了这层校验（灰度或发布，未确认）。
+**这不改变本节的结论**：改写现在是「保险」而不是「必需」——上游随时可能收回去
+（同一夜里已经出现过波动），而改写的代价只是一次遍历。
+
+所以判「某个形态要不要改写」要看多轮统计，别信单次探针：
+`_probe/items-subtree-stability.mjs` 就是为这件事写的（`N 轮 × 每形态 raw/改写各一次`，
+输出 `400 次数 / 轮数`）。
+
 ### 为什么算插件的事，不算客户端的事
 
 按规范 `{}` 与 `true` 等价，客户端没写错；**上游的兼容性不足**。

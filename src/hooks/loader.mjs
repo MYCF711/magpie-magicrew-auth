@@ -167,6 +167,168 @@ export function loosenEmptyItems(node) {
 }
 
 /**
+ * 修 **`items` 子树内部**的 schema：上游的 JSON Schema 校验器对数组元素的
+ * schema 比对根节点**更严**，下面这些形态在 `items` 子树里一律 400：
+ *
+ *   anyOf / oneOf / allOf / not / const   → 400
+ *   if / then / else                      → 400
+ *   {}（空 schema）                       → 400
+ *
+ * ⚠ 同样形态放在**顶层 parameters** 里上游**收**（200）—— 只有 `items` 子树
+ * 里才炸。所以限制必须精确落在 `items` 之下，不能全局摊平 union。
+ *
+ * 实测（2026-10-28~29，直打国内站 `i-magic-service.letsmagic.cn`，
+ * deepseek-v4.1-flash，同一把 key、同一份请求，只改这一个字段；
+ * `_probe/items-subtree-upstream.mjs` 可复跑）：
+ *
+ *   items 内部 {x:{anyOf:[{type:"string"},{type:"null"}]}} → 400
+ *   items 内部 {x:{oneOf:[…]}}                            → 400
+ *   items 内部 {x:{allOf:[…]}}                            → 400
+ *   items 内部 {x:{not:{type:"string"}}}                  → 400
+ *   items 内部 {x:{const:"a"}}                            → 400
+ *   items 内部 {x:{if:…,then:…}}                          → 400
+ *   items 内部 {x:{}}                                     → 400
+ *   items 内部 {x:{type:["object","string",…,"null"]}}    → 200   ← 「任意值」的合法写法
+ *   items 内部 {x:{type:"object"}}                        → 200
+ *   items 内部 {x:{type:"string",pattern:"^a$",enum:[…]}} → 200
+ *   items 内部 {x:{$ref:"#/$defs/s"}}, $defs 同层        → 200
+ *   items 是数组（tuple 形式）    国内站 → 200，**国际站 → 400**（两站不一致）
+ *   顶层   {x:{anyOf:…}} / {x:{const:…}} / {x:{not:…}} / {x:{}} → 200
+ *   （国内站 `i-magic-service.letsmagic.cn` 与国际站 `magic-service.magicrew.ai`
+ *     逐条对比过：除 tuple 形式外结论一致）
+ *
+ * 命中来源：**MCP 服务器**的工具 schema。REA MCP（mcp__rea__build_call_path 等
+ * 7 个工具）的 `functions` 数组参数，元素 schema 用了
+ * `anyOf: [{...}, {type:"null"}]`（可选参数的标准写法）、`oneOf`，还有
+ * `{}` 空 schema —— 一份 65 工具的请求里就有 7 个工具中招，整轮 400。
+ *
+ * 修法（全部是**降级放宽**，方向安全：宁可约束松一点，也不要整轮失败）：
+ *
+ *   anyOf / oneOf / allOf  → 取一个分支内联（**优先非纯 null 的分支**：
+ *                              `anyOf:[{…},{type:"null"}]` 取前者；反过来写时
+ *                              照抄第一个会把「可选」压成「只能 null」，那是收紧）
+ *   not / const / if+then+else → 删除（无等价物；删掉就是放宽）
+ *   {}                     → `{type:["object","string","number","boolean","array","null"]}`
+ *                             （六种 JSON 类型全覆盖 = 任意值，与 `{}` 严格等价；
+ *                              **不能**用 `{type:"object"}` —— 那会把「任意」收紧成「只能是对象」）
+ *
+ * ⚠ 两个容易漏的坑（都踩过）：
+ *   1. 删除 `not` / `const` 后节点可能变成 `{}` —— 必须在删除后再查一次空对象，
+ *      否则改完仍是 400（PR #10 初版就漏在这里，`not`/`const` 两例改写后仍 400）。
+ *   2. `items` 子树里 `{}` 和 `true` 都被拒，所以「任意值」只能落成显式 type 数组。
+ *
+ * ⚠ 只走 `items` 子树：顶层 parameters 的 union 是上游**收**的，动了它
+ * 会白白丢掉约束。
+ *
+ * @returns {boolean} 有没有改到
+ */
+export function loosenItemsSchema(node) {
+  let changed = false
+  // 用 walkSchema 找**每一个** schema 位置上的 items（它只进入真正的 schema
+  // 位置：properties 的值、union 的分支、items 的值……不碰 enum/default 的字面值）。
+  walkSchema(node, (n) => {
+    if (!Object.hasOwn(n, "items")) return false
+    const v = n.items
+    // tuple 形式（draft-04）：`items` 是 schema **数组**。
+    // 两站行为不一致 —— 国内站收、**国际站拒**（`[{"type":"string"}] is not of
+    // type 'object'`），实测见 `_probe/items-subtree-upstream.mjs`。
+    // 数组里的逐位约束在改写里表达不了（`anyOf` 在这层就是 400），
+    // 只能整体落成「任意值」—— 纯放宽，不会让原本合法的调用被拒。
+    if (Array.isArray(v)) {
+      n.items = { type: [...ANY_SCHEMA_TYPE] }
+      changed = true
+      return false
+    }
+    if (!v || typeof v !== "object") return false
+    if (fixItemsSubtree(v)) changed = true
+    return false
+  })
+  return changed
+}
+
+// 空 schema 在 JSON Schema 里等价于 `true` = 接受任意 JSON 值。但上游对
+// `items` 子树里的 `{}` 和 `true` 都拒，只能落成显式的「任意类型」schema。
+const ANY_SCHEMA_TYPE = ["object", "string", "number", "boolean", "array", "null"]
+
+/** 把一个空 schema 节点原地改成「任意值」。返回是否真的改到（只对空对象生效）。 */
+function toAnySchema(n) {
+  if (Object.keys(n).length > 0) return false
+  n.type = [...ANY_SCHEMA_TYPE]
+  return true
+}
+
+/** 分支是不是只声明了 null —— 取它内联会把「可选」压成「只能 null」（收紧） */
+function isNullOnly(branch) {
+  if (!branch || typeof branch !== "object" || Array.isArray(branch)) return false
+  if (branch.type === "null") return true
+  return Array.isArray(branch.type) && branch.type.length === 1 && branch.type[0] === "null"
+}
+
+/**
+ * 在 `items` 子树里就地修：union 摊平、const/not/if 删除、空 schema 换形状。
+ *
+ * 递归同样遵守 schema 位置纪律（见 {@link SCHEMA_MAPS} / {@link SCHEMA_LIST} /
+ * {@link SCHEMA_ONE}）：`enum` / `default` / `examples` 里的字面值不是 schema，
+ * 不能动。
+ *
+ * @returns {boolean} 有没有改到
+ */
+function fixItemsSubtree(n) {
+  if (!n || typeof n !== "object" || Array.isArray(n)) return false
+  let dirty = false
+
+  // 空 schema {} → 显式「任意类型」（与 {} 严格等价）
+  if (toAnySchema(n)) return true
+
+  for (const [k, v] of Object.entries(n)) {
+    if (k === "anyOf" || k === "oneOf" || k === "allOf") {
+      if (!Array.isArray(v) || v.length === 0) {
+        delete n[k]
+        dirty = true
+        continue
+      }
+      // 优先第一个非纯 null 的分支（顺序反过来时不至于把可选压成「只能 null」）
+      const branch =
+        v.find((b) => b && typeof b === "object" && !Array.isArray(b) && !isNullOnly(b)) ??
+        v.find((b) => b && typeof b === "object" && !Array.isArray(b))
+      delete n[k]
+      dirty = true
+      if (branch) {
+        // 分支本身也可能带 union / 空 schema ⇒ 先递归修，再内联
+        if (fixItemsSubtree(branch)) dirty = true
+        Object.assign(n, branch)
+      }
+      continue
+    }
+    if (k === "not" || k === "const" || k === "if" || k === "then" || k === "else") {
+      delete n[k]
+      dirty = true
+      continue
+    }
+    // 其余按 schema 位置递归
+    if (SCHEMA_MAPS.has(k) && !Array.isArray(v)) {
+      for (const child of Object.values(v)) if (fixItemsSubtree(child)) dirty = true
+      continue
+    }
+    if (SCHEMA_LIST.has(k) && Array.isArray(v)) {
+      for (const child of v) if (fixItemsSubtree(child)) dirty = true
+      continue
+    }
+    if (SCHEMA_ONE.has(k)) {
+      if (Array.isArray(v)) {
+        for (const child of v) if (fixItemsSubtree(child)) dirty = true
+      } else if (fixItemsSubtree(v)) {
+        dirty = true
+      }
+    }
+  }
+  // 删除 not/const/if… 之后节点可能变空 —— 空 schema 在 items 子树里仍然 400，
+  // 必须补成「任意值」。
+  if (toAnySchema(n)) dirty = true
+  return dirty
+}
+
+/**
  * 改写发往上游的请求体。**一次 parse，四处改写都在这**。
  *
  * 四处都是实测出来的，不是猜的：
@@ -221,6 +383,7 @@ export function rewriteRequestBody(raw) {
       if (!p || typeof p !== "object") continue
       if (loosenAdditionalProperties(p)) changed = true
       if (loosenEmptyItems(p)) changed = true
+      if (loosenItemsSchema(p)) changed = true
     }
   }
 
