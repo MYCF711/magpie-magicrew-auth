@@ -33,6 +33,18 @@
 `login(LoginType.EmailVerificationCode, …)`（枚举值就是字符串 `"email"`）；
 端点定义在 `UserApi`（`loginByEmail()` 显式 `delete("organization-code")`）。
 
+**⚠ 这条方法只在国际站出现，国内站不给。** 两条实测判据：
+
+1. `www.letsmagic.cn/login` 的登录方式只有 **微信 / 苹果 / 密码 / 手机 / 私有部署**，
+   没有邮箱（国际站 `www.magicrew.ai/login` 才有 `switch-to-email`）⇒ 国内站
+   不存在邮箱注册的账号，摆出来只会让用户填完邮箱撞一个看不懂的错；
+2. 同一个发信请求，国内站 `/v4/user/send-email` 回 `2000 服务异常，请联系管理员`，
+   国际站回 `1000 请求成功`。
+
+所以方法表按站点分叉：国际站 `邮箱 → 手机号 → 浏览器 → 登录态`，
+国内站 `手机号 → 浏览器 → 登录态`（`tests/code-login.mjs` 把条数也钉死了 ——
+国内站必须**恰好 3 条**，多一条就红）。
+
 ### 二、已有账号**不再出现**旋转验证图
 
 这是顺手挖出来的、比邮箱本身更值钱的一条：**服务端对已注册的账号本来就不出图。**
@@ -80,6 +92,41 @@ max_tokens=8000 → finish_reason:"stop"    reasoning_tokens:899  content:"10"
 那个脚本是早期用 CDP 拉浏览器、点输入框、按回车替账号发第一条消息的。
 `src/tasks.mjs` 的 `autoFirstWork()` 早就用纯协议（`chat-task.mjs`）取代了它，
 留着只会让人以为「第一项任务还得手动跑脚本」。新手奖励 8 项现在**全自动**。
+
+### 五、识图模型：思考关不掉，但能砍一半
+
+`workbuddy/deepseek-v4.1-flash` 是推理模型。让它**别思考**（更快、更省、不怕
+`max_tokens` 被思考吃光）这件事，12 组参数逐个试过 —— 同一模型、同一张图：
+
+| 参数 | reasoning 字数 | content | 结论 |
+|---|---|---|---|
+| 不传 | 1867 | `10.5` | 基线 |
+| `reasoning_effort: "none"` | 2824 | `10.5` | ❌ 比不传**还长**（网关按未知参数丢了） |
+| `reasoning_effort: "minimal"` | 2514 | `10.2` | ❌ 同上 |
+| **`reasoning_effort: "low"`** | **835** | `10.5` | ✅ 唯一有效的 |
+| `enable_thinking: false` | 3346 | **空** | ❌ 思考更长，且交白卷 |
+| `thinking_budget: 0` | 3156 | **空** | ❌ 同上 |
+| `thinking: {type:"disabled"}` | 1533 | `10.7` | 小幅 |
+| `chat_template_kwargs` / `extra_body` / `reasoning:{enabled:false}` | 1161–1563 | 有 | 小幅 |
+| 模型名后缀 `-nothink` / `/no_think` | — | — | HTTP 400 模型不存在 |
+
+⇒ **这个模型在网关侧关不掉思考。** 真想「不思考」，只能换一个**非推理的视觉模型**
+（那是用户在 magpie 设置里选的，插件不替用户选）。
+
+于是取唯一有效的那条，再连跑 6 轮统计（3 张图 × 2 轮，同一张图重复问）：
+
+| | 出数字 | 平均耗时 | 平均 tokens | 平均 reasoning |
+|---|---|---|---|---|
+| 不传 | 5/6 | 20.6 s | 2343 | 3581 字 |
+| `reasoning_effort: "low"` | **6/6** | **8.4 s** | **1007** | 1646 字 |
+
+`low` 不但更快更省，**还更稳** —— 不传的那一组有一次把 6000 token 全烧在思考上、
+`content` 交白卷（和 `max_tokens: 400` 那个坑是同一个形态）。两种配置判出来的角度一致。
+
+另外把**两个判官改成并行**：原来 `await a; await b` 串行，把延迟叠成两倍；
+现在耗时等于较慢的那一次。`reasoning_effort: "low"` + 并行之后，一次真实验证
+（国内站，取图 → 识图 → 过旋转验证）判出 `clock=6.00 / deg=180`，verify 回
+`1000 验证成功`。
 
 ### 验证
 

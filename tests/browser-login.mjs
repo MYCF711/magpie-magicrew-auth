@@ -18,6 +18,11 @@ function setClipboard(text) {
   return execFile("powershell", ["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard -Value $_"], {
     input: text,
     windowsHide: true,
+    // ⚠ 超时不是锦上添花：这个环境里 `Set-Clipboard` 有时**既不返回也不报错**
+    //   （被沙箱拦住，实测把整份测试挂在 ② 段十来分钟）。没超时的话，
+    //   「跑一遍全部测试」这条判据会因为一个与登录逻辑无关的降级通道挂死。
+    timeout: 15_000,
+    killSignal: "SIGKILL",
   })
 }
 
@@ -98,3 +103,9 @@ if (!/登录态/.test(labels[3] ?? "")) fail(`第四条应该是「登录态（J
 if (labels[0] === labels[1]) fail("前两条方法的标题不能一样（magpie 列表里会分不出来）")
 
 if (!process.exitCode) console.log("  ✓ 顺序正确：邮箱 → 手机号 → 浏览器 → 登录态")
+
+// ⚠ 这一份**会真的拉起浏览器**（见 ①），留着的句柄让 node 的事件循环不空 ——
+// 光设 process.exitCode 不会结束进程。实测：结论早就打完，进程还挂着，
+// 3 分半都退不出来，在「跑一遍全部测试」这条判据上表现为卡死。
+// 打完结论就显式退出。
+process.exit(process.exitCode ?? 0)

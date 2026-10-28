@@ -331,12 +331,19 @@ function makeCodeMethod(c, kind) {
 }
 
 export function makeMethods(c) {
-  // 顺序 = magpie 登录方式列表里的顺序。国际站在前的是邮箱 —— 那边用户大多
-  // 是邮箱注册的；国内站手机号在前。
+  // 顺序 = magpie 登录方式列表里的顺序。
+  //
+  // ⚠ **邮箱验证码只有国际站有**，国内站不给。实测两件事：
+  //   ① www.letsmagic.cn/login 的登录方式只有 微信 / 苹果 / 密码 / 手机 / 私有部署，
+  //      **没有邮箱**（国际站 www.magicrew.ai/login 才有 `switch-to-email`）；
+  //   ② 同一个发信请求，国内站 `/v4/user/send-email` 回 `2000 服务异常，请联系管理员`，
+  //      国际站回 `1000 请求成功`。
+  //   国内站既然没有邮箱入口，也就不存在邮箱注册的账号 —— 把这条方法摆出来，
+  //   只会让用户填完邮箱撞一个看不懂的错。
   const codeMethods =
     c.id === "magicrew-intl"
       ? [makeCodeMethod(c, "email"), makeCodeMethod(c, "mobile")]
-      : [makeCodeMethod(c, "mobile"), makeCodeMethod(c, "email")]
+      : [makeCodeMethod(c, "mobile")]
 
   return [
     ...codeMethods,
