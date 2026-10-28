@@ -26,6 +26,12 @@
 
 import { fetchPoints, SITES } from "../api.mjs"
 import { ensureCheckinDefault } from "../auto-maintenance.mjs"
+import { syncInvitePage } from "../store.mjs"
+
+// 页面清单的节流心跳：magpie 会定期轮 usage，借这一分钟一次的时机
+// 把「有哪些账号、各自的码」同步给插件页面 —— 账号增删后页面自己跟上，
+// 不用等下次签到 / 登录。
+let lastPageSync = 0
 
 // 每日登录积分：国内 +200/天、国际 +50/天（实测，见 docs/internals.md）。
 // 今日批次的分母，只用于展示「今日还剩 / 今日额度」。
@@ -40,6 +46,12 @@ export function makeUsage(c) {
       ensuredCheckin = true
       try {
         ensureCheckinDefault(c.PROVIDER)
+      } catch {}
+    }
+    if (Date.now() - lastPageSync > 60_000) {
+      lastPageSync = Date.now()
+      try {
+        syncInvitePage()
       } catch {}
     }
     const auth = await getAuth()
