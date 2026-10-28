@@ -42,28 +42,80 @@ import { ensureKey, accountOf } from "../keys.mjs"
  * 一次真实请求里 54 个工具中的 `ExitPlanMode` 与 `CreateWorkflow` 就这么写。
  * 客户端没写错（按规范 `{}` 与 `true` 等价），是上游兼容性不足，插件这边兜住。
  *
+ * 只走 schema 位置（见 `walkSchema`）：一个恰好叫 `additionalProperties` 的工具参数
+ * 不会被误改。
+ *
  * @returns {boolean} 有没有改到
  */
-export function loosenAdditionalProperties(node) {
-  if (!node || typeof node !== "object") return false
-  if (Array.isArray(node)) {
-    let any = false
-    for (const n of node) if (loosenAdditionalProperties(n)) any = true
-    return any
-  }
-  let changed = false
+// JSON Schema 里"值是 schema"的关键字。只走这些位置，**不扫 properties 的键名**，
+// 也不扫 enum / default / const / examples —— 那些不是 schema。
+// 旧写法递归所有对象，会把一个叫 `additionalProperties` 的工具参数（在
+// properties 的键上）当成关键字改掉，也会把 enum 值里的 `items` 键删掉。
+const SCHEMA_MAPS = new Set([
+  "properties",
+  "patternProperties",
+  "$defs",
+  "definitions",
+  "dependentSchemas",
+])
+const SCHEMA_ONE = new Set([
+  "additionalProperties",
+  "unevaluatedProperties",
+  "propertyNames",
+  "contains",
+  "not",
+  "if",
+  "then",
+  "else",
+  "contentSchema",
+  "items",
+  "additionalItems",
+  "unevaluatedItems",
+])
+const SCHEMA_LIST = new Set(["allOf", "anyOf", "oneOf", "prefixItems"])
+
+/**
+ * 在 schema 对象上原地跑 `visit`，并只递归进真正的 schema 位置。
+ * @returns {boolean} `visit` 或任一子 schema 改到过
+ */
+function walkSchema(node, visit) {
+  if (!node || typeof node !== "object" || Array.isArray(node)) return false
+  let changed = visit(node)
   for (const [k, v] of Object.entries(node)) {
-    if (k === "additionalProperties") {
-      // 布尔值上游认，原样留着（false 是"不许额外属性"，语义相反，绝对不能动）
-      if (typeof v !== "boolean") {
-        node[k] = true
-        changed = true
-      }
+    if (!v || typeof v !== "object") continue
+    if (SCHEMA_MAPS.has(k) && !Array.isArray(v)) {
+      for (const child of Object.values(v)) if (walkSchema(child, visit)) changed = true
       continue
     }
-    if (v && typeof v === "object" && loosenAdditionalProperties(v)) changed = true
+    if (SCHEMA_LIST.has(k) && Array.isArray(v)) {
+      for (const child of v) if (walkSchema(child, visit)) changed = true
+      continue
+    }
+    if (SCHEMA_ONE.has(k)) {
+      if (Array.isArray(v)) {
+        for (const child of v) if (walkSchema(child, visit)) changed = true
+      } else if (walkSchema(v, visit)) changed = true
+      continue
+    }
+    if (k === "dependencies" && !Array.isArray(v)) {
+      for (const child of Object.values(v)) {
+        if (child && typeof child === "object" && !Array.isArray(child) && walkSchema(child, visit)) {
+          changed = true
+        }
+      }
+    }
   }
   return changed
+}
+
+export function loosenAdditionalProperties(node) {
+  return walkSchema(node, (n) => {
+    // 布尔值上游认，原样留着（false 是"不许额外属性"，语义相反，绝对不能动）
+    if (!Object.hasOwn(n, "additionalProperties")) return false
+    if (typeof n.additionalProperties === "boolean") return false
+    n.additionalProperties = true
+    return true
+  })
 }
 
 /**
@@ -93,29 +145,21 @@ export function loosenAdditionalProperties(node) {
  * 数组元素会序列化成 `{}`。一个真实请求里第 41 个工具的参数是
  * `properties.functions.items: {}`，于是整轮失败。
  *
+ * 只走 schema 位置：`properties` 里一个恰好叫 `items` 的工具参数（哪怕 schema 就是
+ * `{}`）不会被误删；`enum` / `default` 值里的 `items` 键同样不碰。
+ *
  * @returns {boolean} 有没有改到
  */
 export function loosenEmptyItems(node) {
-  if (!node || typeof node !== "object") return false
-  if (Array.isArray(node)) {
-    let any = false
-    for (const n of node) if (loosenEmptyItems(n)) any = true
-    return any
-  }
-  let changed = false
-  for (const [k, v] of Object.entries(node)) {
-    if (k === "items") {
-      const emptyObject =
-        v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0
-      if (emptyObject || v === true) {
-        delete node[k]
-        changed = true
-        continue
-      }
-    }
-    if (v && typeof v === "object" && loosenEmptyItems(v)) changed = true
-  }
-  return changed
+  return walkSchema(node, (n) => {
+    if (!Object.hasOwn(n, "items")) return false
+    const v = n.items
+    const emptyObject =
+      v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0
+    if (!emptyObject && v !== true) return false
+    delete n.items
+    return true
+  })
 }
 
 /**

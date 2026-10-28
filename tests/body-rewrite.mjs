@@ -81,6 +81,24 @@ check("键名只是包含 additionalProperties 子串的不误伤", () => {
   assert.equal(loosenAdditionalProperties(p), false)
 })
 
+check("属性名恰好叫 additionalProperties、schema 是 {} 的，不误改", () => {
+  const p = { type: "object", properties: { additionalProperties: {} } }
+  assert.equal(loosenAdditionalProperties(p), false)
+  assert.deepEqual(p.properties.additionalProperties, {})
+})
+
+check("同名属性自己的 schema 里有关键字，照改", () => {
+  const p = {
+    type: "object",
+    properties: { additionalProperties: { type: "object", additionalProperties: {} } },
+  }
+  assert.equal(loosenAdditionalProperties(p), true)
+  assert.deepEqual(p.properties.additionalProperties, {
+    type: "object",
+    additionalProperties: true,
+  })
+})
+
 check("数组当值（非法 schema）也换 —— 上游反正不认", () => {
   const p = { additionalProperties: [] }
   assert.equal(loosenAdditionalProperties(p), true)
@@ -147,6 +165,29 @@ check("属性名恰好叫 items 的，删的是它自己的 items 键，不是�
   assert.equal(loosenEmptyItems(p), true)
   assert.ok(p.properties.items)
   assert.equal(p.properties.items.items, undefined)
+})
+
+check("属性名恰好叫 items、schema 是 {} 的，不误删", () => {
+  const p = { type: "object", properties: { items: {} } }
+  assert.equal(loosenEmptyItems(p), false)
+  assert.deepEqual(p.properties.items, {})
+})
+
+check("enum / default 值里的 items 键不碰（它们不是 schema）", () => {
+  const p = {
+    type: "object",
+    properties: { x: { enum: [{ items: {} }] } },
+    default: { items: {} },
+  }
+  assert.equal(loosenEmptyItems(p), false)
+  assert.deepEqual(p.properties.x.enum, [{ items: {} }])
+  assert.deepEqual(p.default, { items: {} })
+})
+
+check("$defs 里的 array 也会走到", () => {
+  const p = { $defs: { Tags: { type: "array", items: {} } } }
+  assert.equal(loosenEmptyItems(p), true)
+  assert.equal(p.$defs.Tags.items, undefined)
 })
 
 check("空对象 / null / 原始值返回 false", () => {

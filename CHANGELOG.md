@@ -1,5 +1,29 @@
 # 更新记录
 
+## 0.3.25 — 2026-10-28
+
+**0.3.24 的 schema 扫描范围收窄：只走 schema 位置**
+
+0.3.24 的 `loosenEmptyItems()` 与 `loosenAdditionalProperties()` 递归了**所有**对象。
+那会把 `properties` 里恰好叫 `items` / `additionalProperties` 的工具参数当成 schema
+关键字：`properties.items = {}` 的参数会被删掉，`properties.additionalProperties =
+{type:"string"}` 会被改成 `true`；`enum` / `default` 值里的同名键也会被误改。
+
+两者现在共用 `walkSchema()`，只进入真正的 schema 位置：
+
+- `properties` / `patternProperties` / `$defs` / `definitions` / `dependentSchemas` 的**值**
+- `allOf` / `anyOf` / `oneOf` / `prefixItems`
+- `items` / `additionalProperties` / `unevaluatedProperties` / `propertyNames` /
+  `contains` / `not` / `if` / `then` / `else` / `contentSchema` / `dependencies`
+- 不扫键名，不扫 `enum` / `default` / `const` / `examples`（它们不是 schema）
+
+0.3.24 的 `items:{}` 等价替换规则不变，本版只修扫描范围。
+
+### 验证
+
+- `tests/body-rewrite.mjs`：36 个断言（新增 5 个同名属性 / `enum` 值反例）。
+- 端到端复跑：41 个工具、`properties.functions.items:{}` → 200（国内 / 国际）。
+
 ## 0.3.24 — 2026-10-28
 
 **修 `items: {}` 导致的整轮 400**
