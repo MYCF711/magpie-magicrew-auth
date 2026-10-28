@@ -383,8 +383,9 @@ function inviteEntries(c) {
   const author = authorInvite(c.id)
   if (author) out.push({ n: 0, label: "我的（作者 MYCF711）", code: author, org: "", accountId: "MYCF711" })
   const codes = readAccountCodes(c.id)
+  const live = liveOrgs(c.id)
   const rows = Object.entries(codes)
-    .filter(([, v]) => v?.code && v.code !== author)
+    .filter(([org, v]) => v?.code && v.code !== author && (!live || live.size === 0 || live.has(org)))
     .sort((a, b) => String(a[1].accountId || a[0]).localeCompare(String(b[1].accountId || b[0]), "zh"))
   for (const [org, v] of rows) {
     out.push({ n: out.length, label: String(v.accountId || org), code: v.code, org, accountId: String(v.accountId || org) })
