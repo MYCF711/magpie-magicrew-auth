@@ -28,6 +28,7 @@ import {
   otherSlot,
   currentKey,
   safeAccount,
+  listAccounts,
 } from "./key-store.mjs"
 
 /**
@@ -45,6 +46,35 @@ export function accountOf(auth) {
  * @param {Function} getAuth magpie 的取账号函数，或直接给 auth 对象
  * @param {{leadMs?:number}} opts 提前多久算「不新鲜」，默认 10 分钟
  */
+/**
+ * 该站点里**任何一把还没过期的 key**（挑到期最晚的那把）。
+ *
+ * 为什么需要它 —— 网关路径下的一个死结（2026-10-28 实测）：
+ *
+ *   1. magpie 作为网关被调用时，传给 loader 的 auth 里未必带 org，
+ *      `accountOf()` 于是落到 "default"，`readStore` 读不到这个账号的槽。
+ *   2. 于是 ensureKey 走「从 magpie 存的凭据接管一次」，用 `auth.access`。
+ *   3. 而 `auth.access` **往往已经被本插件自己轮换掉的那把顶掉了** ——
+ *      服务端是「签一把顶一把」，插件签新 key 的瞬间，magpie 手里的就作废了。
+ *   4. 结果上游回 403「token无效」，网关报成
+ *      「超级麦吉 did not stream: token无效」，而 store 里槽 b 那把其实好着。
+ *
+ * 兜底就是回到 store 里找还活着的 key。key 与账号一一对应，用谁的 key 就是
+ * 以谁的身份跑 —— 对「几个号轮流扛、积分少的先上」这种用法正合适。
+ */
+function anyLiveKey(c, leadMs) {
+  let best = null
+  for (const acc of listAccounts(c.id)) {
+    const st = readStore(c.id, acc)
+    for (const slot of ["a", "b"]) {
+      const k = st?.keys?.[slot]
+      if (!isFresh(k, leadMs)) continue
+      if (!best || Number(k.expiresAt || 0) > Number(best.expiresAt || 0)) best = k
+    }
+  }
+  return best
+}
+
 export async function ensureKey(c, getAuth, { leadMs } = {}) {
   let auth = null
   try {
@@ -55,6 +85,11 @@ export async function ensureKey(c, getAuth, { leadMs } = {}) {
   const st = readStore(c.id, account)
   const cur = currentKey(st)
   if (isFresh(cur, leadMs)) return cur
+
+  // 网关路径下 account 常常对不上（auth 里没带 org）→ 退到该站点任意一把
+  // 还活着的 key。总比拿一把已被顶掉的 access 去撞 403 好。
+  const anyLive = anyLiveKey(c, leadMs)
+  if (anyLive) return anyLive
 
   const renewed = await renewOnce(c.id, account, async () => {
     const again = readStore(c.id, account)
