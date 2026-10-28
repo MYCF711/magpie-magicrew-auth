@@ -167,6 +167,125 @@ export function loosenEmptyItems(node) {
 }
 
 /**
+ * 修 **`items` 子树内部**的 schema：上游的 JSON Schema 校验器对数组元素的
+ * schema 比对根节点**更严**，这些形态一律回
+ * `items: invalid JSON Schema`：
+ *
+ *   anyOf / oneOf / allOf / not / const   → 400
+ *   {}（空 schema）                       → 400
+ *
+ * ⚠ 同样形态放在**顶层 parameters** 里上游**收**（200）—— 只有 `items` 子树
+ * 里才炸。所以限制必须精确落在 `items` 之下，不能全局摊平 union。
+ *
+ * 实测（2026-10-28，DSH 经 magpie 网关打 deepseek-v4.1-flash，同一把 key、
+ * 同一份请求，只改这一个字段；国内站 `magicrew` 与国际站 `magicrew-intl` 同构）：
+ *
+ *   items 内部 {x:{anyOf:[{type:"string"}]}}           → 400
+ *   items 内部 {x:{type:"string"}}                        → 200
+ *   items 内部 {x:{const:"a"}}                           → 400
+ *   items 内部 {x:{not:{type:"string"}}}                 → 400
+ *   items 内部 {x:{}}                                    → 400
+ *   items 内部 {x:{type:"string",pattern:"^a$",enum:[…]}} → 200
+ *   顶层   {x:{anyOf:[{type:"string"}]}}                 → 200
+ *
+ * 命中来源：**MCP 服务器**的工具 schema。REA MCP（mcp__rea__build_call_path 等
+ * 7 个工具）的 `functions` 数组参数，元素 schema 用了
+ * `anyOf: [{...}, {type:"null"}]`（可选参数的标准写法）、`oneOf`，还有
+ * `{}` 空 schema —— 一份 65 工具的请求里就有 7 个工具中招，整轮 400。
+ *
+ * 修法（三处都是**降级放宽**，方向安全：宁可约束松一点，也不要整轮失败）：
+ *
+ *   anyOf / oneOf / allOf  → 取**第一个分支**内联（union 的第一个分支通常
+ *                             就是「非空」的那个；`anyOf:[{...},{type:"null"}]`
+ *                             取第一个正好）
+ *   not                    → 删除（无对应可放宽的等价物）
+ *   const                  → 删除（`const` 表达的是「只能是这一个值」，
+ *                             删掉变「任意值」—— 放宽）
+ *   {}                     → `{type:"object",additionalProperties:true}`
+ *                             （空 schema 本来就是「任意」，这个改写严格等价）
+ *
+ * ⚠ 只走 `items` 子树：顶层 parameters 的 union 是上游**收**的，动了它
+ * 会白白丢掉约束。
+ *
+ * @returns {boolean} 有没有改到
+ */
+export function loosenItemsSchema(node) {
+  let changed = false
+  // 用 walkSchema 找**每一个** schema 位置上的 items（它只进入真正的 schema
+  // 位置：properties 的值、union 的分支、items 的值……不碰 enum/default 的字面值）。
+  walkSchema(node, (n) => {
+    if (!Object.hasOwn(n, "items")) return false
+    const v = n.items
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false
+    if (fixItemsSubtree(v)) changed = true
+    return false
+  })
+  return changed
+}
+
+/**
+ * 在 `items` 子树里就地修：union 摊平、const/not 删除、空 schema 换形状。
+ *
+ * 递归同样遵守 schema 位置纪律（见 {@link SCHEMA_MAPS} / {@link SCHEMA_LIST} /
+ * {@link SCHEMA_ONE}）：`enum` / `default` / `examples` 里的字面值不是 schema，
+ * 不能动。
+ *
+ * @returns {boolean} 有没有改到
+ */
+function fixItemsSubtree(n) {
+  if (!n || typeof n !== "object" || Array.isArray(n)) return false
+  let dirty = false
+
+  // 空 schema {} → {type:"object",additionalProperties:true}
+  if (Object.keys(n).length === 0) {
+    n.type = "object"
+    n.additionalProperties = true
+    return true
+  }
+
+  for (const [k, v] of Object.entries(n)) {
+    if (k === "anyOf" || k === "oneOf" || k === "allOf") {
+      if (!Array.isArray(v) || v.length === 0) {
+        delete n[k]
+        dirty = true
+        continue
+      }
+      const branch = v[0]
+      delete n[k]
+      dirty = true
+      if (branch && typeof branch === "object" && !Array.isArray(branch)) {
+        // 分支本身也可能带 union / 空 schema ⇒ 先递归修，再内联
+        if (fixItemsSubtree(branch)) dirty = true
+        Object.assign(n, branch)
+      }
+      continue
+    }
+    if (k === "not" || k === "const") {
+      delete n[k]
+      dirty = true
+      continue
+    }
+    // 其余按 schema 位置递归
+    if (SCHEMA_MAPS.has(k) && !Array.isArray(v)) {
+      for (const child of Object.values(v)) if (fixItemsSubtree(child)) dirty = true
+      continue
+    }
+    if (SCHEMA_LIST.has(k) && Array.isArray(v)) {
+      for (const child of v) if (fixItemsSubtree(child)) dirty = true
+      continue
+    }
+    if (SCHEMA_ONE.has(k)) {
+      if (Array.isArray(v)) {
+        for (const child of v) if (fixItemsSubtree(child)) dirty = true
+      } else if (fixItemsSubtree(v)) {
+        dirty = true
+      }
+    }
+  }
+  return dirty
+}
+
+/**
  * 改写发往上游的请求体。**一次 parse，四处改写都在这**。
  *
  * 四处都是实测出来的，不是猜的：
@@ -221,6 +340,7 @@ export function rewriteRequestBody(raw) {
       if (!p || typeof p !== "object") continue
       if (loosenAdditionalProperties(p)) changed = true
       if (loosenEmptyItems(p)) changed = true
+      if (loosenItemsSchema(p)) changed = true
     }
   }
 
