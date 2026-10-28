@@ -135,7 +135,15 @@ async function askClock(base, model, imageDataUrl, variant) {
     // 两次用不同措辞（variant）而不是靠随机温度，好复现
     body: JSON.stringify({
       model,
-      max_tokens: 400,
+      // ⚠ 这个上限是**给推理 token 留的**，不是给答案留的。
+      //
+      //   实测（2026-10-28，`workbuddy/deepseek-v4.1-flash`）：max_tokens=400 时
+      //   `finish_reason:"length"`、`reasoning_tokens:400`、**`content` 是 null** ——
+      //   推理过程把额度吃干净，答案一个字都没输出。判官拿到空串 ⇒ 判成
+      //   「不可信」⇒ 整条无头登录挂掉。给到 6000 时 reasoning 用 899 就收尾，
+      //   `content` 正常回 "10"。
+      //   ⇒ 别按「答案就一个数字」去估这个值；它买的是模型的思考空间。
+      max_tokens: 6000,
       temperature: 0,
       messages: [
         {
@@ -147,12 +155,23 @@ async function askClock(base, model, imageDataUrl, variant) {
         },
       ],
     }),
-    signal: AbortSignal.timeout(45_000),
+    signal: AbortSignal.timeout(90_000),
   })
   if (!res.ok) throw new Error(`识图模型回 HTTP ${res.status}`)
   const j = await res.json()
-  const text = j?.choices?.[0]?.message?.content ?? ""
-  return { clock: lastClock(text), text: String(text).trim().slice(0, 200) }
+  const m = j?.choices?.[0]?.message ?? {}
+  const content = String(m.content ?? "").trim()
+  const reasoning = String(m.reasoning_content ?? "")
+  // ① 正常情况：答案在 content 里
+  if (content) return { clock: lastClock(content), text: content.slice(-200), from: "content" }
+  // ② 兜底：推理模型被截断、content 为空 —— 答案在 reasoning 的最后一段里
+  //    （实测尾巴就是「最终决定：10。」这种形状）。只看尾巴 300 字，
+  //    别把前面推理中间提到的钟点当答案。
+  if (reasoning) {
+    const tail = reasoning.slice(-300)
+    return { clock: lastClock(tail), text: tail.slice(-200), from: "reasoning" }
+  }
+  return { clock: null, text: "", from: "empty" }
 }
 
 /**

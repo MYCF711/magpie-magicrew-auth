@@ -1,5 +1,105 @@
 # 更新记录
 
+## 0.3.28 — 2026-10-29
+
+**邮箱验证码登录（内置）· 已有账号不再过旋转图 · 识图模型被 `max_tokens` 饿死的修复**
+
+### 一、邮箱验证码登录
+
+国际站用户大多是邮箱注册的，之前只有手机号验证码这一条零浏览器路。现在两条都有，
+**而且共用同一份实现**（`makeCodeMethod(c, kind)`）—— 复制成两份的那天，下次改超时
+或改文案必然只改一份。
+
+协议是逆前端 chunk + 两站实测出来的，全部记在 `src/captcha.mjs` 的头部注释里：
+
+```
+取图    POST /captcha/generate   {account_type:"email", email}          ← 无 state_code
+过验证  POST /captcha/verify     {token, angle, account_type, email}
+发信    POST /v4/user/send-email {email, type:"account_login"} + X-Captcha-Token
+换登录态 POST /v4/user/login-email {email, captcha, device, auto_register, redirect}
+```
+
+三个**必须记住**的点（都实测过，写错的表现完全看不出是它们的错）：
+
+1. 邮箱**必须**走 `/v4/user/login-email`。往 `/v4/user/login` 发任何 type
+   （`email` / `email_captcha` / `email_code`）都回 `2000「phone 字段是必须的」`。
+2. 邮箱那条的**验证码字段叫 `captcha`，不叫 `code`**。发 `code` 回
+   `2000「captcha 字段是必须的」`；发 `captcha` 回 `2168「验证码错误」`（= 参数对了）。
+3. 发信端点的 `type` 也是 `"account_login"`（与手机号同）。填 `"login"` 回
+   `2000「服务异常，请联系管理员」`——后端内部炸了，不是参数校验失败。
+
+前端来源：`LoginCoreForm` chunk 里的
+`loginService.sendEmailVerificationCode(email, "account_login", captchaToken)` 与
+`login(LoginType.EmailVerificationCode, …)`（枚举值就是字符串 `"email"`）；
+端点定义在 `UserApi`（`loginByEmail()` 显式 `delete("organization-code")`）。
+
+### 二、已有账号**不再出现**旋转验证图
+
+这是顺手挖出来的、比邮箱本身更值钱的一条：**服务端对已注册的账号本来就不出图。**
+
+实测（2026-10-29，两站）：
+
+| 请求对象 | `/captcha/generate` 返回 |
+|---|---|
+| 已注册邮箱 | `business_token`（**直接放行，连图都不给**） |
+| 从没注册过的邮箱 | `token` + `image`（要给图） |
+
+也就是说「把我已有的账号加进 magpie」这条路**根本不需要识图模型**，全程只有
+「填邮箱/手机号 → 填验证码」两步。而之前 `startCodeLogin()` 第一句就是
+`if (!readVisionModel()) throw no-vision-model` —— **把这条免费通道堵死了**：
+没配识图模型的人连自己已有的账号都加不进来。
+
+改动：
+
+- `startCodeLogin()` 改成**先取图，再决定要不要识图模型**：`registered` → 直接发码；
+  只有确实要给新号过图时才要求模型（抛 `code: "no-vision-model"`）
+- `passCaptcha(site, ident, firstCap)` 接受调用方已经取到的那张图，省一次请求
+- `methods.mjs` 里「回退浏览器」那段从 `authorize` 开头挪进 `catch (no-vision-model)` ——
+  只有真新号注册才回退
+- 提示语跟着分叉：免图时告诉用户「这一环跳过了，识图模型这次也用不上」
+
+### 三、识图模型的 `max_tokens` 把它自己饿死（真 bug）
+
+`src/vision.mjs` 原本写 `max_tokens: 400`。实测 `workbuddy/deepseek-v4.1-flash`：
+
+```
+max_tokens=400  → finish_reason:"length"  reasoning_tokens:400  content:null
+max_tokens=2000 → finish_reason:"length"  reasoning_tokens:2000 content:null
+max_tokens=8000 → finish_reason:"stop"    reasoning_tokens:899  content:"10"
+```
+
+它是**推理模型**，400 个 token 全被 `reasoning_content` 吃掉，答案一个字都没输出 ⇒
+判官拿到空串 ⇒ 判成「判角度不可信」⇒ 每轮都换图 ⇒ 整条无头登录直接挂。
+**这个值买的是思考空间，不是答案长度。**
+
+改成 `max_tokens: 6000`，并加一层兜底：`content` 为空时从 `reasoning_content`
+的**最后 300 字**里找数字（实测尾巴就长「最终决定：10。」这样）。
+
+### 四、删掉 `tools/first-ai-work.mjs`
+
+那个脚本是早期用 CDP 拉浏览器、点输入框、按回车替账号发第一条消息的。
+`src/tasks.mjs` 的 `autoFirstWork()` 早就用纯协议（`chat-task.mjs`）取代了它，
+留着只会让人以为「第一项任务还得手动跑脚本」。新手奖励 8 项现在**全自动**。
+
+### 验证
+
+- **新增 `tests/code-login.mjs`：34 个断言** —— 拦全局 fetch 换成可编程假服务端，
+  逐个钉死请求本身：邮箱不带 `state_code`、邮箱不进 `send-sms`、
+  `login-email` 用 `captcha` 而 `login` 用 `code`、`device` 是 64 位 hex、
+  `auto_register` / `redirect` 都在、2168 原样透出；另含**免图通道**两条
+  （已注册 → 只走 generate + send-email、不碰 verify；新号 → 取了图但**不**直接发码）
+- **`tests/browser-login.mjs` 更新**：改成按 label 找「浏览器登录」，
+  并新增四条方法的顺序断言（国际站 邮箱 → 手机号 → 浏览器 → 登录态；
+  国内站 手机号 → 邮箱 → 浏览器 → 登录态）。`authorize` 的耗时阈值从 50ms 放宽到
+  5s —— 它允许花几百毫秒拉起浏览器，红线是「**不卡在等用户**」；剪贴板起不来的
+  环境里那一段改成跳过，而不是让整份测试崩
+- 回归：`multi-provider` 全过、`credit-refusal` 18 通过、`account-fallback` 10 通过、
+  `body-rewrite` **48 通过**（本版落地前先并了 0.3.27 的 `items` 子树改写，那一版把
+  它的断言从 36 加到 48）、`login-profile` / `local-browser` / `browser-detect` / `smoke` 全过；
+  `node ../magpie-plugin-scaffold/scripts/check.mjs .` → 30 通过 / 0 失败
+- 两站实测：邮箱取图 / 过验证（国际站 50° 通过）/ 发信（`code 1000`）/ 换登录态
+  （`2168` = 参数结构正确）都验过
+
 ## 0.3.27 — 2026-10-29
 
 **修 `items` 子树内部的 union / 空 schema 导致的整轮 400**
