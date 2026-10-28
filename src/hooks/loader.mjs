@@ -67,9 +67,61 @@ export function loosenAdditionalProperties(node) {
 }
 
 /**
- * 改写发往上游的请求体。**一次 parse，三处改写都在这**。
+ * 上游的 JSON Schema 校验器不接受 `items: {}`，整轮请求回 HTTP 400：
  *
- * 三处都是实测出来的，不是猜的：
+ *   {"error":{"code":null,"message":"超级麦吉: HTTP 400 请求错误: {\"error\":
+ *    {\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ *    properties/functions/items: invalid JSON Schema; check the schema
+ *    keywords and references Request id: ...\",\"param\":\"\",\"type\":
+ *    \"BadRequest\"}}","param":null,"type":"invalid_request_error"}}
+ *
+ * 报错只给路径，不说是哪个客户端。实测（2026-10-28，同一把 key、同一份请求、
+ * 只改 tools[0] 的这一处；国内站 `magicrew` 与国际站 `magicrew-intl` 逐行一致）：
+ *
+ *   items: 缺省                → 200
+ *   items: {}                  → 400 invalid JSON Schema
+ *   items: {description:"x"}   → 200   // 空对象才炸，不是"缺 type"
+ *   items: {type:"string"}     → 200
+ *   items: true                → 400 模型响应失败（另一种 400）
+ *   items: false               → 400 模型响应失败
+ *
+ * 为什么可以删：JSON Schema 里 `items` 的缺省值就是 `{}` —— "任意元素"。
+ * 所以 `items: {}` 删掉是**严格等价**（`true` 同理），不是降级放宽。
+ * `items: false` 表示"数组必须为空"，语义不同，不能删，原样留着。
+ *
+ * 命中来源：客户端用 `z.array(z.unknown())` / 动态函数列表生成工具 schema 时，
+ * 数组元素会序列化成 `{}`。一个真实请求里第 41 个工具的参数是
+ * `properties.functions.items: {}`，于是整轮失败。
+ *
+ * @returns {boolean} 有没有改到
+ */
+export function loosenEmptyItems(node) {
+  if (!node || typeof node !== "object") return false
+  if (Array.isArray(node)) {
+    let any = false
+    for (const n of node) if (loosenEmptyItems(n)) any = true
+    return any
+  }
+  let changed = false
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "items") {
+      const emptyObject =
+        v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0
+      if (emptyObject || v === true) {
+        delete node[k]
+        changed = true
+        continue
+      }
+    }
+    if (v && typeof v === "object" && loosenEmptyItems(v)) changed = true
+  }
+  return changed
+}
+
+/**
+ * 改写发往上游的请求体。**一次 parse，四处改写都在这**。
+ *
+ * 四处都是实测出来的，不是猜的：
  *
  * ① max_tokens 抬到 512
  *    实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""
@@ -82,6 +134,8 @@ export function loosenAdditionalProperties(node) {
  *    「Stream ended without finish_reason」然后重试（实测 2026-10-27）。
  *
  * ③ tools 里的 additionalProperties: {} → true（见 looser 的注释）
+ *
+ * ④ tools 里的 items: {} → 删除（见 loosenEmptyItems 的注释）
  *
  * 没改到时返回原始字符串（省一次序列化 —— 54 个工具的请求体不小）。
  *
@@ -116,7 +170,9 @@ export function rewriteRequestBody(raw) {
   if (Array.isArray(j.tools)) {
     for (const t of j.tools) {
       const p = t?.function?.parameters
-      if (p && typeof p === "object" && loosenAdditionalProperties(p)) changed = true
+      if (!p || typeof p !== "object") continue
+      if (loosenAdditionalProperties(p)) changed = true
+      if (loosenEmptyItems(p)) changed = true
     }
   }
 
@@ -163,7 +219,7 @@ export function makeLoader(c) {
         let body = init?.body
         if (body === undefined && req) body = await req.text()
 
-        // 三处请求体改写，全在 rewriteRequestBody 里（那里有实测出处）
+        // 四处请求体改写，全在 rewriteRequestBody 里（那里有实测出处）
         body = rewriteRequestBody(body)
 
         return fetch(url, {

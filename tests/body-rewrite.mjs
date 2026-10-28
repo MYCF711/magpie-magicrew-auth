@@ -1,16 +1,21 @@
-// 请求体改写：additionalProperties:{} → true + max_tokens / stream_options
+// 请求体改写：additionalProperties:{} → true + items:{} 删除
+//             + max_tokens / stream_options
 //
 //   node tests/body-rewrite.mjs
 //
 // 纯函数测试，不联网、不读凭据、不依赖 magpie。
 //
-// 为什么单独立一个文件：这三处改写都在热路径上（每个请求都过），
-// 而 `additionalProperties` 那条的依据是上游对**空对象**回 400 ——
+// 为什么单独立一个文件：这些改写都在热路径上（每个请求都过），
+// 而 schema 那两条的依据是上游对**空对象**回 400 ——
 // 一旦改写把有约束的 schema 也换掉，就会静默改变模型看到的工具定义，
 // 这种错不会报错，只会让工具调用行为变得莫名其妙。所以边界要钉死。
 
 import assert from "node:assert/strict"
-import { loosenAdditionalProperties, rewriteRequestBody } from "../src/hooks/loader.mjs"
+import {
+  loosenAdditionalProperties,
+  loosenEmptyItems,
+  rewriteRequestBody,
+} from "../src/hooks/loader.mjs"
 
 let pass = 0
 let fail = 0
@@ -90,7 +95,69 @@ check("空对象 / null / 原始值返回 false", () => {
   assert.equal(loosenAdditionalProperties(42), false)
 })
 
-console.log("\nrewriteRequestBody —— 一次 parse 搞定三处，没改就不重新序列化")
+console.log("\nloosenEmptyItems —— items: {} / true 删除，其余一律不动")
+
+check("{} 删除，并报告改到了", () => {
+  const p = { type: "object", properties: { functions: { type: "array", items: {} } } }
+  assert.equal(loosenEmptyItems(p), true)
+  assert.equal(p.properties.functions.items, undefined)
+})
+
+check("true 也删除（与 {} 一样表示「任意元素」）", () => {
+  const p = { type: "array", items: true }
+  assert.equal(loosenEmptyItems(p), true)
+  assert.equal(p.items, undefined)
+})
+
+// ⚠ 上游只对**空对象**回 invalid JSON Schema；带一个键就收。
+// 如果把 {description} 也删了，就白白丢掉客户端给的说明。
+check('{description:"x"} 保留 —— 上游收，不是"缺 type 就炸"', () => {
+  const p = { type: "array", items: { description: "x" } }
+  assert.equal(loosenEmptyItems(p), false)
+  assert.deepEqual(p.items, { description: "x" })
+})
+
+check('{type:"string"} 保留', () => {
+  const p = { type: "array", items: { type: "string" } }
+  assert.equal(loosenEmptyItems(p), false)
+  assert.deepEqual(p.items, { type: "string" })
+})
+
+check("false 绝对不动（「数组必须为空」，删掉就是放开）", () => {
+  const p = { type: "array", items: false }
+  assert.equal(loosenEmptyItems(p), false)
+  assert.equal(p.items, false)
+})
+
+check("嵌套在 properties / items / anyOf 里也删", () => {
+  const p = {
+    type: "object",
+    properties: {
+      a: { type: "array", items: { type: "array", items: {} } },
+      b: { anyOf: [{ type: "array", items: {} }, { type: "string" }] },
+    },
+  }
+  assert.equal(loosenEmptyItems(p), true)
+  assert.equal(p.properties.a.items.items, undefined)
+  assert.equal(p.properties.b.anyOf[0].items, undefined)
+})
+
+check("属性名恰好叫 items 的，删的是它自己的 items 键，不是这个属性", () => {
+  const p = { type: "object", properties: { items: { type: "array", items: {} } } }
+  assert.equal(loosenEmptyItems(p), true)
+  assert.ok(p.properties.items)
+  assert.equal(p.properties.items.items, undefined)
+})
+
+check("空对象 / null / 原始值返回 false", () => {
+  assert.equal(loosenEmptyItems({}), false)
+  assert.equal(loosenEmptyItems(null), false)
+  assert.equal(loosenEmptyItems(undefined), false)
+  assert.equal(loosenEmptyItems("x"), false)
+  assert.equal(loosenEmptyItems(42), false)
+})
+
+console.log("\nrewriteRequestBody —— 一次 parse 搞定四处，没改就不重新序列化")
 
 check("tools 里的 {} 改成 true", () => {
   const raw = JSON.stringify({
@@ -100,6 +167,60 @@ check("tools 里的 {} 改成 true", () => {
   const out = rewriteRequestBody(raw)
   const j = JSON.parse(out)
   assert.equal(j.tools[0].function.parameters.additionalProperties, true)
+})
+
+check("tools[40] 的 functions.items:{} 被删（真实报错的那一处）", () => {
+  const tools = []
+  for (let i = 0; i < 40; i++) {
+    tools.push({ type: "function", function: { name: `tool_${i}`, parameters: { type: "object" } } })
+  }
+  tools.push({
+    type: "function",
+    function: {
+      name: "functions_probe",
+      parameters: {
+        type: "object",
+        properties: { functions: { type: "array", items: {} } },
+        required: ["functions"],
+      },
+    },
+  })
+  const raw = JSON.stringify({ tools })
+  const out = JSON.parse(rewriteRequestBody(raw))
+  assert.equal(out.tools[40].function.parameters.properties.functions.items, undefined)
+  assert.deepEqual(out.tools[40].function.parameters.properties.functions, { type: "array" })
+  assert.deepEqual(out.tools[40].function.parameters.required, ["functions"])
+  // 其余 40 个工具一字不动
+  assert.deepEqual(out.tools[0], tools[0])
+  assert.deepEqual(out.tools[39], tools[39])
+})
+
+check("additionalProperties 与 items 两处同时改，一次 parse 都生效", () => {
+  const raw = JSON.stringify({
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "t",
+          parameters: {
+            type: "object",
+            properties: { functions: { type: "array", items: {} } },
+            additionalProperties: {},
+          },
+        },
+      },
+    ],
+  })
+  const out = JSON.parse(rewriteRequestBody(raw))
+  assert.equal(out.tools[0].function.parameters.additionalProperties, true)
+  assert.equal(out.tools[0].function.parameters.properties.functions.items, undefined)
+})
+
+check("items:{description} 不被改动 → 返回同一个字符串", () => {
+  const raw = JSON.stringify({
+    tools: [{ type: "function", function: { name: "t", parameters: { type: "array", items: { description: "x" } } } }],
+  })
+  assert.equal(rewriteRequestBody(raw), raw)
 })
 
 check("其余字段一字不动（等价改写，不是重排）", () => {
