@@ -7,7 +7,7 @@
 //
 // ⚠ 这不是「状态管理」，是缓存：删掉全部，插件照样能跑（只是要重新登录一次）。
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fetchOwnInviteCode } from "./api.mjs"
@@ -113,9 +113,103 @@ function writeInvite(siteId, code) {
   return c
 }
 
-/** 这次登录该带的邀请码：记录里的，没有就作者码 */
+/** 这次登录该带的邀请码：策略 → 记录 → 作者码 */
 function inviteToUse(siteId) {
+  const pol = readInvitePolicy(siteId)
+  if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) return pol.code
   return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
+}
+
+// ═══ 邀请上级策略 ═══════════════════════════════════════════════════
+//
+// 三种模式，登录时选，落盘后一直生效：
+//
+//   auto   （默认）用「最后一个登录 / 签到的号」的码 —— 老行为，会漂移
+//   fixed  固定挂到某个已登录账号（存 org + code）
+//   custom 任意码，用户自己填
+//
+// 为什么要这个：`rollInvite` 会在每次登录、每天签到把
+// magicrew-invite-<site>.json 覆盖成最后那个号的码。奖励虽然不出圈，
+// 但「新号挂谁」就变成随机的了 —— 用户要的是可预期。
+//
+// ⚠ fixed 存的是**解析好的码**，不是「登录时再去问那个号要」：
+//   要问就得多一条带那个账号 jwt 的请求，而签到 / 登录路径上都没有它。
+//   代价是对方换码后要重新选一次（码实测长期不变）。
+
+function invitePolicyPath(siteId) {
+  return join(cacheDir(), `magicrew-invite-policy-${siteId}.json`)
+}
+
+export function readInvitePolicy(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(invitePolicyPath(siteId), "utf8"))
+    const mode = ["auto", "fixed", "custom"].includes(v?.mode) ? v.mode : "auto"
+    return {
+      mode,
+      code: String(v?.code || "").trim(),
+      org: String(v?.org || "").trim(),
+      accountId: String(v?.accountId || "").trim(),
+      at: String(v?.at || ""),
+    }
+  } catch {
+    return { mode: "auto", code: "", org: "", accountId: "", at: "" }
+  }
+}
+
+export function writeInvitePolicy(siteId, policy) {
+  try {
+    const f = invitePolicyPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(
+      f,
+      JSON.stringify({
+        mode: policy?.mode === "auto" ? "auto" : policy?.mode,
+        code: String(policy?.code || "").trim(),
+        org: String(policy?.org || "").trim(),
+        accountId: String(policy?.accountId || "").trim(),
+        at: new Date().toISOString(),
+      }),
+    )
+  } catch {}
+}
+
+/** 清掉策略 —— 下次登录会重新问一次（「改回去」的唯一入口） */
+export function clearInvitePolicy(siteId) {
+  try {
+    unlinkSync(invitePolicyPath(siteId))
+  } catch {}
+}
+
+// ═══ 见过哪些账号的码 ═══════════════════════════════════════════════
+//
+// `rollInvite` 每天签到会给**每个**账号跑一次，顺手把它的码记下来 ——
+// 于是登录时那个「挂在谁名下」的下拉框不用发网络请求就能填满。
+// （prompts 的 options 是同步生成的，等不了 API。）
+
+function inviteCodesPath(siteId) {
+  return join(cacheDir(), `magicrew-invite-codes-${siteId}.json`)
+}
+
+export function readAccountCodes(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(inviteCodesPath(siteId), "utf8"))
+    return v && typeof v === "object" ? v : {}
+  } catch {
+    return {}
+  }
+}
+
+export function noteAccountCode(siteId, org, code, accountId) {
+  const o = String(org || "").trim()
+  const cd = String(code || "").trim()
+  if (!o || !cd) return
+  try {
+    const all = readAccountCodes(siteId)
+    all[o] = { code: cd, accountId: String(accountId || ""), at: new Date().toISOString() }
+    const f = inviteCodesPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify(all))
+  } catch {}
 }
 
 /** 滚动请求最多等这么久 —— 登录流程不能被它拖死 */
@@ -137,7 +231,10 @@ async function rollInvite(siteId, jwt, org, host) {
       fetchOwnInviteCode(jwt, org, host),
       new Promise((_, reject) => setTimeout(() => reject(new Error("超时")), INVITE_TIMEOUT_MS)),
     ])
-    return writeInvite(siteId, own.code)
+    const code = writeInvite(siteId, own.code)
+    // 顺手记下「哪个账号的码是多少」—— 登录时的下拉框靠它填，不用发请求
+    noteAccountCode(siteId, org, code)
+    return code
   } catch (e) {
     if (process.env.MAGICREW_DEBUG) {
       console.error(`[magicrew] 滚动邀请码失败（${siteId}）：${e?.message ?? e}`)
