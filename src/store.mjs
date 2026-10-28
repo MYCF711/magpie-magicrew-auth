@@ -281,33 +281,58 @@ function readAccountLabels() {
   return out
 }
 
+/**
+ * 删除账号后的确定性清理：码缓存去掉死号；滚动码若属死号一并清掉
+ * （不清掉的话，缓存一清 inviteToUse 就查不到归属，反判成「归属不明」保留）。
+ *
+ * ⚠ 新号竞态保护（2026-10-29 实测复现）：注册登录时 rollInvite 先记码，
+ *   magpie 把新号写进 plugin-auth.json 在**之后** —— 此刻 liveOrgs 看不到新号，
+ *   直接清理会把刚记的码当死号删掉，页面要等下次登录/签到才有它。
+ *   所以 **10 分钟内记录的条目不参与清理**；这窗口内 inviteToUse 的死号门
+ *   （owner 死→回落）仍然兜底。
+ * 账号文件读不到（liveOrgs === null）时不动，避免误清。
+ */
+const FRESH_ACCOUNT_MS = 10 * 60_000
+
+export function pruneDeadAccounts(siteId) {
+  const live = liveOrgs(siteId)
+  if (!live || !live.size) return null
+  const codes = readAccountCodes(siteId)
+  const fresh = (v) => {
+    try {
+      return Date.now() - Date.parse(v?.at || "") < FRESH_ACCOUNT_MS
+    } catch {
+      return false
+    }
+  }
+  const dead = Object.keys(codes).filter((org) => !live.has(org) && !fresh(codes[org]))
+  if (!dead.length) return { dead: [], rollingCleared: false }
+  let rollingCleared = false
+  const rollingNow = readInvite(siteId)
+  if (rollingNow && dead.some((org) => codes[org]?.code === rollingNow)) {
+    try {
+      unlinkSync(invitePath(siteId))
+      rollingCleared = true
+    } catch {}
+  }
+  const kept = { ...codes }
+  for (const org of dead) delete kept[org]
+  try {
+    const f = inviteCodesPath(siteId)
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, JSON.stringify(kept))
+  } catch {}
+  return { dead, rollingCleared }
+}
+
 export function syncInvitePage() {
   try {
     const labels = readAccountLabels()
     const sites = {}
     for (const site of ["magicrew", "magicrew-intl"]) {
       const live = liveOrgs(site)
+      pruneDeadAccounts(site)
       let codes = readAccountCodes(site)
-      // 已删除的账号从页面和缓存里清掉（账号文件读不到时不动，避免误清）
-      if (live && live.size) {
-        const dead = Object.keys(codes).filter((org) => !live.has(org))
-        if (dead.length) {
-          // 滚动码若属于死号，先清掉 —— 不然缓存一清，inviteToUse 就查不到归属了
-          const rollingNow = readInvite(site)
-          if (rollingNow && dead.some((org) => codes[org]?.code === rollingNow)) {
-            try {
-              unlinkSync(invitePath(site))
-            } catch {}
-          }
-          codes = { ...codes }
-          for (const org of dead) delete codes[org]
-          try {
-            const f = inviteCodesPath(site)
-            mkdirSync(dirname(f), { recursive: true })
-            writeFileSync(f, JSON.stringify(codes))
-          } catch {}
-        }
-      }
       for (const [org, v] of Object.entries(codes)) {
         if (v && !v.accountId && labels[org]) v.accountId = labels[org]
       }
