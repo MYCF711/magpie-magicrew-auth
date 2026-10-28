@@ -12,6 +12,117 @@
 
 import { ensureKey, accountOf } from "../keys.mjs"
 
+/**
+ * 把 JSON Schema 里的 `additionalProperties` **非布尔值**原地换成 `true`。
+ *
+ * 上游只认布尔值，收到任何对象都回 HTTP 400
+ * `{"error":{"message":"模型响应失败","code":4017}}`，整个请求被拒。
+ * 实测（2026-10-28，glm-5.3-flash 与 deepseek-v4.1-flash **两个模型完全一致**，
+ * 同一把 key、同一份请求、只改这一个字段）：
+ *
+ *   additionalProperties: 缺省              → 200
+ *   additionalProperties: false             → 200
+ *   additionalProperties: true              → 200
+ *   additionalProperties: {}                → 400 code 4017
+ *   additionalProperties: {type:"string"}   → 400 code 4017
+ *   additionalProperties: {type:"string",description:"x"} → 400 code 4017
+ *
+ * ⚠ 注意**不只是空对象**。有约束的 schema 形态（`{type:"string"}`）一样被拒 ——
+ * 这一点比"上游只认 true/false"更进一步：它根本不支持 schema 形态。
+ * 所以这里一律换成 `true`，属于**降级放宽**：
+ *
+ *   · `{}`            → `true`  语义等价（都是"任意，不加约束"）
+ *   · `{type:"string"}` → `true`  **不等价** —— 丢掉了"额外属性必须是 string"的约束
+ *
+ * 为什么接受这个不等价：上游无法表达它，保留原值就是整个请求失败。两害相权，
+ * 让工具调用能跑（可能多出未声明的字段）比让 agent 完全不可用要好。方向也安全 ——
+ * 是放宽不是收紧，不会让原本合法的调用被拒。
+ *
+ * 命中来源：ZCode / Claude Code 系客户端生成 schema 时爱写 `{}`；
+ * 一次真实请求里 54 个工具中的 `ExitPlanMode` 与 `CreateWorkflow` 就这么写。
+ * 客户端没写错（按规范 `{}` 与 `true` 等价），是上游兼容性不足，插件这边兜住。
+ *
+ * @returns {boolean} 有没有改到
+ */
+export function loosenAdditionalProperties(node) {
+  if (!node || typeof node !== "object") return false
+  if (Array.isArray(node)) {
+    let any = false
+    for (const n of node) if (loosenAdditionalProperties(n)) any = true
+    return any
+  }
+  let changed = false
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "additionalProperties") {
+      // 布尔值上游认，原样留着（false 是"不许额外属性"，语义相反，绝对不能动）
+      if (typeof v !== "boolean") {
+        node[k] = true
+        changed = true
+      }
+      continue
+    }
+    if (v && typeof v === "object" && loosenAdditionalProperties(v)) changed = true
+  }
+  return changed
+}
+
+/**
+ * 改写发往上游的请求体。**一次 parse，三处改写都在这**。
+ *
+ * 三处都是实测出来的，不是猜的：
+ *
+ * ① max_tokens 抬到 512
+ *    实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""
+ *                        512 → 正常出话（reasoning 208 / total 233）
+ *
+ * ② 流式请求补 stream_options.include_usage
+ *    magicrew 在 stream:true 下**默认不返回 usage**；补上之后，[DONE]
+ *    之前会多一条 {"choices":[],"usage":{...}} 的收尾 chunk。
+ *    magpie 新版靠这条收尾 chunk 判定「流正常结束了」——缺了它就报
+ *    「Stream ended without finish_reason」然后重试（实测 2026-10-27）。
+ *
+ * ③ tools 里的 additionalProperties: {} → true（见 looser 的注释）
+ *
+ * 没改到时返回原始字符串（省一次序列化 —— 54 个工具的请求体不小）。
+ *
+ * @param {unknown} raw
+ * @returns {unknown} 改了就是新字符串，没改就原样返回
+ */
+export function rewriteRequestBody(raw) {
+  if (typeof raw !== "string") return raw
+  // 粗筛：三个关键字一个都没有，就不必 parse
+  if (!/"stream"|"max_tokens"|"tools"/.test(raw)) return raw
+
+  let j
+  try {
+    j = JSON.parse(raw)
+  } catch {
+    return raw
+  }
+  if (!j || typeof j !== "object") return raw
+
+  let changed = false
+
+  if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) {
+    j.max_tokens = 512
+    changed = true
+  }
+
+  if (j.stream === true && !j.stream_options) {
+    j.stream_options = { include_usage: true }
+    changed = true
+  }
+
+  if (Array.isArray(j.tools)) {
+    for (const t of j.tools) {
+      const p = t?.function?.parameters
+      if (p && typeof p === "object" && loosenAdditionalProperties(p)) changed = true
+    }
+  }
+
+  return changed ? JSON.stringify(j) : raw
+}
+
 export function makeLoader(c) {
   return async (getAuth) => {
     const auth = await getAuth()
@@ -52,34 +163,8 @@ export function makeLoader(c) {
         let body = init?.body
         if (body === undefined && req) body = await req.text()
 
-        // 改写两处请求体，都为实测出来的：
-        //
-        // ① max_tokens 抬到 512
-        //    实测 glm-5.3-flash：64 → finish_reason:"length" 且 content:""
-        //                        512 → 正常出话（reasoning 208 / total 233）
-        //
-        // ② 流式请求补 stream_options.include_usage
-        //    magicrew 在 stream:true 下**默认不返回 usage**；补上之后，[DONE]
-        //    之前会多一条 {"choices":[],"usage":{...}} 的收尾 chunk。
-        //    magpie 新版靠这条收尾 chunk 判定「流正常结束了」——缺了它就报
-        //    「Stream ended without finish_reason」然后重试（实测 2026-10-27）。
-        //    控制台里看到的就是：模型请求重试 (3/5) · Stream ended without finish_reason
-        if (typeof body === "string" && body.includes('"stream"')) {
-          try {
-            const j = JSON.parse(body)
-            if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) j.max_tokens = 512
-            if (j.stream === true && !j.stream_options) {
-              j.stream_options = { include_usage: true }
-            }
-            body = JSON.stringify(j)
-          } catch {}
-        } else if (typeof body === "string" && body.includes('"max_tokens"')) {
-          try {
-            const j = JSON.parse(body)
-            if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) j.max_tokens = 512
-            body = JSON.stringify(j)
-          } catch {}
-        }
+        // 三处请求体改写，全在 rewriteRequestBody 里（那里有实测出处）
+        body = rewriteRequestBody(body)
 
         return fetch(url, {
           method: init?.method ?? "POST",

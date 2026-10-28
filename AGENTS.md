@@ -65,6 +65,8 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 12 | 用户点「检查更新」显示有新提交，点了更新却没变化 | 本仓库是 **git 源**：magpie 比默认分支 HEAD 的 commit，只提示不自动更新，要用户点那一行的「更新」；更新后 `magpie plugin list` 的 commit 应变化 | 脚手架 UPDATING 一 |
 | 13 | 想让卡片标题 / 「源码」按钮对，去改了 magpie 的缓存 | 插件对 magpie 目录**只有读的份**；唯一载体是 `registry-entry.json`（提交给 `registry.json`） | internals 二 · README |
 | 14 | **卡片上额度正常，路由页里这个号却是「剩余额度未知」** | 窗口**不能标 `aside`**：magpie 的 `allowanceOf()` 把 `Aside`/`Text` 的窗口整条跳过，一条不剩 ⇒ 该号 `Known=false`（官网文档 issue #3650 明写）。判据：`curl -s http://127.0.0.1:3425/v1/magpie/trace`，看这个 provider 的 `known` 是 `true` 还是**字段缺失** | HOOKS 三 · `src/hooks/usage.mjs` 头 |
+| 15 | 接 ZCode / Claude Code 系客户端，带工具的请求回 `400 {"error":{"message":"模型响应失败","code":4017}}` | **上游的 `additionalProperties` 只认布尔值，任何对象形态都拒** —— 不只是 `{}`，`{type:"string"}` 这种有约束的 schema 一样 400（两个模型逐行一致）。判据：同一请求只把该字段换成 `true` → 200。改写已在 `rewriteRequestBody` 里做（非布尔一律换 true；**这是降级放宽、会丢约束**，取舍见 internals 十七） | internals 十七 · `tests/body-rewrite.mjs` |
+| 16 | 网关路径（agent 从 magpie 的 `/v1` 进来）报 `502 did not stream: token无效`，而 provider 显示已登录 | auth 里没带 org → `accountOf()` 落 `"default"` → 读不到真实账号的 key 槽 → 只能用 `auth.access`，它过了 2 小时就 403。`accountFor()` 已在**恰好一个真实账号**时兜到它；**多账号不猜**（猜错就是拿别人的 key 扣别人的积分） | internals 十四 · 十五 · `tests/account-fallback.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
@@ -132,7 +134,7 @@ git tag v0.3.16 && git push origin v0.3.16
 | 文件 | 管什么 | 什么时候读 |
 |---|---|---|
 | [README](./README.md) | 用户看的门面：功能、模型、安装 | 改用户可见行为时 |
-| [docs/internals.md](./docs/internals.md) | 16 章实测：两站同构、三层凭证、接口清单、协议要点 | 改代码前按章查 |
+| [docs/internals.md](./docs/internals.md) | 17 章实测：两站同构、三层凭证、接口清单、协议要点、工具 schema 兼容 | 改代码前按章查 |
 | [CHANGELOG.md](./CHANGELOG.md) | 每版一节 | 写新版本时 |
 | [CHECKLIST.md](./CHECKLIST.md) | 两张勾选表 | 两个交付门 |
 | 脚手架 [AGENTS.md](../magpie-plugin-scaffold/AGENTS.md) | 通用坑（九项清单、三条铁律、check 能查什么） | 第一次接触这个插件族时 |
