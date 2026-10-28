@@ -1052,3 +1052,84 @@ GET /v1/models            → id / object / created_at / owner_by
 
 magicrew 既不返回 `maxInputTokens`（`flows/models` 的 `configs` 只有 temperature），
 `/v1/models` 也只有 `id / object / created_at / owner_by` —— 所以走模型库这条路。
+
+---
+
+## 十七、上游不认 `additionalProperties: {}` —— 工具 schema 要在请求里兜住
+
+**症状**：接 ZCode / Claude Code 系客户端时，一次带 54 个工具定义的请求必定失败：
+
+```
+POST /v1/chat/completions
+→ HTTP 400 {"error":{"message":"模型响应失败","code":4017","request_id":"..."}}
+```
+
+换成简单请求（一两个工具）就正常 —— 所以看起来像"某些模型不行"或"工具太多"。
+
+### 根因
+
+这些客户端生成工具 schema 时，会把"允许任意额外属性"写成**空对象**：
+
+```json
+"parameters": { "type": "object", "properties": {...}, "additionalProperties": {} }
+```
+
+按 JSON Schema（draft-07）这是合法的 —— `additionalProperties` 的值是 schema 时，
+`{}` 表示"任意，不加约束"，与 `true` 语义等价。但**上游的适配层只认布尔值**，
+收到一个对象就整个请求拒掉，还只回一句"模型响应失败"，不说是哪个字段。
+
+### 最小复现（2026-10-28，同一把 key、同一份请求、只改这一个字段）
+
+| `additionalProperties` | glm-5.3-flash | deepseek-v4.1-flash |
+|---|---|---|
+| 缺省 | 200 | 200 |
+| `false` | 200 | 200 |
+| `true` | 200 | 200 |
+| `{}` | **400 code 4017** | **400 code 4017** |
+| `{type:"string"}` | **400 code 4017** | **400 code 4017** |
+| `{type:"string",description:"x"}` | **400 code 4017** | **400 code 4017** |
+
+**两个模型逐行一致。结论比「上游只认布尔」更狠：它根本不支持 schema 形态** ——
+不只是空对象，连 `{type:"string"}` 这种有约束的 schema 也一律拒。这一点很关键：
+只处理空对象的改写在真实请求里仍会 400（实测过，见下方「修法」）。
+
+### 修法：请求改写里做等价替换
+
+`src/hooks/loader.mjs` 的 `rewriteRequestBody` 里，`loosenAdditionalProperties()`
+递归扫 `tools[].function.parameters`，把**所有非布尔值**换成 `true`：
+
+```js
+"additionalProperties": 缺省         →  不动       // 等价于 true
+"additionalProperties": true         →  不动       // 上游认
+"additionalProperties": false        →  不动       // 「不许额外属性」，换掉就是反向放开
+"additionalProperties": {}           →  true       // 等价改写
+"additionalProperties": {type:"x"}   →  true       // ⚠ 降级放宽，丢了约束
+```
+
+**为什么接受那个不等价**：`{}` → `true` 是严格等价（都表示「任意，不加约束」）；
+`{type:"string"}` → `true` 丢掉了「额外属性必须是 string」这条约束。但上游无法表达它，
+保留原值就是整个请求失败。两害相权，让工具调用能跑（可能多出未声明的字段）
+比让 agent 完全不可用要好；方向也安全 —— 是放宽不是收紧，不会让原本合法的调用被拒。
+
+它与 `max_tokens`、`stream_options` 三处改写共用**一次** `JSON.parse`；
+没改到时返回原始字符串（省一次序列化 —— 54 工具的请求体可达上百 KB）。
+
+边界由 `tests/body-rewrite.mjs` 钉住（20 个断言）：非布尔一律换、布尔一律不动、
+其余字段一字不动、没改到就不重新序列化。
+
+### 为什么算插件的事，不算客户端的事
+
+按规范 `{}` 与 `true` 等价，客户端没写错；**上游的兼容性不足**。
+但插件是唯一能改请求体的地方（见 `src/hooks/loader.mjs` 顶部），
+在这里兜住比让每个用户去改 ZCode 的源码现实。
+
+### 同一处的第三个改写，以及它的教训
+
+同一次排查里还确认了两件事，都值得记住：
+
+1. **上游对"token 无效"回的是 HTTP 200**，body `{"code":403,"message":"token无效"}`，
+   且 `error` 字段是空数组（falsy）。**只看 HTTP 状态码会把失败当成功** ——
+   判断得用 `j.code !== 200`。排查时在这上面绕了很久。
+2. **插件宿主是运行时从 `~/.cache/magpie/bun/install-cache/` 加载的**，
+   不在 `plugin-host/host-*.js` 里；magpie 更新插件后会换目录（目录名带 commit hash），
+   要改当前实际加载的那个。

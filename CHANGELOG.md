@@ -1,5 +1,73 @@
 # 更新记录
 
+## 0.3.23 — 2026-10-28
+
+**修工具 schema 兼容 + 网关路径拿错 key，顺手把「签一把顶一把」测清楚了**
+
+### 一、上游不认 `additionalProperties: {}`
+
+接 ZCode / Claude Code 系客户端时，一次带 54 个工具定义的请求必回
+`400 {"error":{"message":"模型响应失败","code":4017}}`。根因是这些客户端把
+"允许任意属性"写成空对象，而上游适配层只认布尔值。
+
+同一把 key、同一份请求、只改这一个字段（2026-10-28 实测，glm-5.3-flash 与
+deepseek-v4.1-flash **逐行一致**）：
+
+```
+additionalProperties: 缺省             → 200
+additionalProperties: false            → 200
+additionalProperties: true             → 200
+additionalProperties: {}               → 400 code 4017
+additionalProperties: {type:"string"}  → 400 code 4017
+```
+
+**上游不是「只认布尔」，是根本不支持 schema 形态** —— 只处理空对象不够。这一点是拿
+改动端到端跑一遍才发现的：对照组 400 → 只改空对象**仍然 400** → 非布尔全换 true 才 200。
+
+`rewriteRequestBody` 里加递归规范化，把**所有非布尔值**换成 `true`。
+`{}` → `true` 是严格等价；`{type:"string"}` → `true` 是**降级放宽**、丢了约束，
+但上游无法表达它，留原值就是整个请求失败。方向安全（放宽不是收紧）。
+
+请求体三处改写（max_tokens / stream_options / additionalProperties）合并成**一次**
+`JSON.parse`，没改到时返回原始字符串（54 个工具的请求体可达上百 KB）。
+
+> 这处改动来自社区 PR #8（@baijiu666），按其最小复现验证后采纳。
+
+### 二、网关路径下拿不到正确账号的 key
+
+agent 从 magpie 的 `/v1/chat/completions` 进来时，`getAuth()` 返回的 auth
+**可能不带 org**，`accountOf()` 于是落到 `"default"` —— 读不到真实账号的 key 槽，
+`ensureKey` 只能退回 `auth.access`；它过了 2 小时就 403，表现成
+`502 {"message":"超级麦吉 did not stream: token无效"}`。
+
+新增 `accountFor()`：拿不到标识时，**只有该站点恰好一个真实账号**才退到它。
+0 个沿用原来的「首次接管」；**≥2 个不猜** —— 用错账号的 key 是拿别人的积分、
+别人的组织出话，本地看不出来，不是报错是错账。
+
+⚠ 多账号 + 网关路径这个组合仍然无解：需要 magpie 把 provider 实例 id 传给插件
+（`plugin-auth.json` 里已经有 `magicrew#p4nwa7` 这种 key），插件侧拿不到。
+在那之前只能保守 —— 宁可这次请求失败，也不借身份。
+
+### 三、「签一把顶一把」实测推翻（不涉及代码，只更正文档）
+
+`docs/internals.md` 第十四节一直挂着「要判定需要一次受控实验」。做完了：
+本机 12 把 key 逐把打 `GET /v1/models`（只读、不签发、不吊销），结果是
+
+- 同账号两把相隔 **67 秒**签发的 key **同时有效**
+- 所有 403 都对应 `expiresAt` 已过（剩 -173～-541 分），**没有**「时间没到就失效」的样本
+
+⇒ 后签的**不吊销**先签的；唯一失效条件是 2 小时到期。`AGENTS.md` 坑 3 与
+internals 十三节据此更正。「只留一把、只走唯一出口」的设计保留，理由改为
+「本地别分叉」而不是「互相吊销」。
+
+### 测试
+
+- `tests/body-rewrite.mjs` —— 20 个断言：只换空对象、非空 schema 不动、
+  其余字段一字不动、没改就不重新序列化
+- `tests/account-fallback.mjs` —— 10 个断言：单账号才兜、多账号不猜、空壳文件不算账号
+
+---
+
 ## 0.3.22 — 2026-10-28
 
 **余额窗口保留「今日 / 限时 / 永久」拆分展示**
