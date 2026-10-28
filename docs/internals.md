@@ -760,15 +760,62 @@ mgw_8f9a…（18:14 又一次续期换的）       → 网关请求 HTTP 200 正
 
 两把都活着。所以「一签就吊销」不成立。
 
-那第十三节那次 `mgw_63d4…` 为什么 403？现在只能说**不确定**，可能的原因三种，没分辨开：
+那第十三节那次 `mgw_63d4…` 为什么 403？当时只能说**不确定**，三种可能没分辨开：
 
 1. 它真的过期了（2 小时），而本地 `expires` 字段显示还没到 —— 说明 `expires` 不可信
 2. `PUT`（用 refresh_token 续期）会轮换/吊销旧的 `api_key`，而 `POST`（签发）不会
 3. 别的吊销条件（重新登录、并发续期）
 
-**要判定需要一次受控实验**：同一账号 POST 签两把、隔着时间各测一次，再把 PUT 也测一遍。
-在那之前，插件按「可能有吊销」来设计（只留一把、只走一个出口）是安全的，
-但**不要把它当成已知事实往下传**。
+### ✅ 结论（2026-10-28 晚，受控实验做完了）
+
+上面说「要判定需要一次受控实验」。实验做了，**答案落在第 1 条：只有「真的超过 2 小时」会 403，
+「签一把顶一把」不成立，`expires` 也只是个理论值**。
+
+做法：把本机**所有** key（magpie 的 `plugin-auth.json` 的 access + key-store 每个账号每个槽）
+逐把打 `GET /v1/models`——只读、不签发、不吊销、不花钱。探针留在仓库外，
+结论是这一张表（`剩余` = `expiresAt - now`，单位分钟）：
+
+```
+来源      站点            账号             槽       剩余(分)   判定
+magpie  magicrew-intl  67u4oe6fbenj   access   116        HTTP 200 MODELS=65
+magpie  magicrew       7fli52t2tc2b   access   115        HTTP 200 MODELS=44
+magpie  magicrew       66p0q56qo47j   access   115        HTTP 200 MODELS=44
+magpie  magicrew       h97gkbu8bruj   access   115        HTTP 200 MODELS=44
+store   magicrew-intl  67u4oe6fbenj   a*       116        HTTP 200 MODELS=65
+store   magicrew-intl  67u4oe6fbenj   b        -181       code=403 "token无效"
+store   magicrew       66p0q56qo47j   a*       -227       code=403 "token无效"
+store   magicrew       66p0q56qo47j   b        -541       code=403 "token无效"
+store   magicrew       7fli52t2tc2b   a*       -173       code=403 "token无效"
+store   magicrew       7fli52t2tc2b   b        -286       code=403 "token无效"
+store   magicrew       h97gkbu8bruj   a*       117        HTTP 200 MODELS=44
+store   magicrew       h97gkbu8bruj   b        -228       code=403 "token无效"
+```
+
+两条判据：
+
+**① 403 与「剩余分钟数」完全一致** —— 每一个 403 的剩余都是负数（-173 到 -541），
+每一个 200 的剩余都是正数。**没有一个「时间没到却不认」的样本。**
+所以「本地时间没到但服务端已经吊销」这个状态，本次实测里根本不存在。
+
+**② 同一账号同时有两把活 key，签发时刻相差 67 秒：**
+
+```
+magpie access  expires 2026-10-28T14:39:56.898Z   → 200
+store  槽 a    expires 2026-10-28T14:41:03.000Z   → 200
+```
+
+两把都是 2 小时有效期，也就是一把签于 12:39:56、另一把签于 12:41:03 —— **后签的没有顶掉先签的**。
+
+⇒ **一条账号一把活 key 这个说法彻底作废**。`POST` 与 `PUT` 都不吊销已签出的 key，
+唯一的失效条件是 2 小时到期。
+
+### 那这条为什么必须写下来
+
+2026-10-28 的 PR #8 就是被「时间没到但已被顶掉」这个前提带偏的：它据此把
+`ensureKey` 改成「优先用 `auth.access`」，并加了一个跨账号挑活 key 的兜底。
+前提不成立 ⇒ 改动没有依据；而那个兜底会**把别的账号的 key 交出去**
+（实测：auth 无 org 时 PR 分支返回了 `h97gkbu8bruj` 账号的 key，
+而 main 返回调用方自己的）。教训不是「多加一层兜底」，是**先把前提测了再改代码**。
 
 ### 保活的正确说法
 
