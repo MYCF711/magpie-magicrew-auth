@@ -1,5 +1,53 @@
 # 更新记录
 
+## 0.3.24 — 2026-10-28
+
+**修 `items: {}` 导致的整轮 400**
+
+### 症状
+
+用户的一次普通对话直接失败，界面只显示：
+
+```
+本轮运行失败 400: {"code":null,"message":"超级麦吉: HTTP 400 请求错误:
+{\"error\":{\"code\":\"InvalidParameter\",\"message\":\"tools.40.function.parameters/
+ properties/functions/items: invalid JSON Schema; check the schema keywords
+ and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+### 根因
+
+某个工具的参数 schema 里，数组的 `items` 是**空对象 `{}`**。上游的 JSON Schema
+校验器只拒这一种空 schema 形态；`items:{description:"x"}`、`items:{type:"string"}`、
+缺省 `items` 都是 200。国内站 `magicrew` 与国际站 `magicrew-intl` 的报错逐行一致。
+
+按 JSON Schema 规范 `items:{}` 是合法的（"任意元素"），客户端没写错；这是上游
+兼容性不足。但插件是唯一能改请求体的地方。
+
+### 修法
+
+`src/hooks/loader.mjs` 新增 `loosenEmptyItems()`，在 `rewriteRequestBody` 里递归扫
+`tools[].function.parameters`：
+
+```
+items: {}      → 删除      // JSON Schema 缺省值就是 {}，严格等价
+items: true    → 删除      // 同上；上游对它回的是另一种 400
+items: false   → 不动      // 「数组必须为空」，删掉就是放开
+items: {...}   → 不动      // 有任何一个键，上游都收
+```
+
+与 `additionalProperties`、`max_tokens`、`stream_options` 共用一次 `JSON.parse`；
+没改到时仍返回原始字符串。
+
+### 验证
+
+- `tests/body-rewrite.mjs`：31 个断言（新增 11 个），`items:{}` / `true` 删除、
+  `{description}` / `{type}` / `false` 不动、`tools[40]` 命中、combined 改写、不误伤。
+- 端到端（2026-10-28）：41 个工具、第 41 个带 `properties.functions.items:{}`，
+  原样请求 → `400 tools.40.../items`；过 `rewriteRequestBody` → `200`。
+  国内站、国际站都跑过。
+
 ## 0.3.23 — 2026-10-28
 
 **修工具 schema 兼容 + 网关路径拿错 key，顺手把「签一把顶一把」测清楚了**

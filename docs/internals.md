@@ -1055,7 +1055,12 @@ magicrew 既不返回 `maxInputTokens`（`flows/models` 的 `configs` 只有 tem
 
 ---
 
-## 十七、上游不认 `additionalProperties: {}` —— 工具 schema 要在请求里兜住
+## 十七、上游不认空 schema —— `additionalProperties: {}` 与 `items: {}`
+
+> 两处是同一类兼容性问题的两个面：客户端按 JSON Schema 规范写出**空对象**，
+> 上游的校验器/适配层拒收。都只能在请求改写里兜。
+
+### 一、`additionalProperties: {}` → `400 code 4017`
 
 **症状**：接 ZCode / Claude Code 系客户端时，一次带 54 个工具定义的请求必定失败：
 
@@ -1111,11 +1116,53 @@ POST /v1/chat/completions
 保留原值就是整个请求失败。两害相权，让工具调用能跑（可能多出未声明的字段）
 比让 agent 完全不可用要好；方向也安全 —— 是放宽不是收紧，不会让原本合法的调用被拒。
 
-它与 `max_tokens`、`stream_options` 三处改写共用**一次** `JSON.parse`；
+它与 `max_tokens`、`stream_options`、`items: {}` 四处改写共用**一次** `JSON.parse`；
 没改到时返回原始字符串（省一次序列化 —— 54 工具的请求体可达上百 KB）。
 
-边界由 `tests/body-rewrite.mjs` 钉住（20 个断言）：非布尔一律换、布尔一律不动、
+边界由 `tests/body-rewrite.mjs` 钉住（31 个断言）：非布尔一律换、布尔一律不动、
 其余字段一字不动、没改到就不重新序列化。
+
+### 二、`items: {}` → `400 invalid JSON Schema`
+
+**症状**（2026-10-28，用户截图原文）：
+
+```
+HTTP 400
+{"code":null,"message":"超级麦吉: HTTP 400 请求错误: {\"error\":{\"code\":\"InvalidParameter\",
+ \"message\":\"tools.40.function.parameters/properties/functions/items: invalid JSON Schema;
+ check the schema keywords and references Request id: ...\",\"param\":\"\",\"type\":\"BadRequest\"}}",
+ "param":null,"type":"invalid_request_error"}
+```
+
+与 `additionalProperties` 那条不同：这次上游**给了完整路径**（`tools.40.../items`），
+而且国内站与 `magicrew-intl` 的报错逐行一致。
+
+**最小复现**：41 个工具，第 41 个的参数是
+
+```json
+{"type":"object","properties":{"functions":{"type":"array","items":{}}},"required":["functions"]}
+```
+
+| `items` | 结果 |
+|---|---|
+| 缺省 | 200 |
+| `{}` | **400 invalid JSON Schema**（路径 `.../properties/functions/items`） |
+| `{description:"x"}` | 200 —— 空对象才炸，不是"缺 type" |
+| `{type:"string"}` | 200 |
+| `true` | 400 `模型响应失败`（另一条 400） |
+| `false` | 400 `模型响应失败` |
+
+**根因**：客户端用 `z.array(z.unknown())` / 动态函数列表生成 schema 时，数组元素序列化成
+`{}`。JSON Schema 里 `items` 的缺省值本来就是 `{}` —— "任意元素"，所以
+`items: {}` 删掉是**严格等价**，不是降级放宽；`items: true` 同理。
+`items: false`（"数组必须为空"）语义不同，不能删，原样留着。
+
+**修法**：`loosenEmptyItems()` 递归删 `items: {}` 与 `items: true`，与
+`loosenAdditionalProperties()` 在同一个 `rewriteRequestBody` 里各跑一遍。
+
+**端到端验证**（2026-10-28）：同一份 41 工具请求
+`raw → 400 tools.40.../items`；过 `rewriteRequestBody` 后 `→ 200`。
+国内站、国际站都验过。
 
 ### 为什么算插件的事，不算客户端的事
 
@@ -1123,7 +1170,7 @@ POST /v1/chat/completions
 但插件是唯一能改请求体的地方（见 `src/hooks/loader.mjs` 顶部），
 在这里兜住比让每个用户去改 ZCode 的源码现实。
 
-### 同一处的第三个改写，以及它的教训
+### 同一处这些改写的两个教训
 
 同一次排查里还确认了两件事，都值得记住：
 
