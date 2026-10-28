@@ -181,6 +181,16 @@ check("message：0=当前滚动账号，1..N=账号；0 指向的那格隐藏", 
   seedRolling()
 })
 
+check("点开登录方式时 prompts getter 重新生成（滚动码变了文本跟着变）", () => {
+  const m = inviteMethod()
+  const before = m.prompts[0].message
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
+  const after = m.prompts[0].message
+  assert.notEqual(after, before)
+  assert.match(after, /0 = 177\*\*\*\*0000（IVOTHER00001）/)
+  seedRolling()
+})
+
 check("ask 每次按最新清单生成；已填 invite 后不再问", async () => {
   const m = inviteMethod()
   const p = await m.ask({})

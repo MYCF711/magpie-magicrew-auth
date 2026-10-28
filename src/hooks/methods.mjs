@@ -671,7 +671,11 @@ export function makeMethods(c) {
       type: "api",
       keyless: true,
       label: `${c.SHORT} 邀请上级`,
-      prompts: [{ type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }],
+      // getter：每次 magpie 取 prompts（点开登录方式时）都按当时滚动码/账号清单重新生成，
+      // 不是插件加载时那一份
+      get prompts() {
+        return [{ type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }]
+      },
       async ask(inputs) {
         if (inputs && Object.prototype.hasOwnProperty.call(inputs, "invite")) return null
         return { type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }
