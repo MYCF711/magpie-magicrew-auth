@@ -8,6 +8,7 @@
 // 签到逻辑在独立模块里**按需加载**：它挂了，登录/模型/额度照常工作。
 
 import { rollInvite } from "../store.mjs"
+import { kick } from "../auto-maintenance.mjs"
 
 export function makeCheckin(c) {
   return async (getAuth) => {
@@ -20,7 +21,12 @@ export function makeCheckin(c) {
       // rollInvite 内部自带超时和 try/catch，失败不影响签到。
       await rollInvite(c.id, auth.jwt, auth.org, c.host)
       const { runCheckin } = await import("../tasks.mjs")
-      return await runCheckin({ ...auth, host: c.host })
+      const result = await runCheckin({ ...auth, host: c.host })
+      // 签到成功后再给自动更新一次机会（config 启动时已试过一次；
+      // 这里覆盖「magpie 长期不重启」的情况）。kick 自己有 6 小时节流，
+      // 且不阻塞签到结果。
+      kick(c).catch(() => {})
+      return result
     } catch (e) {
       return { outcome: "failed", message: String(e?.message ?? e) }
     }
