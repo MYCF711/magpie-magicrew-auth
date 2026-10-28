@@ -2,21 +2,16 @@
 //
 //   登录成功  → issueAndStore()  签一把放进「另一个槽」，切过去
 //   loader    → ensureKey()      快过期就把新的签到另一个槽，切过去；旧的留着当回退
-//   refresh   → ⚠ **不经过本模块**。src/hooks/refresh.mjs 自己调
-//               api.refreshGatewayKey(auth.refresh)，magpie 拿到的不是这一把。
+//   refresh   → renewViaStore()  续期、写回 store；magpie 拿到的就是 store 里这一把
 //
 // **每个账号一套槽，互不干扰** —— 同站点登两个账号时，第二个人登录不会碰第一个人的 key。
 // 账号标识用 `org`（组织码），拿不到才退回 accountId。
 //
-// ⚠ 上面那条 refresh 是「唯一出口」这个设计里**唯一没落地的口子**（2026-10-27 核对）：
-//   refresh_token 是一次性轮换的，两条路径各用各的那份会分叉 ——
-//   ensureKey 轮换后 store 里是新值，refresh.mjs 手里 magpie 的还是旧值，
-//   再调就是 401 → magpie 判定「登录已失效」→ 让用户重新登录。
-//
-//   目前不会触发，因为 **store 从来没被写过**（本机 magicrew-key-*.json 一个都没有，
-//   说明 ensureKey 从没执行过 —— 没发过模型请求）。但这意味着：
-//   **若将来要给 checkin 补 ensureKey，必须先把这个钩子也收敛进来**，
-//   否则就是亲手把「一条路」掰成两条，用「多写一句文档」换「用户莫名掉登录」。
+// ⚠ refresh 这条口子曾经是「唯一出口」设计里唯一没落地的地方（2026-10-27 核对）：
+//   refresh.mjs 自己调 api.refreshGatewayKey(auth.refresh)，拿到的 key 只交给 magpie，
+//   与 store 各存一份 —— refresh_token 一次性轮换，两条路径必然分叉。
+//   0.3.29（PR #12）起已收敛到 renewViaStore()：与 ensureKey 共用 renewOnce 锁和
+//   同一个 key-store，refresh_token 也只从这里轮换出去。
 
 import { issueGatewayKey, refreshGatewayKey } from "./api.mjs"
 import {
@@ -82,6 +77,150 @@ export function accountFor(c, auth) {
     if (live.length === 1) return live[0]
   } catch {}
   return direct
+}
+
+/**
+ * 这个账号**所有**可能能用的 key，按到期时间从晚到早排。
+ *
+ * 为什么需要「多把」：key 有两条签发路径 —— magpie 的 `auth.refresh` 一条
+ * （src/hooks/refresh.mjs）、本模块的 `ensureKey` 一条，两边各写各的。
+ * api_key 只活 2 小时，两条路各自什么时候续、续到哪把，本地并不一致 ——
+ * 静态「只挑一把」必然有一半概率踩空。
+ *
+ * 2026-10-29 实测（5 个国际站账号，逐把打 /v1/chat/completions）：
+ *
+ *   magicrew-intl          auth.access ✅   store 槽 b ❌
+ *   magicrew-intl#z983c8   auth.access ✅   store 槽 b ❌
+ *   magicrew-intl#3oqx5z   auth.access ❌   store 槽 a ✅
+ *   magicrew-intl#h2mcxi   auth.access ❌   store 槽 b ✅
+ *   magicrew-intl#8amjca   auth.access ❌   store 槽 a ❌  ← 两把都死
+ *
+ * **5 个里 3 个两路状态不一致，方向还各不相同** —— 先 store 或先 auth 都救不了。
+ *
+ * ⚠ 不要读成「服务端同一账号只认最新签发的那把」。2026-10-28 的受控实验已经
+ * 推翻过这个说法：同账号相隔 67 秒签的两把同时有效；12 把逐把探活，403 全部
+ * 对应 `expiresAt` 已过。真正的原因是**手里那把过期了**，而两条路径让本地
+ * 不知道自己手里的是哪把。逐把试解决的就是这个「不知道」。
+ *
+ * 到期越晚 = 签发越晚 = 越可能是活着的那把，所以按 expiresAt 倒序试。
+ *
+ * @param {object} c               站点上下文
+ * @param {Function|object} getAuth magpie 的取账号函数，或直接给 auth 对象
+ */
+export async function keyCandidates(c, getAuth) {
+  let auth = null
+  try {
+    auth = typeof getAuth === "function" ? await getAuth() : getAuth
+  } catch {}
+  const account = accountFor(c, auth)
+  const st = readStore(c.id, account)
+
+  const out = []
+  const byKey = new Map()
+  const add = (k) => {
+    if (!k?.apiKey) return
+    const rec = { apiKey: k.apiKey, expiresAt: Number(k.expiresAt) || 0 }
+    const prev = byKey.get(rec.apiKey)
+    if (prev) {
+      // 同一把 key 从两路拿到时，保留更晚的到期时间 —— 否则可能被排到死 key 后面
+      if (rec.expiresAt > prev.expiresAt) prev.expiresAt = rec.expiresAt
+      return
+    }
+    byKey.set(rec.apiKey, rec)
+    out.push(rec)
+  }
+  add(currentKey(st))
+  add(st?.keys?.[otherSlot(st.current)])
+  if (auth?.access) add({ apiKey: auth.access, expiresAt: Number(auth.expires) || 0 })
+
+  return out.sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))
+}
+
+/** 把实测能用的那把写回 store —— 下次直接命中，不再逐把试错 */
+export function adoptKey(c, auth, apiKey, expiresAt) {
+  try {
+    const account = accountFor(c, auth)
+    const st = readStore(c.id, account)
+    if (currentKey(st)?.apiKey === apiKey) return
+    const slot = otherSlot(st.current)
+    writeStore(c.id, account, {
+      current: slot,
+      // 空 store 首次接管时 refresh_token 只在 magpie 手里 —— 这里必须接住，
+      // 否则 2 小时后没人能续，用户被要求重新登录。
+      refreshToken: st.refreshToken || auth?.refresh || "",
+      keys: { ...st.keys, [slot]: { apiKey, expiresAt: Number(expiresAt) || 0 } },
+      at: st.at,
+    })
+  } catch {}
+}
+
+/**
+ * 续期并**写回 store** —— 给 src/hooks/refresh.mjs 用。
+ *
+ * 收敛成一条路径的原因：refresh.mjs 原来自己调 `refreshGatewayKey`，
+ * 拿到的 key 只交给 magpie，插件 store 里还是旧的。两条路径各存一份，
+ * 哪把是新签的、哪把已经过期，本地说不清 —— 2026-10-29 实测 5 个账号里
+ * 3 个两路状态不一致，就是这么来的。
+ *
+ * ⚠ refresh_token 是一次性的：谁续谁负责写回，不能让两边各存各的。
+ */
+export async function renewViaStore(c, auth) {
+  const account = accountFor(c, auth)
+
+  // 与 ensureKey 共用同一把锁（renewOnce 按 siteId+account 去重）——
+  // refresh_token 一次性，两条路径同时续期会让后到的那次用废 token → 误判掉登录。
+  let err = null
+  const rec = await renewOnce(c.id, account, async () => {
+    try {
+      const st = readStore(c.id, account)
+
+      // refresh_token 也可能有两份：store 里的（ensureKey 续过）与 magpie 手里的
+      // （0.3.29 之前的 refresh.mjs 续过）。两把都是一次性，只有一把还活着 ——
+      // 升级上来的第一次尤其：store 那份可能早被轮换废了，auth.refresh 才是活的。
+      const tokens = []
+      const seen = new Set()
+      for (const t of [st.refreshToken, auth?.refresh]) {
+        if (!t || seen.has(t)) continue
+        seen.add(t)
+        tokens.push(t)
+      }
+      if (!tokens.length) throw new Error("没有 refresh_token")
+
+      let lastErr = null
+      for (const refreshToken of tokens) {
+        try {
+          const k = await refreshGatewayKey(refreshToken, c.host)
+          const next = { apiKey: k.apiKey, expiresAt: toEpochMs(k.apiKeyExpiresAt) }
+          const slot = otherSlot(st.current)
+          const nextRefresh = k.refreshToken || refreshToken
+          writeStore(c.id, account, {
+            current: slot,
+            refreshToken: nextRefresh,
+            keys: { ...st.keys, [slot]: next },
+            at: st.at,
+          })
+          return { ...next, refreshToken: nextRefresh }
+        } catch (e) {
+          lastErr = e
+        }
+      }
+      throw lastErr ?? new Error("续期失败")
+    } catch (e) {
+      err = e
+      throw e
+    }
+  })
+
+  if (!rec) throw err ?? new Error("续期失败")
+  // 并发时可能复用 ensureKey 的 rec（它只返回 apiKey/expiresAt）——
+  // 从 store 补上最新 refresh_token，免得 magpie 那份落后一轮。
+  if (!rec.refreshToken) {
+    try {
+      const st2 = readStore(c.id, account)
+      if (st2.refreshToken) rec.refreshToken = st2.refreshToken
+    } catch {}
+  }
+  return rec
 }
 
 /**
