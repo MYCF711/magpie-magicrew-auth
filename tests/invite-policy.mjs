@@ -32,6 +32,7 @@ const {
   writeInvitePolicy,
   clearInvitePolicy,
   inviteToUse,
+  pruneDeadAccounts,
 } = await import("../src/store.mjs")
 const { makeMethods } = await import("../src/hooks/methods.mjs")
 const { _internal } = await import("../index.mjs")
@@ -166,6 +167,56 @@ check("账号文件读不到 → 不校验，行为与从前一致", () => {
   writeInvitePolicy(SITE, { mode: "fixed", code: "IVWHATEVER001", org: "orgGONE", accountId: "x" })
   assert.equal(inviteToUse(SITE, true), "IVWHATEVER001")
   writeFileSync(authFile, keep)
+})
+
+// ═══ ②′ 账号删除 / 新号注册竞态（pruneDeadAccounts）════════════════
+console.log("\n删除账号的清理 与 新号注册的竞态保护")
+
+check("死号（老条目）→ 从缓存清掉；滚动码属它 → 一并清掉", () => {
+  const OLD = "2026-10-01T00:00:00Z"
+  writeFileSync(
+    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
+    JSON.stringify({
+      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: OLD },
+      orgDEAD: { code: "IVDEADROLL01", accountId: "已删除", at: OLD },
+    }),
+  )
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: "IVDEADROLL01", at: "x" }))
+  const r = pruneDeadAccounts(SITE)
+  assert.deepEqual(r, { dead: ["orgDEAD"], rollingCleared: true })
+  const cache = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
+  assert.deepEqual(Object.keys(cache), ["orgA"])
+  assert.equal(existsSync(join(CACHE, `magicrew-invite-${SITE}.json`)), false)
+  seedRolling()
+})
+
+check("新号竞态：刚记录（auth 文件还没有它）→ 不清", () => {
+  const NOW = new Date().toISOString()
+  writeFileSync(
+    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
+    JSON.stringify({
+      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: NOW },
+      orgNEW: { code: "IVNEWCODE001", accountId: "832****143", at: NOW },
+    }),
+  )
+  const r = pruneDeadAccounts(SITE)
+  assert.deepEqual(r, { dead: [], rollingCleared: false })
+  const cache = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
+  assert.equal(cache.orgNEW.code, "IVNEWCODE001")
+})
+
+check("滚动码属于刚注册的新号 → 不清", () => {
+  const NOW = new Date().toISOString()
+  writeFileSync(
+    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
+    JSON.stringify({ orgNEW: { code: "IVNEWCODE001", accountId: "832****143", at: NOW } }),
+  )
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: "IVNEWCODE001", at: "x" }))
+  const r = pruneDeadAccounts(SITE)
+  assert.deepEqual(r, { dead: [], rollingCleared: false })
+  assert.equal(existsSync(join(CACHE, `magicrew-invite-${SITE}.json`)), true)
+  seedCodes()
+  seedRolling()
 })
 
 // ═══ ③ 按钮标题与登录同源 ═══════════════════════════════════════════
