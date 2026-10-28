@@ -92,6 +92,104 @@ export function accountFor(c, auth) {
  * @param {Function} getAuth magpie 的取账号函数，或直接给 auth 对象
  * @param {{leadMs?:number}} opts 提前多久算「不新鲜」，默认 10 分钟
  */
+/**
+ * 这个账号**所有**可能能用的 key，按到期时间从晚到早排。
+ *
+ * 为什么需要「多把」：key 有两条签发路径 ——magpie 的 `auth.refresh` 一条
+ * （src/hooks/refresh.mjs）、本模块的 `ensureKey` 一条，两边各写各的。
+ * 而服务端同一时刻只认最新签发的那把，静态「只挑一把」必然有一半概率踩空。
+ *
+ * 2026-10-29 实测（5 个国际站账号，逐把打 /v1/chat/completions）：
+ *
+ *   magicrew-intl          auth.access ✅   store 槽 b ❌
+ *   magicrew-intl#z983c8   auth.access ✅   store 槽 b ❌
+ *   magicrew-intl#3oqx5z   auth.access ❌   store 槽 a ✅
+ *   magicrew-intl#h2mcxi   auth.access ❌   store 槽 b ✅
+ *   magicrew-intl#8amjca   auth.access ❌   store 槽 a ❌  ← 两把都死
+ *
+ * 到期越晚 = 签发越晚 = 越可能是活着的那把，所以按 expiresAt 倒序试。
+ */
+export async function keyCandidates(c, getAuth, { leadMs } = {}) {
+  let auth = null
+  try {
+    auth = typeof getAuth === "function" ? await getAuth() : getAuth
+  } catch {}
+  const account = accountFor(c, auth)
+  const st = readStore(c.id, account)
+
+  const out = []
+  const seen = new Set()
+  const add = (k) => {
+    if (!k?.apiKey || seen.has(k.apiKey)) return
+    seen.add(k.apiKey)
+    out.push(k)
+  }
+  add(currentKey(st))
+  add(st?.keys?.[otherSlot(st.current)])
+  if (auth?.access) add({ apiKey: auth.access, expiresAt: Number(auth.expires) || 0 })
+
+  return out.sort((a, b) => Number(b.expiresAt || 0) - Number(a.expiresAt || 0))
+}
+
+/** 把实测能用的那把写回 store —— 下次直接命中，不再逐把试错 */
+export function adoptKey(c, auth, apiKey, expiresAt) {
+  try {
+    const account = accountFor(c, auth)
+    const st = readStore(c.id, account)
+    if (currentKey(st)?.apiKey === apiKey) return
+    const slot = otherSlot(st.current)
+    writeStore(c.id, account, {
+      current: slot,
+      refreshToken: st.refreshToken || "",
+      keys: { ...st.keys, [slot]: { apiKey, expiresAt: Number(expiresAt) || 0 } },
+      at: st.at,
+    })
+  } catch {}
+}
+
+/**
+ * 续期并**写回 store** —— 给 src/hooks/refresh.mjs 用。
+ *
+ * 收敛成一条路径的原因：refresh.mjs 原来自己调 `refreshGatewayKey`，
+ * 拿到的 key 只交给 magpie，插件 store 里还是旧的。两条路径各存一份，
+ * 服务端只认最新那把，于是另一半必然 403「token无效」——
+ * 2026-10-29 实测 5 个账号里 3 个踩空，就是这么来的。
+ *
+ * ⚠ refresh_token 是一次性的：谁续谁负责写回，不能让两边各存各的。
+ */
+export async function renewViaStore(c, auth) {
+  const account = accountFor(c, auth)
+
+  // 与 ensureKey 共用同一把锁（renewOnce 按 siteId+account 去重）——
+  // refresh_token 一次性，两条路径同时续期会让后到的那次用废 token → 误判掉登录。
+  let err = null
+  const rec = await renewOnce(c.id, account, async () => {
+    try {
+      const st = readStore(c.id, account)
+      const refreshToken = st.refreshToken || auth?.refresh || ""
+      if (!refreshToken) throw new Error("没有 refresh_token")
+
+      const k = await refreshGatewayKey(refreshToken, c.host)
+      const next = { apiKey: k.apiKey, expiresAt: toEpochMs(k.apiKeyExpiresAt) }
+      const slot = otherSlot(st.current)
+      const nextRefresh = k.refreshToken || refreshToken
+      writeStore(c.id, account, {
+        current: slot,
+        refreshToken: nextRefresh,
+        keys: { ...st.keys, [slot]: next },
+        at: st.at,
+      })
+      return { ...next, refreshToken: nextRefresh }
+    } catch (e) {
+      err = e
+      throw e
+    }
+  })
+
+  if (!rec) throw err ?? new Error("续期失败")
+  return rec
+}
+
 export async function ensureKey(c, getAuth, { leadMs } = {}) {
   let auth = null
   try {
