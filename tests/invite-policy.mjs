@@ -41,6 +41,7 @@ const c = siteCtx(SITES.cn)
 const SITE = c.id
 const AUTHOR = AUTHOR_INVITE[SITE]
 const ACCOUNT_CODE = "IVACCOUNT001"
+const OTHER_CODE = "IVOTHER00001"
 const ROLLING = "IVROLLING001"
 
 function seedCodes() {
@@ -49,6 +50,7 @@ function seedCodes() {
     JSON.stringify({
       orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: "2026-10-29T00:00:00Z" },
       orgB: { code: AUTHOR, accountId: "author-duplicate", at: "2026-10-29T00:00:00Z" },
+      orgC: { code: OTHER_CODE, accountId: "177****0000", at: "2026-10-29T00:00:00Z" },
     }),
   )
 }
@@ -60,6 +62,7 @@ function seedAuth() {
     join(CONFIG, "plugin-auth.json"),
     JSON.stringify({
       [`${SITE}#abc123`]: { org: "orgA", accountId: "138****0000", type: "oauth", jwt: "jwt-orgA" },
+      [`${SITE}#def456`]: { org: "orgC", accountId: "177****0000", type: "oauth", jwt: "jwt-orgC" },
       "magicrew-intl#xyz": { org: "orgB", accountId: "should-not-match@example.com", type: "oauth" },
     }),
   )
@@ -162,18 +165,20 @@ check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
 })
 
 // ═══ ③ 数字方法 ══════════════════════════════════════════════════════
-console.log("\n邀请上级（数字）—— 0=作者，1..N=账号，-1=自动")
+console.log("\n邀请上级（数字）—— 0=当前滚动码，1..N=账号")
 
 function inviteMethod() {
   return makeMethods(c).find((m) => m.type === "api" && String(m.label).includes("邀请上级"))
 }
 
-check("message 列出 0=我的 / -1=自动 / 1=账号（按账号名排序）", () => {
+check("message：0=当前滚动账号，1..N=账号；0 指向的那格隐藏", () => {
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
   const msg = inviteMethod().prompts[0].message
-  assert.match(msg, /-1 = 自动/)
-  assert.match(msg, /0 = 我的（作者 MYCF711）/)
+  assert.match(msg, /0 = 177\*\*\*\*0000（IVOTHER00001）/)
   assert.match(msg, /1 = 138\*\*\*\*0000（IVACCOUNT001）/)
+  assert.doesNotMatch(msg, /2 = /) // orgC 是当前 0，后端占 n=2，但页面不显示
   assert.doesNotMatch(msg, /author-duplicate/)
+  seedRolling()
 })
 
 check("ask 每次按最新清单生成；已填 invite 后不再问", async () => {
@@ -184,14 +189,10 @@ check("ask 每次按最新清单生成；已填 invite 后不再问", async () =
   assert.equal(await m.ask({ invite: "1" }), null)
 })
 
-await checkAsync("填 0 → 作者码，org 为空", async () => {
+await checkAsync("填 0 → auto（当前滚动码）", async () => {
   const r = await inviteMethod().authorize({ invite: "0" })
   assert.equal(r.type, "failed")
-  const pol = readInvitePolicy(SITE)
-  assert.equal(pol.mode, "fixed")
-  assert.equal(pol.code, AUTHOR)
-  assert.equal(pol.org, "")
-  assert.equal(pol.accountId, "MYCF711")
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
 })
 
 await checkAsync("填 1 → 第一个账号", async () => {
@@ -203,22 +204,31 @@ await checkAsync("填 1 → 第一个账号", async () => {
   assert.equal(pol.accountId, "138****0000")
 })
 
-await checkAsync("填 -1 → auto", async () => {
+await checkAsync("填 2（当前 0 的账号，后端存在但页面隐藏）→ 仍可选中", async () => {
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
+  await inviteMethod().authorize({ invite: "2" })
+  const pol = readInvitePolicy(SITE)
+  assert.equal(pol.mode, "fixed")
+  assert.equal(pol.code, OTHER_CODE)
+  assert.equal(pol.org, "orgC")
+  seedRolling()
+})
+
+await checkAsync("填 -1（超出范围）→ 回退 0 auto", async () => {
   await inviteMethod().authorize({ invite: "-1" })
   assert.equal(readInvitePolicy(SITE).mode, "auto")
 })
 
-await checkAsync("留空 → 0（作者码）", async () => {
+await checkAsync("留空 → 0 auto", async () => {
   await inviteMethod().authorize({ invite: "" })
-  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
-  assert.equal(readInvitePolicy(SITE).mode, "fixed")
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
 })
 
-await checkAsync("不存在的数字 / 非数字 → 回退 0（作者码）", async () => {
+await checkAsync("不存在的数字 / 非数字 → 回退 0 auto", async () => {
   await inviteMethod().authorize({ invite: "99" })
-  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
   await inviteMethod().authorize({ invite: "abc" })
-  assert.equal(readInvitePolicy(SITE).code, AUTHOR)
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
 })
 
 await checkAsync("已保存提示里带账号与码", async () => {

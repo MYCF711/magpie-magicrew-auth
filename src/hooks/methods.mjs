@@ -30,6 +30,7 @@ import {
 } from "../api.mjs"
 import {
   inviteToUse,
+  readInvite,
   liveOrgs,
   authorInvite,
   readAccountCodes,
@@ -378,26 +379,52 @@ function inviteTag(c) {
 // 用 ask（而不是静态 prompts）是为了每次打开都按最新账号清单生成对照表 ——
 // 插件加载时 backfill 可能还没跑完。
 
-function inviteEntries(c) {
-  const out = []
-  const author = authorInvite(c.id)
-  if (author) out.push({ n: 0, label: "我的（作者 MYCF711）", code: author, org: "", accountId: "MYCF711" })
+function inviteZero(c) {
   const codes = readAccountCodes(c.id)
+  const author = authorInvite(c.id)
+  const rolling = readInvite(c.id)
+  const code = rolling || author
+  // 0 = 老的滚动规则最新那个码；找到归属就显示账号名，否则退作者码
+  if (rolling && code !== author) {
+    const owner = Object.keys(codes).find((o) => codes[o]?.code === code)
+    if (owner) {
+      const accountId = String(codes[owner].accountId || owner)
+      return { code, label: accountId, org: owner, accountId }
+    }
+    return { code, label: "自动（滚动）", org: "", accountId: "" }
+  }
+  return { code: author, label: "自动（作者 MYCF711）", org: "", accountId: "MYCF711" }
+}
+
+function inviteEntries(c) {
+  const codes = readAccountCodes(c.id)
+  const author = authorInvite(c.id)
   const live = liveOrgs(c.id)
-  const rows = Object.entries(codes)
-    .filter(([org, v]) => v?.code && v.code !== author && (!live || live.size === 0 || live.has(org)))
-    .sort((a, b) => String(a[1].accountId || a[0]).localeCompare(String(b[1].accountId || b[0]), "zh"))
-  for (const [org, v] of rows) {
-    out.push({ n: out.length, label: String(v.accountId || org), code: v.code, org, accountId: String(v.accountId || org) })
+  const out = []
+  let n = 1
+  for (const [org, v] of Object.entries(codes)) {
+    if (!v?.code || v.code === author) continue
+    if (live && live.size && !live.has(org)) continue
+    out.push({
+      n: n++,
+      label: String(v.accountId || org),
+      code: v.code,
+      org,
+      accountId: String(v.accountId || org),
+    })
   }
   return out
 }
 
 function inviteMessage(c) {
-  const entries = inviteEntries(c)
-  const parts = ["邀请上级：填数字后点下一步", "-1 = 自动（跟随最后一个登录 / 签到的号）"]
-  for (const e of entries) parts.push(`${e.n} = ${e.label}（${e.code}）`)
-  parts.push("留空 / 不存在的数字 = 0")
+  const zero = inviteZero(c)
+  const parts = ["邀请上级：填数字后点下一步", `0 = ${zero.label}（${zero.code}）`]
+  for (const e of inviteEntries(c)) {
+    // 0 指向的那个账号在 1..N 里也有一格，但当前不显示（换了 0 就露出来）
+    if (e.code === zero.code) continue
+    parts.push(`${e.n} = ${e.label}（${e.code}）`)
+  }
+  parts.push("留空 / 非法文本 = 0")
   return parts.join("；")
 }
 
@@ -651,19 +678,23 @@ export function makeMethods(c) {
       },
       async authorize(inputs) {
         const raw = String(inputs?.invite ?? "").trim()
-        const n = raw === "" ? 0 : Number(raw)
-        if (n === -1) {
+        let n = raw === "" ? 0 : Number(raw)
+        if (!Number.isInteger(n) || n < 0) n = 0
+        if (n === 0) {
           writeInvitePolicy(c.id, { mode: "auto" })
-          return { type: "failed", error: "已保存：自动（新号跟随最后一个登录 / 签到的号）。这一步只存设置，不登录、不新增账号。" }
+          return { type: "failed", error: "已保存：0 = 自动（新号跟随当前滚动码）。这一步只存设置，不登录、不新增账号。" }
         }
         const entries = inviteEntries(c)
-        if (!entries.length) return { type: "failed", error: "没有可用的邀请码（还没登录过账号）" }
-        const pick = Number.isInteger(n) && n >= 0 ? entries[n] ?? entries[0] : entries[0]
+        const pick = entries.find((e) => e.n === n)
+        if (!pick) {
+          writeInvitePolicy(c.id, { mode: "auto" })
+          return { type: "failed", error: "数字没有对应账号，已回退 0（自动）。这一步只存设置，不登录、不新增账号。" }
+        }
         writeInvitePolicy(c.id, {
           mode: "fixed",
           code: pick.code,
-          org: pick.n === 0 ? "" : pick.org,
-          accountId: pick.n === 0 ? "MYCF711" : pick.accountId,
+          org: pick.org,
+          accountId: pick.accountId,
         })
         return {
           type: "failed",
