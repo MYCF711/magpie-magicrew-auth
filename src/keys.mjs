@@ -28,6 +28,7 @@ import {
   otherSlot,
   currentKey,
   safeAccount,
+  listAccounts,
 } from "./key-store.mjs"
 
 /**
@@ -35,6 +36,52 @@ import {
  */
 export function accountOf(auth) {
   return safeAccount(auth?.org || auth?.accountId || auth?.uid || "default")
+}
+
+/** 这个账号的 store 里到底有没有东西（登录过 / 接管过 / 续过期都算） */
+function storeHasIdentity(siteId, account) {
+  const st = readStore(siteId, account)
+  return !!(
+    st?.refreshToken ||
+    st?.keys?.a?.apiKey ||
+    st?.keys?.b?.apiKey
+  )
+}
+
+/**
+ * 这条请求属于哪个账号的 key 槽 —— 比 `accountOf` 多一层兜底。
+ *
+ * 为什么要多这一层（2026-10-28 实测的链路）：
+ *
+ *   网关路径下（ZCode 等 agent 从 magpie 的 `/v1/chat/completions` 进来），
+ *   `getAuth()` 返回的 auth **可能不带 org / accountId / uid** ——
+ *   于是 `accountOf()` 落到 `"default"`，`readStore(c.id, "default")` 读不到
+ *   真实账号的槽，`ensureKey` 只能退到「从 magpie 存的凭据接管一次」用
+ *   `auth.access`；而它过了 2 小时就 403，表现成
+ *   `502 {"message":"超级麦吉 did not stream: token无效"}`。
+ *
+ * 兜底只做**一半**，这是关键：
+ *
+ *   · 该站点**恰好一个账号**（绝大多数用户）→ 那就是它，安全
+ *   · 0 个 → 交给原来的「首次接管」
+ *   · **≥2 个 → 不猜**，退回 `"default"`
+ *
+ * 为什么不猜：key 与账号一一对应，用错账号的 key 就是拿别人的积分、别人的
+ * 组织出话，而且本地看不出来（不是报错，是错账）。多账号场景宁可让这次请求
+ * 失败，也不要借身份 —— 判据见 docs/internals.md 第十五节。
+ *
+ * ⚠ 多账号 + 网关路径的组合目前仍然无解：需要 magpie 把 provider 实例 id
+ *   传进来（`plugin-auth.json` 里已经有 `magicrew#p4nwa7` 这种带后缀的 key），
+ *   插件侧拿不到。在那之前这里只能保守。
+ */
+export function accountFor(c, auth) {
+  const direct = accountOf(auth)
+  if (direct !== "default") return direct
+  try {
+    const live = listAccounts(c.id).filter((acc) => storeHasIdentity(c.id, acc))
+    if (live.length === 1) return live[0]
+  } catch {}
+  return direct
 }
 
 /**
@@ -50,7 +97,7 @@ export async function ensureKey(c, getAuth, { leadMs } = {}) {
   try {
     auth = typeof getAuth === "function" ? await getAuth() : getAuth
   } catch {}
-  const account = accountOf(auth)
+  const account = accountFor(c, auth)
 
   const st = readStore(c.id, account)
   const cur = currentKey(st)
