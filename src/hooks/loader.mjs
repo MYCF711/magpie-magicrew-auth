@@ -12,6 +12,36 @@
 
 import { ensureKey, accountOf } from "../keys.mjs"
 
+/**
+ * 把 JSON Schema 里的 additionalProperties: {} 换成 true（原地改）。
+ *
+ * 上游只认 true / false，收到空对象就回 400「模型响应失败」。
+ * 按规范 {} 与 true 语义等价（都允许任意额外属性），所以这是等价改写，不改语义。
+ * 非空的 schema（如 {type:"string"}）保持原样 —— 那是有约束的，换掉就变了。
+ *
+ * @returns {boolean} 有没有改到
+ */
+function loosenAdditionalProperties(node) {
+  if (!node || typeof node !== "object") return false
+  if (Array.isArray(node)) {
+    let any = false
+    for (const n of node) if (loosenAdditionalProperties(n)) any = true
+    return any
+  }
+  let changed = false
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "additionalProperties") {
+      if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) {
+        node[k] = true
+        changed = true
+      }
+      continue
+    }
+    if (v && typeof v === "object" && loosenAdditionalProperties(v)) changed = true
+  }
+  return changed
+}
+
 export function makeLoader(c) {
   return async (getAuth) => {
     const auth = await getAuth()
@@ -78,6 +108,34 @@ export function makeLoader(c) {
             const j = JSON.parse(body)
             if (Number(j.max_tokens) > 0 && Number(j.max_tokens) < 512) j.max_tokens = 512
             body = JSON.stringify(j)
+          } catch {}
+        }
+
+        // ③ tools 里的 additionalProperties: {} → true
+        //
+        //    上游只认 true / false，遇到**空对象** {} 直接回 HTTP 400
+        //    「模型响应失败」（code 4017），整个请求被拒。
+        //
+        //    按 JSON Schema，additionalProperties 的值是 schema 时：
+        //      · {}  → 等价于 true（允许任意额外属性，但不给约束）
+        //      · {type:"string"} → 额外属性必须是 string（有约束，不能换）
+        //    所以只把**空对象**换成 true，非空的 schema 原样保留 —— 语义不变。
+        //
+        //    命中来源（2026-10-28 实测）：ZCode 的 54 个工具里，
+        //    ExitPlanMode 与 CreateWorkflow 的顶层 parameters 用了 {}。
+        //    客户端（ZCode / Claude Code 系）生成 schema 时常这么写，
+        //    上游该兼容 —— 这是上游的兼容性问题，插件这边做等价改写兜住。
+        if (typeof body === "string" && body.includes('"tools"')) {
+          try {
+            const j = JSON.parse(body)
+            if (Array.isArray(j.tools)) {
+              let changed = 0
+              for (const t of j.tools) {
+                const p = t?.function?.parameters
+                if (p && typeof p === "object" && loosenAdditionalProperties(p)) changed++
+              }
+              if (changed) body = JSON.stringify(j)
+            }
           } catch {}
         }
 
