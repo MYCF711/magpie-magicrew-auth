@@ -155,6 +155,12 @@ max_tokens=8000 → finish_reason:"stop"    reasoning_tokens:899  content:"10"
 真「不思考」的路；② 换之前必须用 `_probe/vision-accuracy.mjs` 跑 10 张以上比通过率，
 别拿速度当唯一指标。当前默认保持原模型 + `effort=low` + 并行。
 
+**兜底：`reasoning_effort` 被 400 就退一步。** 它**不是** OpenAI 规范字段，而识图模型是
+用户自己在 magpie 里选的（模型库 + 自定义 provider 什么都可能有）—— 有的端点认得，
+有的会为未知字段直接回 400。所以 `askClock()` 里加了一层：带它发出去被 400 时，
+去掉该字段重发一次，行为退回「不传」那一档（少省几秒，但也别把整条无头登录打死）。
+实测该路径：首次 400 → 去掉字段 → 200 → 正常解析出答案。
+
 ### 验证
 
 - **新增 `tests/code-login.mjs`：34 个断言** —— 拦全局 fetch 换成可编程假服务端，
