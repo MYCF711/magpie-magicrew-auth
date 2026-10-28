@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.3.31 — 2026-10-29
+
+**自动更新加全局锁（0.3.30 补丁）**
+
+0.3.30 的 `magicrew` 与 `magicrew-intl` 两个 provider 会在同一时刻各自跑
+`config`，各调一次 `kick`，可能同时 spawn 两个 `magpie plugin update`。
+0.3.31 加全局锁 `~/.cache/magpie/magicrew-auto-update.lock`（10 分钟过期）：
+一个更新进程在跑时，另一个 provider 直接跳过。
+
+验证：`tests/auto-maintenance.mjs` 21 条断言（新增「已有未过期全局锁 → locked」
+与「进程退出后释放锁」）。
+
 ## 0.3.30 — 2026-10-29
 
 **默认开启自动签到 · 插件自身自动更新**
