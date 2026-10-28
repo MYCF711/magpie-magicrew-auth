@@ -14,7 +14,7 @@
 // ⚠ 不要在这里读流、不要手拼 x-api-key ——
 //   流由 magpie 处理，头由 SDK 包自动加。见 README「最小交付面」。
 
-import { ensureKey, accountOf, keyCandidates, adoptKey } from "../keys.mjs"
+import { ensureKey, accountOf, keyCandidates, adoptKey, renewViaStore } from "../keys.mjs"
 
 /**
  * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
@@ -484,6 +484,28 @@ export async function rewriteCreditRefusal(res) {
   })
 }
 
+/**
+ * 上游（Swow/PHP）对请求体有 ~8MB 的硬上限（实测 6MB 过、8MB 拒），
+ * 超了直接回 413 的 HTML 页 —— magpie 只能显示成难懂的
+ * 「a web page, not an API reply」。翻译成人话，并说明换账号没用。
+ */
+async function rewriteTooLarge(res, SHORT) {
+  if (!res || res.status !== 413) return res
+  const headers = new Headers(res.headers)
+  headers.delete("content-length")
+  headers.delete("content-encoding")
+  headers.set("content-type", "application/json")
+  const body = JSON.stringify({
+    error: {
+      message:
+        `${SHORT}: 请求体超过上游上限（约 8 MB）—— 会话上下文过大或含大截图。` +
+        `压缩上下文（如 /compact）或新开会话后重试；换账号无效。`,
+      type: "payload_too_large",
+    },
+  })
+  return new Response(body, { status: 413, statusText: "Payload Too Large", headers })
+}
+
 export function makeLoader(c) {
   /** 已经写回 store 的 key —— 避免每个请求都去读一次 store */
   const adopted = new Set()
@@ -554,7 +576,7 @@ export function makeLoader(c) {
               adopted.add(cand.apiKey)
               adoptKey(c, fresh, cand.apiKey, cand.expiresAt)
             }
-            return rewriteCreditRefusal(res)
+            return rewriteTooLarge(await rewriteCreditRefusal(res), c.SHORT)
           }
           // 这把被拒：响应不再使用，显式取消 body —— 否则逐把试时
           // 每条死连接的响应体都挂着，等 GC 才释放。
@@ -562,6 +584,22 @@ export function makeLoader(c) {
             await res.body?.cancel()
           } catch {}
         }
+
+        // 全被拒 —— 很可能是 key 被别处顶掉（同一账号在别处又登了一次，服务端换发）。
+        // 手里有 refresh_token 就续一把、再给一次机会：这是唯一能从 403 自愈的路，
+        // 否则这把 key 会一直「没过期但已失效」，直到 30 分钟 rest 结束还是它。
+        try {
+          if (accountOf(fresh) !== "default") {
+            const renewed = await renewViaStore(c, fresh)
+            if (renewed?.apiKey) {
+              const res = await sendWith(renewed.apiKey)
+              if (!(await isKeyRejected(res))) {
+                adoptKey(c, fresh, renewed.apiKey, renewed.expiresAt)
+                return rewriteTooLarge(await rewriteCreditRefusal(res), c.SHORT)
+              }
+            }
+          }
+        } catch {}
 
         // 这个账号的 key 全被拒。上游给的是 403「token无效」，magpie 会判成
         // 「不可重试」直接抛给客户端（ZCode 显示 auth_failed / token无效）。
