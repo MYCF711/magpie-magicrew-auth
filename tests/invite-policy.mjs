@@ -34,6 +34,7 @@ const {
   inviteToUse,
   pruneDeadAccounts,
   syncInvitePage,
+  backfillInviteCodes,
 } = await import("../src/store.mjs")
 const { makeMethods, inviteFromOptions } = await import("../src/hooks/methods.mjs")
 const { _internal } = await import("../index.mjs")
@@ -64,7 +65,7 @@ function seedAuth() {
   writeFileSync(
     join(CONFIG, "plugin-auth.json"),
     JSON.stringify({
-      [`${SITE}#abc123`]: { org: "orgA", accountId: "138****0000", type: "oauth" },
+      [`${SITE}#abc123`]: { org: "orgA", accountId: "138****0000", type: "oauth", jwt: "jwt-orgA" },
       "magicrew-intl#xyz": { org: "orgB", accountId: "should-not-match@example.com", type: "oauth" },
     }),
   )
@@ -288,6 +289,25 @@ await checkAsync("工厂第二参数就是页面 options —— 标题按它显�
     inviteBySite: { [SITE]: { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" } },
   })
   assert.doesNotMatch(dead.auth.methods.find((m) => /手机号/.test(m.label)).label, /已删除/)
+})
+
+await checkAsync("backfillInviteCodes 给老账号补码（只补缺口）", async () => {
+  const orig = globalThis.fetch
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ code: 1000, data: { invite_code: "IVBACK000001" } }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })
+  try {
+    rmSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), { force: true })
+    await backfillInviteCodes()
+    const codes = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
+    assert.equal(codes.orgA.code, "IVBACK000001")
+    assert.equal(codes.orgA.accountId, "138****0000")
+  } finally {
+    globalThis.fetch = orig
+    seedCodes()
+  }
 })
 
 check("syncInvitePage 生成 codes.js（作者 / 账号 / 策略）", () => {

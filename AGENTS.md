@@ -77,7 +77,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 24 | 新装插件后没有任何签到记录，`plugin-checkin.json` 里没有 magicrew | magpie 的 `PluginCheckinOn()`：`pluginCheckins` 没有显式值时默认 **false**（只有 WorkBuddy / Trae / MiniMax / Qoder 有内置开关）。插件只能在加载时把 `settings.json` 的 `pluginCheckins[provider]` 补成 true —— **只在键不存在时补**，用户显式 false 不覆盖。判据：`settings.json` 的 `pluginCheckins` 有 `magicrew` / `magicrew-intl` 键 | CHANGELOG 0.3.30 · `src/auto-maintenance.mjs` |
 | 25 | 邀请上级选了某个账号，第二天签到后又变回别的号 | 旧版 `rollInvite` 每天覆盖滚动文件。0.3.33 起在插件页「超级麦吉设置」按站点选码 + 「锁定（签到不再覆盖）」勾选框（写 `inviteLockBySite`，登录侧优先于文件策略）；锁定关掉则回落滚动。判据：页面「当前」与登录方法标题同源；`tests/invite-policy.mjs` 锁死 | CHANGELOG 0.3.33 · `page/app.js` |
 | 26 | 插件页里设置保存了，登录/标题却不认 | 官方契约工厂是 `(ctx, options)` —— **第二个参数**才是插件 options；`input.magpie.options(provider)` 实测恒为 `{}`。index.mjs 用 `async (input, options) => ...`，页面写 `inviteBySite` / `inviteLockBySite`。改回 `input.magpie.options` 会静默回退 | CHANGELOG 0.3.33 · `index.mjs` |
-| 27 | 插件页「超级麦吉设置」空白 / 没有账号可选 | 页面是沙箱：读不到磁盘/账号。账号清单由 `syncInvitePage()` 在 Node 侧生成 `page/codes.js`（config / 签到 / 登录 / 策略变更 / usage 60s 刷新）；仓库里有 `.git` 时故意不生成，发布包才有；`package.json` 的 `files` 必须含 `page` | CHANGELOG 0.3.33 · `src/store.mjs` · `page/` |
+| 27 | 插件页「超级麦吉设置」空白 / 没有账号可选 | 页面是沙箱：读不到磁盘/账号。账号清单由 `syncInvitePage()` 在 Node 侧生成 `page/codes.js`（config / 签到 / 登录 / 策略变更 / usage 60s 刷新）；老用户升级后 20s 由 `backfillInviteCodes()` 用 plugin-auth 的 JWT 补码；仓库里有 `.git` 时故意不生成，发布包才有；`package.json` 的 `files` 必须含 `page` | CHANGELOG 0.3.33 · `src/store.mjs` · `page/` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
