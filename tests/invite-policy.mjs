@@ -33,8 +33,9 @@ const {
   clearInvitePolicy,
   inviteToUse,
   pruneDeadAccounts,
+  syncInvitePage,
 } = await import("../src/store.mjs")
-const { makeMethods } = await import("../src/hooks/methods.mjs")
+const { makeMethods, inviteFromOptions } = await import("../src/hooks/methods.mjs")
 const { _internal } = await import("../index.mjs")
 const { siteCtx, SITES } = await import("../src/context.mjs")
 
@@ -252,14 +253,29 @@ check("锁定关掉 → 标题不带上级", () => {
 // ═══ ④ 锁定开关 + 工厂第二参数（官方契约：`(ctx, options)`）══════════
 console.log("\ninviteLock / 工厂第二参数 —— buildPlugin 暴露，默认开")
 
-await checkAsync("buildPlugin 暴露 inviteLock；锁定关掉时标题不带上级", async () => {
+await checkAsync("buildPlugin 读第二参数 inviteLock；锁定关掉时标题不带上级", async () => {
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
   const on = await _internal.buildPlugin(c)({}, { inviteLock: true })
   const off = await _internal.buildPlugin(c)({}, { inviteLock: false })
-  assert.equal(on.auth.options[0].key, "inviteLock")
-  assert.equal(on.auth.options[0].default, true)
   assert.match(on.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
   assert.doesNotMatch(off.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
+})
+
+await checkAsync("页面选码 + 锁定关闭 → 登录仍回到滚动（页面选择不作数）", async () => {
+  writeInvitePolicy(SITE, { mode: "fixed", code: "IVKEEP000001", org: "orgA", accountId: "138****0000" })
+  const opts = { inviteBySite: { [SITE]: { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" } } }
+  assert.equal(inviteFromOptions(c, () => opts, () => false), ROLLING)
+  assert.equal(inviteFromOptions(c, () => opts, () => true), ACCOUNT_CODE)
+  const auto = { inviteBySite: { [SITE]: { mode: "auto", code: "" } } }
+  assert.equal(inviteFromOptions(c, () => auto, () => true), ROLLING)
+})
+
+await checkAsync("页面按站点写 inviteLockBySite，优先于全局 inviteLock", async () => {
+  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
+  const off = await _internal.buildPlugin(c)({}, { inviteLock: true, inviteLockBySite: { [SITE]: false } })
+  assert.doesNotMatch(off.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
+  const on = await _internal.buildPlugin(c)({}, { inviteLock: false, inviteLockBySite: { [SITE]: true } })
+  assert.match(on.auth.methods.find((m) => /手机号/.test(m.label)).label, /（上级/)
 })
 
 await checkAsync("工厂第二参数就是页面 options —— 标题按它显示（死号同前规则）", async () => {
@@ -272,6 +288,29 @@ await checkAsync("工厂第二参数就是页面 options —— 标题按它显�
     inviteBySite: { [SITE]: { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" } },
   })
   assert.doesNotMatch(dead.auth.methods.find((m) => /手机号/.test(m.label)).label, /已删除/)
+})
+
+check("syncInvitePage 生成 codes.js（作者 / 账号 / 策略）", () => {
+  const root = join(FAKE, "pkgroot")
+  mkdirSync(join(root, "page"), { recursive: true })
+  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
+  syncInvitePage({ root })
+  const text = readFileSync(join(root, "page", "codes.js"), "utf8")
+  assert.match(text, /^window\.MAGICREW_CODES = /)
+  const data = JSON.parse(text.replace(/^window\.MAGICREW_CODES = /, "").replace(/;\s*$/, ""))
+  assert.equal(data.sites[SITE].author, AUTHOR)
+  assert.equal(data.sites[SITE].codes.orgA.code, ACCOUNT_CODE)
+  assert.equal(data.sites[SITE].policy.mode, "fixed")
+})
+
+check("页面包含作者项与按站点的锁定复选框；package 打包 page/", () => {
+  const page = readFileSync(new URL("../page/app.js", import.meta.url), "utf8")
+  assert.match(page, /我的（作者 MYCF711）/)
+  assert.match(page, /inviteLockBySite/)
+  assert.match(page, /锁定（签到不再覆盖）/)
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  assert.ok(pkg.files.includes("page"))
+  assert.equal(pkg.magpie.page.file, "page/index.html")
 })
 
 // ── 收尾 ───────────────────────────────────────────────────────────────

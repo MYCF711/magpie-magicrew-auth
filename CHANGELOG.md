@@ -1,5 +1,68 @@
 # 更新记录
 
+## 0.3.33 — 2026-10-29
+
+**批量：登录窗口去重 · key 自愈 / 413 人话 · 「超级麦吉设置」页面 · 死号回退**
+
+（核心改动来自 PR #17，作者 @baijiu666，合并了原 #14 / #15 / #16；合入时补了页面作者项 / 锁定勾选 / 页面 auto 语义等，见文末。）
+
+### 一、登录窗口只拉一个浏览器（原 #14）
+
+Windows 实测：Chrome + Edge 并存时一次点击 spawn 两次；浏览器父进程 `exit 0` 后
+窗口挂在另一批子进程上，点几次叠几个。现在：
+
+- 只试第一个能用的浏览器，失败直接交手动登录，不再用窗口堆失败
+- 参数集照 `GoogleChrome/chrome-launcher` 补全（含 `--remote-allow-origins=*`）
+- 失败按一次性 `--user-data-dir` 精确杀进程树，再删目录
+- 一次失败后 30 分钟冷却（`cdpDownUntil`），冷却期内直接走手动登录
+
+### 二、key 自愈 + 413 人话（原 #15）
+
+- **自愈**：候选 key 全被拒时，用 `refresh_token` 续一把再试一次（只一次，失败照旧
+  402 交 magpie 换号）。修「有积分却一直 403 / 已耗尽」：key 被别处会话顶掉后，
+  不到 `expiresAt` 不会自动续，三把全死就死循环。
+- **413**：上游（Swow/PHP）请求体硬上限约 8MB（实测 6MB 过、8MB 拒），超了回
+  HTML 页；插件改写成人话 JSON：压缩上下文或新开会话，换账号无效。
+
+### 三、「超级麦吉设置」页面 + 死号回退（原 #16）
+
+- 插件页（`page/`）按站点设置：**我的（作者 MYCF711）** / 自动 / 每个已登录账号
+  （打码手机号·自己的码）/ 自定义码；**「锁定（签到不再覆盖）」勾选框**
+- 设置写进插件 options（`inviteBySite` / `inviteLockBySite`），登录侧优先于文件策略
+- 页面数据 `page/codes.js` 由 Node 侧生成（页面沙箱读不到账号），在 config / 签到 /
+  登录 / 策略变更 / usage 轮询（60s 节流）时刷新
+- 两个「只设置不登录」的 methods 入口删除 —— 不再用 `{type:"failed"}` 伪装登录
+- 账号删除后：`liveOrgs()` 只认 `plugin-auth.json` 里还登录着的 org；fixed 指向死号 /
+  滚动码归属死号 → 自动回落（滚动 → 作者码）；`syncInvitePage()` 清码缓存和归属死号
+  的滚动码；页面打 ⚠ 标
+- `inviteTag` 与登录同源：标题显示的上级 = 登录真正会用的码的来源（含死号校验）
+
+### 合入时补的
+
+1. **页面加「我的（作者 MYCF711）」** —— PR 的页面只有自动 / 各账号 / 自定义，没有作者项
+2. **页面加「锁定（签到不再覆盖）」勾选框**（按站点 `inviteLockBySite`）—— PR 的
+   `auth.options` 开关读的是 `input.magpie.options()`，实测恒为 `{}`，失效；现在改用
+   工厂第二参数 `(ctx, options)`，页面写 `inviteLockBySite`，登录侧实时读
+3. **页面「自动」不再被文件策略覆盖** —— `optionInvite()` 显式 auto，`inviteFromOptions()`
+   回落到滚动 / 作者码；锁定关闭时页面选的码也不作数
+4. **作者 org 统一为空** —— 旧版把作者码存成 `org:"author"`，会被死号校验当已删除；
+   读策略时归一化，页面/方法都用 `org:""`
+5. `package.json` 的 `files` 补 `page`（否则 npm 包里没有页面）；`.gitignore` 忽略
+   运行时生成的 `page/codes.js`；页面主题变量改用 `--magpie-*`
+6. `tests/invite-policy.mjs` 扩到 23 条（死号回退、页面 auto / 锁定、codes.js 生成）
+
+### 验证
+
+```
+tests/invite-policy.mjs    23 通过 · 0 失败
+tests/key-failover.mjs     26 通过 · 0 失败
+tests/auto-maintenance.mjs 21 通过 · 0 失败
+tests/credit-refusal.mjs   19 通过 · 0 失败
+tests/account-fallback.mjs 10 通过 · 0 失败
+tests/body-rewrite.mjs     48 通过 · 0 失败
+multi-provider / browser-detect / smoke 全过；scaffold check.mjs 30 通过 0 失败
+```
+
 ## 0.3.32 — 2026-10-29
 
 **邀请上级可固定 / 自定义（PR #13，作者 @baijiu666）**

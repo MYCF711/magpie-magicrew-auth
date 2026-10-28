@@ -44,7 +44,7 @@ import { makeHeaders } from "./src/hooks/headers.mjs"
 function buildPlugin(c) {
   return async (input, options = {}) => {
 
-    // 本插件保存的 options（页面写的 inviteBySite / inviteLock 都在这里）。
+    // 本插件保存的 options（页面写的 inviteBySite / inviteLockBySite 都在这里）。
     // ⚠ 2026-10-29 插桩实测：官方契约是工厂的**第二个参数**（HOOKS.md 一、
     //   MULTI-PROVIDER.md L156：`(ctx, options) => ({...})`），且它就是
     //   plugins.json 里那份完整 options。
@@ -55,7 +55,12 @@ function buildPlugin(c) {
 
     const getLock = () => {
       const vals = getOpts()
-      if (vals && Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
+      // 页面按站点写 inviteLockBySite；旧的全局 inviteLock 作为后备
+      const by = vals?.inviteLockBySite
+      if (by && typeof by === "object" && Object.prototype.hasOwnProperty.call(by, c.PROVIDER)) {
+        return by[c.PROVIDER] !== false
+      }
+      if (Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
       return true
     }
 
@@ -76,16 +81,6 @@ function buildPlugin(c) {
         icon: c.ICON,
         maxConcurrency: 4,
         refreshLead: REFRESH_LEAD_MS,
-
-        options: [
-          {
-            key: "inviteLock",
-            label: "锁定邀请上级（签到不再覆盖）",
-            description:
-              "打开：新号固定挂在选定的邀请码下；关闭：跟随最后一个登录 / 签到的账号（会漂移）。",
-            default: true,
-          },
-        ],
 
         methods: makeMethods(c, getLock, getOpts),
         refresh: makeRefresh(c),
