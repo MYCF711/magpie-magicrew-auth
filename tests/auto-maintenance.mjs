@@ -222,9 +222,21 @@ await checkAsync("dryRun → 只返回 wouldRun，不 spawn", async () => {
   assert.equal(called, false)
 })
 
-await checkAsync("spawn 成功退出 0 → 写 updated[] 与 done 状态", async () => {
+await checkAsync("已有未过期的全局锁 → locked（两个 provider 不会同时跑 plugin update）", async () => {
+  seedUpdates(waiting)
+  seedState("kick4b", {})
+  const lock = join(CACHE, "magicrew-auto-update.lock")
+  writeFileSync(lock, JSON.stringify({ pid: 1, at: Date.now() }))
+  const r = await kick({ id: "kick4b" }, { dir: CONFIG, cacheDir: CACHE, exe: "/fake-magpie" })
+  assert.equal(r.skipped, "locked")
+  rmSync(lock, { force: true })
+})
+
+await checkAsync("spawn 成功退出 0 → 写 updated[] 与 done 状态，并释放锁", async () => {
   seedUpdates(waiting)
   seedState("kick5", {})
+  const lock = join(CACHE, "magicrew-auto-update.lock")
+  rmSync(lock, { force: true })
   const child = new EventEmitter()
   child.unref = () => {}
   let spawned = null
@@ -239,7 +251,9 @@ await checkAsync("spawn 成功退出 0 → 写 updated[] 与 done 状态", async
   assert.equal(r.started, true)
   assert.equal(spawned.exe, "/fake-magpie")
   assert.deepEqual(spawned.args, ["plugin", "update"])
+  assert.equal(existsSync(lock), true) // 已加锁（exit 尚未触发）
   await new Promise((res) => setTimeout(res, 20))
+  assert.equal(existsSync(lock), false) // 退出后释放
   const u = read(join(CONFIG, "plugin-updates.json"))
   const mine = u.updated.find((x) => x.package === "Magicrew" && x.to === "050b0f4")
   assert.ok(mine)
