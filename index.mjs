@@ -31,6 +31,8 @@
 
 import { SITES, siteCtx, REFRESH_LEAD_MS } from "./src/context.mjs"
 import { makeConfig } from "./src/hooks/config.mjs"
+import { syncInvitePage } from "./src/store.mjs"
+import { setCheckinOn } from "./src/auto-maintenance.mjs"
 import { makeMethods } from "./src/hooks/methods.mjs"
 import { makeRefresh } from "./src/hooks/refresh.mjs"
 import { makeLoader } from "./src/hooks/loader.mjs"
@@ -46,16 +48,29 @@ function buildPlugin(c) {
     // ⚠ 用 options(provider) 而不是 option(provider,key)：后者对「还不知道的
     // 选项」也返回 false，插件加载早期会把默认 true 误判成关闭。没有该键
     // （老 magpie / 测试）时按默认 true。
+    /** 整份 options（页面写的邀请设置在这里） */
+    const getOpts = () => input?.magpie?.options?.(c.PROVIDER) ?? {}
+
     const getLock = () => {
       const vals = input?.magpie?.options?.(c.PROVIDER)
       if (vals && Object.prototype.hasOwnProperty.call(vals, "inviteLock")) return vals.inviteLock !== false
       return true
     }
 
+    // 页面清单（page/codes.js）在这里刷一次：插件一加载，页面就能看到最新账号与策略
+    syncInvitePage()
+
     // 卡片标题与文案不在这里做 —— 那是 registry 条目的职责。
     // 插件不写 magpie 自己的缓存目录：那份文件属于 magpie，插件只读不写。
     return {
-      config: makeConfig(c),
+      config: (cfg) => {
+        // 页面上的「自动签到」开关：插件没有别的写入口，只能落到 magpie 的 settings.json
+        try {
+          const want = getOpts()?.checkinBySite?.[c.PROVIDER]
+          if (typeof want === "boolean") setCheckinOn(c.PROVIDER, want)
+        } catch {}
+        return makeConfig(c)(cfg)
+      },
 
       auth: {
         provider: c.PROVIDER,
@@ -73,7 +88,7 @@ function buildPlugin(c) {
           },
         ],
 
-        methods: makeMethods(c, getLock),
+        methods: makeMethods(c, getLock, getOpts),
         refresh: makeRefresh(c),
         loader: makeLoader(c),
         usage: makeUsage(c),

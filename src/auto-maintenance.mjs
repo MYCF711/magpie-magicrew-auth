@@ -80,6 +80,24 @@ export function ensureCheckinDefault(provider, { dir = AUTO_DIR() } = {}) {
   return { changed: true, on: true }
 }
 
+/**
+ * 显式设置某个 provider 的自动签到开关（页面上的「自动签到」用）。
+ * 与 ensureCheckinDefault 的区别：那条只在「用户从没设过」时补 true，
+ * 这条是用户点了一下 —— 无论 true/false 都照写，并先备份 settings.json。
+ */
+export function setCheckinOn(provider, on, { dir = AUTO_DIR() } = {}) {
+  const file = join(dir, "settings.json")
+  const s = existsSync(file) ? readJson(file, null) : {}
+  if (!s || typeof s !== "object" || Array.isArray(s)) return { changed: false, reason: "settings-unreadable" }
+  const table = s.pluginCheckins && typeof s.pluginCheckins === "object" && !Array.isArray(s.pluginCheckins)
+    ? s.pluginCheckins
+    : {}
+  if (table[provider] === on) return { changed: false, on }
+  s.pluginCheckins = { ...table, [provider]: on }
+  writeJsonAtomic(file, s, { backup: true })
+  return { changed: true, on }
+}
+
 /** magpie 的 waiting 里有没有「我自己」的新版本（git 源只有 commit，没有 npm version） */
 export function pickSelfUpdate(waiting, { pkg = PKG_NAME } = {}) {
   if (!Array.isArray(waiting)) return null
@@ -213,7 +231,6 @@ export function findMagpieExe({ env = process.env, ppid = process.ppid, platform
  * @returns {Promise<object>} 结果只用于日志/测试，不抛
  */
 export async function kick(c, opts = {}) {
-  const dir = opts.dir || AUTO_DIR()
   const cacheDir = opts.cacheDir || CACHE_DIR()
   const pkg = opts.pkg || PKG_NAME
   try {

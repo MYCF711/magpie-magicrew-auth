@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
 import { fetchOwnInviteCode } from "./api.mjs"
 
 function cacheDir() {
@@ -115,11 +116,45 @@ function writeInvite(siteId, code) {
 
 /** 这次登录该带的邀请码：锁定 → 策略 → 记录 → 作者码 */
 function inviteToUse(siteId, locked = true) {
+  const live = liveOrgs(siteId)
+  // 账号文件读不到 / 一个号都没有时按「不校验」处理，行为与以前一致
+  const known = live !== null && live.size > 0
   if (locked) {
     const pol = readInvitePolicy(siteId)
-    if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) return pol.code
+    if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) {
+      // fixed 挂在某个账号上 —— 账号删了码就别再带（新号会注册落空）
+      if (!(known && pol.mode === "fixed" && pol.org && !live.has(pol.org))) return pol.code
+    }
   }
-  return readInvite(siteId) || AUTHOR_INVITE[siteId] || ""
+  const rolling = readInvite(siteId)
+  if (rolling) {
+    if (!known) return rolling
+    // 滚动码也可能属于已删除的账号：按码反查归属，归属没了就换作者码兜底
+    const codes = readAccountCodes(siteId)
+    const owner = Object.keys(codes).find((o) => codes[o]?.code === rolling)
+    if (!owner || live.has(owner)) return rolling
+  }
+  return AUTHOR_INVITE[siteId] || ""
+}
+
+/**
+ * magpie 账号文件里这个站点还登录着的 org（只读 plugin-auth.json）。
+ * 返回 null 表示读不到 —— 调用方应按「不校验」处理，而不是当空集。
+ */
+export function liveOrgs(siteId) {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+    const out = new Set()
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (k === siteId || k.startsWith(siteId + "#")) {
+        const org = String(v?.org || "").trim()
+        if (org) out.add(org)
+      }
+    }
+    return out
+  } catch {
+    return null
+  }
 }
 
 /** 作者自己的码（「我的」那一项） */
@@ -178,6 +213,7 @@ export function writeInvitePolicy(siteId, policy) {
         at: new Date().toISOString(),
       }),
     )
+    syncInvitePage() // 页面上的「当前」跟着刷新
   } catch {}
 }
 
@@ -217,6 +253,85 @@ export function noteAccountCode(siteId, org, code, accountId) {
     const f = inviteCodesPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
     writeFileSync(f, JSON.stringify(all))
+    syncInvitePage() // 页面清单跟着刷新
+  } catch {}
+}
+
+/**
+ * 把「有哪些账号、各自的邀请码、当前策略」写进 page/codes.js。
+ *
+ * 插件页面是沙箱：没有 fetch、读不到磁盘，也读不到账号（magpie 只给它 usage / providers）。
+ * 所以清单靠这里预先生成一份静态脚本，页面 <script src="codes.js"> 直接读 —— 与
+ * agent-purge 的 gen-personas.mjs 是同一个套路。
+ */
+/**
+ * org → 便于辨认的名字（打码手机号 / 邮箱），从 magpie 自己的账号文件**只读**。
+ * 页面要显示「178****697（IV…）」，而 rollInvite 只拿得到 org，所以在这里补。
+ */
+function readAccountLabels() {
+  const out = {}
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+    for (const v of Object.values(raw || {})) {
+      const org = String(v?.org || "")
+      const id = String(v?.accountId || "")
+      if (org && id && !out[org]) out[org] = id
+    }
+  } catch {}
+  return out
+}
+
+/** magpie 的 settings.json 里这个 provider 是否开着自动签到（只读） */
+function readCheckinOn(siteId) {
+  try {
+    const j = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "settings.json"), "utf8"))
+    const t = j?.pluginCheckins
+    return !!(t && typeof t === "object" && t[siteId] === true)
+  } catch {
+    return false
+  }
+}
+
+export function syncInvitePage() {
+  try {
+    const labels = readAccountLabels()
+    const sites = {}
+    for (const site of ["magicrew", "magicrew-intl"]) {
+      const live = liveOrgs(site)
+      let codes = readAccountCodes(site)
+      // 已删除的账号从页面和缓存里清掉（账号文件读不到时不动，避免误清）
+      if (live && live.size) {
+        const dead = Object.keys(codes).filter((org) => !live.has(org))
+        if (dead.length) {
+          codes = { ...codes }
+          for (const org of dead) delete codes[org]
+          try {
+            const f = inviteCodesPath(site)
+            mkdirSync(dirname(f), { recursive: true })
+            writeFileSync(f, JSON.stringify(codes))
+          } catch {}
+        }
+      }
+      for (const [org, v] of Object.entries(codes)) {
+        if (v && !v.accountId && labels[org]) v.accountId = labels[org]
+      }
+      const pol = readInvitePolicy(site)
+      const rolling = readInvite(site)
+      const ownerOf = (code) => Object.keys(codes).find((o) => codes[o]?.code === code) || ""
+      sites[site] = {
+        codes,
+        checkinOn: readCheckinOn(site),
+        policy: pol,
+        // 当前选择指向已删除的账号 —— 页面据此提示，登录侧已自动回退
+        policyStale: Boolean(live && live.size && pol.mode === "fixed" && pol.org && !live.has(pol.org)),
+        rolling,
+        rollingStale: Boolean(live && live.size && rolling && ownerOf(rolling) && !live.has(ownerOf(rolling))),
+        author: AUTHOR_INVITE[site] || "",
+      }
+    }
+    const f = join(dirname(dirname(fileURLToPath(import.meta.url))), "page", "codes.js")
+    mkdirSync(dirname(f), { recursive: true })
+    writeFileSync(f, "window.MAGICREW_CODES = " + JSON.stringify({ at: new Date().toISOString(), sites }) + ";\n")
   } catch {}
 }
 
