@@ -1,5 +1,105 @@
 # 更新记录
 
+## 0.3.23
+
+**修两个让「超级麦吉」在 magpie 网关后用不了的问题**
+
+magpie 当网关被调用时（ZCode 等 agent 从 magpie 的 OpenAI 端点进来），
+本插件的 provider 一直 400 / 502。查下来是两个独立的原因。
+
+### 一、网关路径下用错了 key
+
+```
+POST http://127.0.0.1:3425/v1/chat/completions   model=magicrew/glm-5.3-flash
+→ 502 {"message":"超级麦吉 did not stream: token无效"}
+```
+
+服务端是「签一把顶一把」，同一时刻只有一把 key 有效。本机三把 key 的状态：
+
+| key | 到期 | 上游认不认 |
+|---|---|---|
+| `plugin-auth.json` 里的 access（magpie 手里那把） | 16:38 | **✅ 认** |
+| key-store 槽 b | 15:55 | ❌ 已被顶掉 |
+| key-store 槽 a | 昨天 21:55 | ❌ 已被顶掉 |
+
+`ensureKey` 只按**过期时间**判断新鲜度（`isFresh`），只要没过时就直接用 store 里那把 ——
+于是每次都拿一把「时间没到、但服务端已经不认」的 key 去撞，上游回 403「token无效」。
+
+**修法**：先看 magpie 手里的 `auth.access`（那把才是最新的），store 退为兜底。
+
+```js
+const fromAuth = auth?.access
+  ? { apiKey: auth.access, expiresAt: Number(auth.expires) || 0 }
+  : null
+if (fromAuth && isFresh(fromAuth, leadMs)) return fromAuth
+```
+
+### 二、上游不认 `additionalProperties: {}`
+
+```
+POST .../v1/chat/completions  model=magicrew/deepseek-v4.1-flash
+→ 400 {"error":{"message":"模型响应失败","code":4017}}
+```
+
+ZCode 的一次真实请求带 54 个工具定义，上游逐字拒收。逐项二分定位到
+**两个工具的 `parameters` 顶层写了 `"additionalProperties": {}`**：
+`ExitPlanMode` 与 `CreateWorkflow`。
+
+最小复现（其它条件一致）：
+
+```
+additionalProperties: {}    → ❌ 被拒
+additionalProperties: true  → ✅ 通过
+additionalProperties: false → ✅ 通过
+无 additionalProperties      → ✅ 通过
+```
+
+按 JSON Schema，`{}` 与 `true` 语义等价（都允许任意额外属性）；非空的 schema
+（如 `{type:"string"}`）是有约束的，不能换。所以只把**空对象**换成 `true`，
+语义不变。
+
+**修法**：loader 的请求体改写里加一段递归规范化（loader 本来就是改写
+max_tokens / stream_options 的地方）：
+
+```js
+function loosenAdditionalProperties(node) {
+  if (!node || typeof node !== "object") return false
+  if (Array.isArray(node)) { let any = false; for (const n of node) if (loosenAdditionalProperties(n)) any = true; return any }
+  let changed = false
+  for (const [k, v] of Object.entries(node)) {
+    if (k === "additionalProperties") {
+      if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0) { node[k] = true; changed = true }
+      continue
+    }
+    if (v && typeof v === "object" && loosenAdditionalProperties(v)) changed = true
+  }
+  return changed
+}
+```
+
+客户端（ZCode / Claude Code 系）生成 schema 时常这么写，上游兼容一下更省事；
+插件这边做等价改写兜住。
+
+### 验证
+
+用 ZCode 的**真实请求体**（54 个工具 + `reasoning_effort:max` + `thinking`
++ `max_completion_tokens:384000`）经 magpie 网关：
+
+```
+→ HTTP 200  ✅ SSE 正常
+```
+
+### 排查时踩过的坑（留给下一个人）
+
+1. **上游对「token 无效」回的是 HTTP 200**，body `{"code":403,"message":"token无效"}`，
+   且 `error` 字段是**空数组**（falsy）—— 判断得用 `j.code !== 200`。
+   只看 HTTP 状态码会把失败当成功。
+2. **`key-store` 里的 key 可能「时间没到但已被顶掉」**。`isFresh` 只看时间，
+   要判断一把 key 还在不在，得真打一次上游。
+3. **插件宿主是运行时从 `~/.cache/magpie/bun/install-cache/` 加载的**，
+   不在 `plugin-host/host-*.js` 里；magpie 更新插件后会**换目录**（目录名带 commit hash），
+   要改当前实际加载的那个。
+
 ## 0.3.22 — 2026-10-28
 
 **余额窗口保留「今日 / 限时 / 永久」拆分展示**
