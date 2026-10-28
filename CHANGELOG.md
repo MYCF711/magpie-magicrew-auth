@@ -128,6 +128,33 @@ max_tokens=8000 → finish_reason:"stop"    reasoning_tokens:899  content:"10"
 （国内站，取图 → 识图 → 过旋转验证）判出 `clock=6.00 / deg=180`，verify 回
 `1000 验证成功`。
 
+**那换一个不思考的模型呢？** 能换，但别指望白捡。同一张图喂几个候选（都在
+`magicrew-intl` 下）：
+
+| 模型 | 耗时 | reasoning | 完成 tokens | 答案 |
+|---|---|---|---|---|
+| `gpt-4o` | **3.2 s** | **0** | **3** | 7.5 |
+| `gpt-5.4-mini` | **2.9 s** | **0** | **12** | 10.5 |
+| `gemini-3.7-flash` | 7.9 s | 0 | 425 | 2.5 |
+| `glm-5.3-flash` | 27.5 s | 3588 | 879 | 1.5 |
+| `qwen3.5-flash` | 45.1 s | 9087 | 5575 | 2.0 |
+| `workbuddy/deepseek-v4.1-flash`（当前） | 19.4 s | 3769 | 2475 | 2.5 |
+
+`gpt-4o` / `gpt-5.4-mini` 确实**完全不思考**（`reasoning_tokens: 0`，2～3 秒）。
+但同一张图六个模型给出 **1.5～10.5 钟点**的答案 —— 差得离谱，说明「谁对」必须用
+**通过率**判，不能只看快。小样本（每模型 3 张图、完整跑两问 + 提交）的结果：
+
+| 模型 | 通过 | 平均判角度耗时 |
+|---|---|---|
+| `workbuddy/deepseek-v4.1-flash`（当前） | 2/3 | 23.6 s |
+| `gpt-5.4-mini` | 1/3 | 7.4 s |
+| `gemini-3.7-flash` | 1/3 | 9.8 s |
+| `gpt-4o` | 0/3 | 1.1 s（三次都解析不出数字） |
+
+⚠ 样本太小（3 张/模型），**不能据此换模型**。但能确定两件事：① 换模型是唯一能
+真「不思考」的路；② 换之前必须用 `_probe/vision-accuracy.mjs` 跑 10 张以上比通过率，
+别拿速度当唯一指标。当前默认保持原模型 + `effort=low` + 并行。
+
 ### 验证
 
 - **新增 `tests/code-login.mjs`：34 个断言** —— 拦全局 fetch 换成可编程假服务端，
@@ -137,7 +164,7 @@ max_tokens=8000 → finish_reason:"stop"    reasoning_tokens:899  content:"10"
   （已注册 → 只走 generate + send-email、不碰 verify；新号 → 取了图但**不**直接发码）
 - **`tests/browser-login.mjs` 更新**：改成按 label 找「浏览器登录」，
   并新增四条方法的顺序断言（国际站 邮箱 → 手机号 → 浏览器 → 登录态；
-  国内站 手机号 → 邮箱 → 浏览器 → 登录态）。`authorize` 的耗时阈值从 50ms 放宽到
+  国内站 手机号 → 浏览器 → 登录态，**没有邮箱那条**）。`authorize` 的耗时阈值从 50ms 放宽到
   5s —— 它允许花几百毫秒拉起浏览器，红线是「**不卡在等用户**」；剪贴板起不来的
   环境里那一段改成跳过，而不是让整份测试崩
 - 回归：`multi-provider` 全过、`credit-refusal` 18 通过、`account-fallback` 10 通过、

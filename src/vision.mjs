@@ -194,11 +194,14 @@ async function askClock(base, model, imageDataUrl, variant) {
 /**
  * 让识图模型判断「该顺时针转多少度」。
  *
+ * @param {string} imageDataUrl 验证码图的 data URL
+ * @param {{model?:string}} [opts] `model` 可覆盖设置里那个（给对比脚本 / 测试用；
+ *   正常运行不传，读用户选的）
  * @returns {Promise<{ok:true, deg:number, clock:number, spread:number, model:string}
  *                  |{ok:false, reason:string, detail?:string}>}
  */
-export async function decideDegFromImage(imageDataUrl) {
-  const model = readVisionModel()
+export async function decideDegFromImage(imageDataUrl, { model: overrideModel } = {}) {
+  const model = overrideModel || readVisionModel()
   if (!model) return { ok: false, reason: "no-vision-model" }
 
   const base = await resolveGatewayBase()
