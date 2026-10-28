@@ -852,6 +852,19 @@ store  槽 a    expires 2026-10-28T14:41:03.000Z   → 200
 已经推翻过：同账号相隔 67 秒签的两把同时有效；12 把逐把探活，403 全部对应
 `expiresAt` 已过。真正失效的是**手里那把过期了**，不是后来签的把它顶掉了。
 
+### 自动维护（0.3.30 起）
+
+插件有两个 magpie 没替它做的事，都在 `src/auto-maintenance.mjs`：
+
+| 能力 | magpie 的现状 | 插件怎么补 |
+|---|---|---|
+| 默认开启签到 | `PluginCheckinOn()`：`pluginCheckins` 无显式值时默认 **false**（只有 WorkBuddy / Trae / MiniMax / Qoder 有内置开关） | 插件加载时读 `~/.config/magpie/settings.json`，只在键不存在时补 true；用户显式 false 不覆盖 |
+| 插件自身自动更新 | `Official()` 只认 `@magpie-community/*`；第三方 git / npm 源只提示、不自动装 | 读 `plugin-updates.json` 的 `waiting`；有自己就调 `magpie plugin update`；成功后补 `updated[]`（「已自动更新」徽章读它） |
+
+⚠ GUI 的 `/api/...` 不在 gateway 端口 3425 上（那里是 `/v1`，`/api/plugins/updates`
+会回 `/v1` 的 404 文案）；插件拿不到桌面 WebView 的 API，所以只能走文件 + CLI。
+⚠ `magpie plugin update` 不重启运行中的 magpie：更新文件后要下次启动才加载新代码。
+
 ### checkin 现在做四件事（0.3.11 起）
 
 ```
