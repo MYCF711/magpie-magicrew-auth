@@ -1,5 +1,46 @@
 # 更新记录
 
+## 0.3.23
+
+**网关路径的 key 兜底 —— 修「超级麦吉 did not stream: token无效」**
+
+magpie 当网关被调用时（别的 agent 通过 magpie 的 OpenAI/Anthropic 端点进来），
+本插件的 provider 可能整个用不上：
+
+```
+POST /v1/chat/completions  model=magicrew/glm-5.3-flash
+→ 502 {"message":"超级麦吉 did not stream: token无效"}
+```
+
+三个事实凑起来才看得清（2026-10-28 实测）：
+
+1. 直连官方 API，一切正常 —— 同一把 key、同一批参数（`reasoning_effort`、tools、
+   `max_tokens`）都试过，模型名、organization-code、`/v1/models` 也都正常。
+2. 插件自己的 key store 里**有一把好着的 key**，拿它直连上游 → HTTP 200。
+3. magpie 手里的 `plugin-auth.json` 那把 access **是废的** —— 服务端「签一把顶一把」，
+   插件自己轮换签发新 key 的瞬间，magpie 手里的就作废了。
+
+于是死结是：magpie 传给 loader 的 auth 里未必带 org → `accountOf()` 落到
+`"default"` → `readStore` 读不到这个账号的槽 → `ensureKey` 只能退回
+「用 magpie 手里的 access」→ 那把已经被顶掉 → 上游 403。
+
+**兜底**：`ensureKey` 在按账号找不到新鲜 key 时，再扫一遍**该站点所有账号**的
+store，挑一把还没过期、到期最晚的。key 与账号一一对应，用谁的 key 就是以谁的
+身份跑 —— 对「几个号轮流扛、积分少的先上」这种用法正合适。
+
+```js
+const anyLive = anyLiveKey(c, leadMs)
+if (anyLive) return anyLive
+```
+
+实测（模拟网关路径：auth 里没有 org，access 是废 key）：
+
+```
+ensureKey 返回: mgw_7d6325c1fd3b4b90…   ← store 里那把有效的
+是否等于 magpie 手里的（废）key ? false
+直连上游 → HTTP 200
+```
+
 ## 0.3.22 — 2026-10-28
 
 **余额窗口保留「今日 / 限时 / 永久」拆分展示**
