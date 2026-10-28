@@ -28,7 +28,21 @@ import {
   fetchWho,
   fetchOwnInviteCode,
 } from "../api.mjs"
-import { inviteToUse, readSession, writeSession, noteLoginFailure, noteOrg, readKnownOrgs, rollInvite } from "../store.mjs"
+import {
+  inviteToUse,
+  readSession,
+  writeSession,
+  noteLoginFailure,
+  noteOrg,
+  readKnownOrgs,
+  rollInvite,
+  readInvitePolicy,
+  writeInvitePolicy,
+  readAccountCodes,
+} from "../store.mjs"
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
@@ -168,7 +182,7 @@ function makeCodeMethod(c, kind) {
 
   return {
     type: "oauth",
-    label: `${c.SHORT} ${what}验证码`,
+    label: `${c.SHORT} ${what}验证码${inviteTag(c)}`,
     prompts: [
       isEmail
         ? {
@@ -330,6 +344,116 @@ function makeCodeMethod(c, kind) {
   }
 }
 
+// ═══ 邀请上级：登录时的选择 ═════════════════════════════════════════
+//
+// 默认行为（auto）是「用最后一个登录 / 签到的号的码」，但它会漂移 ——
+// 每天 00:00 签到最后跑的那个号会把文件覆盖掉。这里让用户注册时就能定死。
+//
+// 三选一：
+//   自动   —— 老行为
+//   某个号 —— 固定挂它名下（落盘成 fixed）
+//   自定义 —— 自己填一个码（落盘成 custom）
+//
+// 选项靠 `magicrew-invite-codes-<site>.json` 填 —— 那是签到 / 登录时
+// `rollInvite` 顺手记下来的（每个账号每天都会跑一次签到，所以不会过期）。
+// 这里**不能**发请求：prompts 的 options 是同步生成的。
+
+/** org → 便于辨认的名字（手机号打码 / 邮箱），从 magpie 自己的账号文件只读 */
+function accountLabel(siteId, org) {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+    for (const [k, v] of Object.entries(raw)) {
+      if (!String(k).startsWith(siteId)) continue
+      if (String(v?.org || "") !== org) continue
+      if (v?.accountId) return String(v.accountId)
+    }
+  } catch {}
+  return org
+}
+
+function inviteChoices(c, withCustom = true) {
+  const pol = readInvitePolicy(c.id)
+  const codes = readAccountCodes(c.id)
+  const opts = []
+  // 登录这条路：默认「保持当前」，避免顺手选一下就把已设好的固定上级冲掉
+  if (withCustom) {
+    opts.push({
+      label: "保持当前：" + describePolicy(pol),
+      value: "__keep__",
+      hint: "不改设置",
+    })
+  }
+  opts.push({
+    label: "自动（跟随最后一个登录 / 签到的号）",
+    value: "__auto__",
+    hint: pol.mode === "auto" ? "当前" : "会漂移",
+  })
+  for (const [org, v] of Object.entries(codes)) {
+    if (!v?.code) continue
+    opts.push({
+      label: accountLabel(c.id, org) + "（" + v.code + "）",
+      value: v.code,
+      hint: pol.mode === "fixed" && pol.code === v.code ? "当前固定" : org,
+    })
+  }
+  if (withCustom) {
+    opts.push({ label: "自定义邀请码…", value: "__custom__", hint: pol.mode === "custom" ? "当前" : "" })
+  }
+  return opts
+}
+
+
+
+/** 两个「只设置」入口共用的收尾 —— 把落盘结果回成一条可读的说明 */
+function savedPolicy(c) {
+  return {
+    type: "failed",
+    error: `已保存：新号默认挂在 ${describePolicy(readInvitePolicy(c.id))}。这一步只存设置，不登录、不新增账号。`,
+  }
+}
+
+/**
+ * 面板标题后缀 —— 让「当前挂在谁名下」在选登录方式那一屏就能看见。
+ * （那张面板只能显示 methods 的 label，插件没有别的可写位置。）
+ *
+ * ⚠ 值在插件加载时算一次；改完设置要重启 magpie 才会刷新标题。
+ *   设置本身是立即生效的，标题只是个提示。
+ */
+function inviteTag(c) {
+  const pol = readInvitePolicy(c.id)
+  if (pol.mode === "fixed" && pol.code) return `（上级 ${pol.accountId || pol.code}）`
+  if (pol.mode === "custom" && pol.code) return `（上级 ${pol.code}）`
+  return ""
+}
+
+function describePolicy(pol) {
+  if (pol.mode === "fixed" && pol.code) return (pol.accountId || pol.org || "某个号") + "（" + pol.code + "）"
+  if (pol.mode === "custom" && pol.code) return "自定义码 " + pol.code
+  return "自动（跟随最后一个登录 / 签到的号）"
+}
+
+const INVITE_MESSAGE = "新号挂在谁的邀请码下？（决定拉新奖励进哪个账号）"
+const CUSTOM_KEY = "inviteCode"
+
+/** 这次注册真正要带上的码 */
+
+/** 选择落盘 —— 只在 authorize 里、真正要开登录页之前调 */
+
+/**
+ * 动态提问：宿主支持 `ask`（magpie 内嵌契约里的 nextPrompt 优先用它），
+ * 所以下拉框每次都是最新的；静态 `prompts` 只作兜底。
+ *
+ * ⚠ 每次登录都会问 —— 但不能问第二次「自定义码」（选了才问），
+ *   而且上次的选择会作为默认带 hint，直接回车就用它。
+ *
+ * 契约限制（`extract-contract.py` 提取的原文）：那个「用哪种方式登录」面板
+ * 只能列 `methods`，而 methods 的 type 只有 `oauth` / `api` 两种 ——
+ * **两种都会真的建一个账号**，没有「纯设置项」这种入口。
+ * 所以入口只能挂在登录流程里，做不到面板上单独一格。
+ */
+
+/** 静态兜底：宿主不认 `ask` 时用 */
+
 export function makeMethods(c) {
   // 顺序 = magpie 登录方式列表里的顺序。
   //
@@ -350,8 +474,8 @@ export function makeMethods(c) {
 
     {
       type: "oauth",
-      label: `${c.SHORT} 浏览器登录`,
-      async authorize() {
+      label: `${c.SHORT} 浏览器登录${inviteTag(c)}`,
+      async authorize(inputs) {
         // 邀请码两条路都要出现：登录页的 URL，以及最终注册时服务端读到的那份
         const inviteCode = inviteToUse(c.id)
         const url = inviteCode
@@ -565,6 +689,66 @@ export function makeMethods(c) {
             }
           },
         }
+      },
+    },
+    // ── ④⑤ 邀请上级（只设置，不登录）───────────────────────────────
+    //
+    // 用户要的是「在这一屏单独一格，点开就能选」。
+    //
+    // 契约限制（extract-contract.py 提取的原文 + 2026-10-29 实测）：
+    //   · 这一屏只渲染 `methods`，而 methods 的 type 只有 `oauth` / `api`
+    //   · `save()` 对两者**都会写一个账号**；唯一不建号的出口是让 authorize
+    //     返回 `{ type: "failed" }`
+    //   · **`api` 类型只问一个问题** —— 实测第二问不会出现
+    //
+    // 所以拆成两个单步入口：一个选已登录账号，一个填自定义码。
+    // 两者都只是落盘 + 回一条「已保存」，不发请求、不建账号。
+    {
+      type: "api",
+      keyless: true,
+      label: `${c.SHORT} 邀请上级：选账号`,
+      prompts: [
+        { type: "select", key: "invite", message: INVITE_MESSAGE, options: inviteChoices(c, false) },
+      ],
+      async authorize(inputs) {
+        const pick = String(inputs?.invite || "")
+        if (pick === "__keep__") return { type: "failed", error: "没有改动（保持当前设置）" }
+        if (pick && pick !== "__auto__") {
+          const org =
+            Object.keys(readAccountCodes(c.id)).find((o) => readAccountCodes(c.id)[o]?.code === pick) || ""
+          writeInvitePolicy(c.id, {
+            mode: "fixed",
+            code: pick,
+            org,
+            accountId: org ? accountLabel(c.id, org) : "",
+          })
+        } else {
+          // 没选 / 选了「自动」→ 回到默认的滚动机制
+          writeInvitePolicy(c.id, { mode: "auto" })
+        }
+        return savedPolicy(c)
+      },
+    },
+
+    {
+      type: "api",
+      keyless: true,
+      label: `${c.SHORT} 邀请上级：自定义码`,
+      prompts: [
+        {
+          type: "text",
+          key: CUSTOM_KEY,
+          message: "自定义邀请码（IV 开头的 12 位；留空 = 保持当前）",
+          placeholder: "IVXXXXXXXXXX",
+        },
+      ],
+      async authorize(inputs) {
+        const code = String(inputs?.[CUSTOM_KEY] || "")
+          .trim()
+          .toUpperCase()
+        if (!code) return { type: "failed", error: "没有填码 —— 保持当前设置" }
+        writeInvitePolicy(c.id, { mode: "custom", code })
+        return savedPolicy(c)
       },
     },
   ]
