@@ -11,7 +11,7 @@ import { readFileSync, writeFileSync, mkdirSync, unlinkSync, existsSync } from "
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
-import { fetchOwnInviteCode } from "./api.mjs"
+import { fetchOwnInviteCode, SITES } from "./api.mjs"
 
 function cacheDir() {
   return join(homedir(), ".cache", "magpie")
@@ -257,6 +257,43 @@ export function noteAccountCode(siteId, org, code, accountId) {
     writeFileSync(f, JSON.stringify(all))
     syncInvitePage() // 页面清单跟着刷新
   } catch {}
+}
+
+
+/**
+ * 给页面补账号码：plugin-auth 里的每个账号（有 JWT 的）问一次自己的邀请码。
+ *
+ * 为什么需要：页面清单只缓存 `rollInvite` 走过的账号；老用户升级上来时
+ * `magicrew-invite-codes-<site>.json` 可能一条都没有，页面就是空的。
+ * 这里在 config 之后延迟跑一次，只补缺口；失败静默，下次签到仍会补。
+ */
+let backfillPromise = null
+export function backfillInviteCodes() {
+  if (backfillPromise) return backfillPromise
+  backfillPromise = (async () => {
+    try {
+      const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+      for (const siteId of ["magicrew", "magicrew-intl"]) {
+        const host = siteId === "magicrew-intl" ? SITES.intl.host : SITES.cn.host
+        const have = readAccountCodes(siteId)
+        for (const [k, v] of Object.entries(raw || {})) {
+          if (k !== siteId && !String(k).startsWith(siteId + "#")) continue
+          const org = String(v?.org || "").trim()
+          if (!org || have[org]?.code) continue
+          const jwt = String(v?.jwt || "")
+          if (!jwt) continue
+          try {
+            const own = await fetchOwnInviteCode(jwt, org, host)
+            if (own?.code) noteAccountCode(siteId, org, own.code, v.accountId)
+          } catch {}
+        }
+      }
+    } catch {}
+    finally {
+      backfillPromise = null
+    }
+  })()
+  return backfillPromise
 }
 
 /**

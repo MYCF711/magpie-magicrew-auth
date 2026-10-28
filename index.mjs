@@ -31,7 +31,7 @@
 
 import { SITES, siteCtx, REFRESH_LEAD_MS } from "./src/context.mjs"
 import { makeConfig } from "./src/hooks/config.mjs"
-import { syncInvitePage } from "./src/store.mjs"
+import { syncInvitePage, backfillInviteCodes } from "./src/store.mjs"
 import { makeMethods } from "./src/hooks/methods.mjs"
 import { makeRefresh } from "./src/hooks/refresh.mjs"
 import { makeLoader } from "./src/hooks/loader.mjs"
@@ -72,6 +72,11 @@ function buildPlugin(c) {
       config: (cfg) => {
         try {
           syncInvitePage()
+        } catch {}
+        // 老用户升级上来时码缓存可能是空的：延迟补一次（只补缺口，失败静默）
+        try {
+          const t = setTimeout(() => backfillInviteCodes().catch(() => {}), 20_000)
+          t.unref?.()
         } catch {}
         return makeConfig(c)(cfg)
       },
