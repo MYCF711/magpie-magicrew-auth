@@ -138,6 +138,12 @@ function render() {
     lock.onchange = () => saveLock(site.id, lock.checked);
     lockWrap.append(lock, document.createTextNode(" 锁定（签到不再覆盖）"));
     sec.appendChild(lockWrap);
+    if (!lock.checked) {
+      const offHint = document.createElement("div");
+      offHint.className = "hint";
+      offHint.textContent = "锁定已关闭：下面选的码只保存，不生效 —— 新号仍跟随最后一个登录/签到的号。";
+      sec.appendChild(offHint);
+    }
 
     if (!Object.keys(codes).length) {
       const hint = document.createElement("div");
@@ -204,7 +210,10 @@ async function save(siteId) {
   if (!pick) return;
   const base = { ...(state.options || {}) };
   const bySite = { ...(base.inviteBySite || {}), [siteId]: pick };
-  await queueSave({ inviteBySite: bySite }, "已保存 —— 下一个新号就按这个走");
+  const msg = lockOf(siteId)
+    ? "已保存 —— 下一个新号就按这个走"
+    : "已保存选择；但「锁定」已关闭，当前仍跟随最后一个登录/签到的号";
+  await queueSave({ inviteBySite: bySite }, msg);
 }
 
 function lockOf(siteId) {
