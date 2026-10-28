@@ -2,44 +2,61 @@
 
 ## 0.3.23
 
-**网关路径的 key 兜底 —— 修「超级麦吉 did not stream: token无效」**
+**修「超级麦吉 did not stream: token无效」—— 网关路径下用错了 key**
 
-magpie 当网关被调用时（别的 agent 通过 magpie 的 OpenAI/Anthropic 端点进来），
-本插件的 provider 可能整个用不上：
+magpie 当网关被调用时（别的 agent 从 magpie 的 OpenAI/Anthropic 端点进来），
+本插件的 provider 用不上：
 
 ```
-POST /v1/chat/completions  model=magicrew/glm-5.3-flash
+POST /v1/chat/completions   model=magicrew/glm-5.3-flash
 → 502 {"message":"超级麦吉 did not stream: token无效"}
 ```
 
-三个事实凑起来才看得清（2026-10-28 实测）：
+### 根因
 
-1. 直连官方 API，一切正常 —— 同一把 key、同一批参数（`reasoning_effort`、tools、
-   `max_tokens`）都试过，模型名、organization-code、`/v1/models` 也都正常。
-2. 插件自己的 key store 里**有一把好着的 key**，拿它直连上游 → HTTP 200。
-3. magpie 手里的 `plugin-auth.json` 那把 access **是废的** —— 服务端「签一把顶一把」，
-   插件自己轮换签发新 key 的瞬间，magpie 手里的就作废了。
+服务端是「签一把顶一把」，同一时刻只有一把 key 有效。而本机三把 key 的状态是：
 
-于是死结是：magpie 传给 loader 的 auth 里未必带 org → `accountOf()` 落到
-`"default"` → `readStore` 读不到这个账号的槽 → `ensureKey` 只能退回
-「用 magpie 手里的 access」→ 那把已经被顶掉 → 上游 403。
+| key | 到期 | 上游认不认 |
+|---|---|---|
+| `plugin-auth.json` 里的 access（magpie 手里那把） | 16:38 | **✅ 认** |
+| key-store 槽 b | 15:55 | ❌ 已被顶掉 |
+| key-store 槽 a | 昨天 21:55 | ❌ 已被顶掉 |
 
-**兜底**：`ensureKey` 在按账号找不到新鲜 key 时，再扫一遍**该站点所有账号**的
-store，挑一把还没过期、到期最晚的。key 与账号一一对应，用谁的 key 就是以谁的
-身份跑 —— 对「几个号轮流扛、积分少的先上」这种用法正合适。
+`ensureKey` 只按**过期时间**判断新鲜度（`isFresh`），只要没过时就直接用
+store 里那把 —— 于是每次都拿一把「时间没到、但服务端已经不认」的 key 去撞，
+上游回 403「token无效」，网关报成「did not stream」。
+
+**store 的写入时机比 magpie 的续期晚不了**，所以它守不住最新那把。
+
+### 修法
+
+`ensureKey` 先看 magpie 手里的 `auth.access`：它是最新且有效的就用它，
+store 退到「magpie 没给 access 时才顶上」的位置。
 
 ```js
-const anyLive = anyLiveKey(c, leadMs)
-if (anyLive) return anyLive
+const fromAuth = auth?.access
+  ? { apiKey: auth.access, expiresAt: Number(auth.expires) || 0 }
+  : null
+if (fromAuth && isFresh(fromAuth, leadMs)) return fromAuth
 ```
 
-实测（模拟网关路径：auth 里没有 org，access 是废 key）：
+顺手补了一层兜底：`account` 对不上（auth 里没带 org）时，
+在该站点所有 store 里挑一把还没过期的，别再拿一把已顶掉的硬撞。
+
+### 验证
 
 ```
-ensureKey 返回: mgw_7d6325c1fd3b4b90…   ← store 里那把有效的
-是否等于 magpie 手里的（废）key ? false
-直连上游 → HTTP 200
+magicrew/glm-5.3-flash            → ✅ 你好！👋 很高兴见到你，有什么我可以帮忙的吗？
+magicrew/deepseek-v4.1-flash      → ✅ 你好呀！👋 …
+magicrew-intl/deepseek-v4.1-flash  → ✅ 你好呀！😊 …
+group/never-stuck                 → ✅ 你好！😊 …
 ```
+
+### 排查时踩过的坑（留给下一个人）
+
+上游对「token 无效」回的是 **HTTP 200** + body `{"code":403,"message":"token无效"}`，
+不是 HTTP 403。只看 HTTP 状态码会把失败当成功 ——
+body 里 `error` 是**空数组**（falsy），判断时要用 `j.code !== 200`。
 
 ## 0.3.22 — 2026-10-28
 
