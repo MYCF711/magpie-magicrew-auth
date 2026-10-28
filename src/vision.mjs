@@ -128,52 +128,67 @@ function lastClock(text) {
 }
 
 async function askClock(base, model, imageDataUrl, variant) {
-  const res = await fetch(`${base}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+  const body = {
+    model,
+    // ⚠ 这个上限是**给推理 token 留的**，不是给答案留的。
+    //
+    //   实测（2026-10-28，`workbuddy/deepseek-v4.1-flash`）：max_tokens=400 时
+    //   `finish_reason:"length"`、`reasoning_tokens:400`、**`content` 是 null** ——
+    //   推理过程把额度吃干净，答案一个字都没输出。判官拿到空串 ⇒ 判成
+    //   「不可信」⇒ 整条无头登录挂掉。给到 6000 时 reasoning 用 899 就收尾，
+    //   `content` 正常回 "10"。
+    //   ⇒ 别按「答案就一个数字」去估这个值；它买的是模型的思考空间。
+    max_tokens: 6000,
+    // ⚠ `reasoning_effort: "low"` —— 实测有据的省法（2026-10-29，同一模型同一批图，
+    //   每个配置各跑 6 轮）：
+    //
+    //     |            | 出数字 | 平均耗时 | 平均 tokens | 平均 reasoning |
+    //     | 不传        |  5/6  | 20.6 s   |   2343      |    3581 字     |
+    //     | low         |  6/6  |  8.4 s   |   1007      |    1646 字     |
+    //
+    //   更快、更省、而且**更稳**（不传的那一组有一次把 6000 token 全烧在思考上、
+    //   `content` 交白卷）。判出来的角度两者一致。
+    //
+    //   ⚠ 别指望「彻底不思考」——这个模型在网关侧关不掉，实测 12 组参数：
+    //     `enable_thinking:false` / `thinking_budget:0` → 思考**更长**且 content 空；
+    //     `reasoning_effort:"none"/"minimal"` → 比不传还长；
+    //     `thinking:{type:"disabled"}` / `chat_template_kwargs` / `extra_body` /
+    //     `reasoning:{enabled:false}` → 都只是小幅缩短，没有一个真的关掉。
+    //     要真不思考，只能换一个**非推理**的视觉模型（那由用户在 magpie 设置里选）。
+    //
+    //   ⚠ 它**不是** OpenAI 规范字段：下面 send() 里有一层兜底，被 400 就退一步重发。
+    reasoning_effort: "low",
     // temperature 0 是为了同一张图两次问法之外的噪声尽量小；
     // 两次用不同措辞（variant）而不是靠随机温度，好复现
-    body: JSON.stringify({
-      model,
-      // ⚠ 这个上限是**给推理 token 留的**，不是给答案留的。
-      //
-      //   实测（2026-10-28，`workbuddy/deepseek-v4.1-flash`）：max_tokens=400 时
-      //   `finish_reason:"length"`、`reasoning_tokens:400`、**`content` 是 null** ——
-      //   推理过程把额度吃干净，答案一个字都没输出。判官拿到空串 ⇒ 判成
-      //   「不可信」⇒ 整条无头登录挂掉。给到 6000 时 reasoning 用 899 就收尾，
-      //   `content` 正常回 "10"。
-      //   ⇒ 别按「答案就一个数字」去估这个值；它买的是模型的思考空间。
-      max_tokens: 6000,
-      // ⚠ `reasoning_effort: "low"` —— 实测有据的省法（2026-10-29，同一模型同一批图，
-      //   每个配置各跑 6 轮）：
-      //
-      //     |            | 出数字 | 平均耗时 | 平均 tokens | 平均 reasoning |
-      //     | 不传        |  5/6  | 20.6 s   |   2343      |    3581 字     |
-      //     | low         |  6/6  |  8.4 s   |   1007      |    1646 字     |
-      //
-      //   更快、更省、而且**更稳**（不传的那一组有一次把 6000 token 全烧在思考上、
-      //   `content` 交白卷）。判出来的角度两者一致。
-      //
-      //   ⚠ 别指望「彻底不思考」——这个模型在网关侧关不掉，实测 12 组参数：
-      //     `enable_thinking:false` / `thinking_budget:0` → 思考**更长**且 content 空；
-      //     `reasoning_effort:"none"/"minimal"` → 比不传还长；
-      //     `thinking:{type:"disabled"}` / `chat_template_kwargs` / `extra_body` /
-      //     `reasoning:{enabled:false}` → 都只是小幅缩短，没有一个真的关掉。
-      //     要真不思考，只能换一个**非推理**的视觉模型（那由用户在 magpie 设置里选）。
-      reasoning_effort: "low",
-      temperature: 0,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: CLOCK_PROMPT(variant) },
-            { type: "image_url", image_url: { url: imageDataUrl } },
-          ],
-        },
-      ],
-    }),
-    signal: AbortSignal.timeout(90_000),
-  })
+    temperature: 0,
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: CLOCK_PROMPT(variant) },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ],
+      },
+    ],
+  }
+
+  const send = (b) =>
+    fetch(`${base}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(b),
+      signal: AbortSignal.timeout(90_000),
+    })
+
+  let res = await send(body)
+  if (res.status === 400 && Object.hasOwn(body, "reasoning_effort")) {
+    // 兼容兜底：识图模型是**用户自己选的**，不是我们能假设的（插件声明的模型目录里
+    // 什么都可能有，magpie 也允许自定义 provider）。有的 OpenAI 兼容端认出这个字段、
+    // 有的直接为未知字段回 400。宁可少省那几秒，也不要因为一个可选的优化把整条
+    // 无头登录打死 —— 去掉它重发一次，行为退回「不传」的那一档。
+    delete body.reasoning_effort
+    res = await send(body)
+  }
   if (!res.ok) throw new Error(`识图模型回 HTTP ${res.status}`)
   const j = await res.json()
   const m = j?.choices?.[0]?.message ?? {}
