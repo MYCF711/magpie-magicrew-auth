@@ -14,7 +14,31 @@
 // ⚠ 不要在这里读流、不要手拼 x-api-key ——
 //   流由 magpie 处理，头由 SDK 包自动加。见 README「最小交付面」。
 
-import { ensureKey, accountOf } from "../keys.mjs"
+import { ensureKey, accountOf, keyCandidates, adoptKey } from "../keys.mjs"
+
+/**
+ * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
+ *
+ *   · HTTP 403
+ *   · **HTTP 200 + `{"code":403,"message":"token无效"}`**  ← 绝大多数是这种
+ *
+ * 所以光看状态码会漏。只解析 JSON（SSE 一律不碰，读流会破坏它）。
+ */
+async function isKeyRejected(res) {
+  if (!res) return false
+  if (res.status === 401 || res.status === 403) return true
+  const ct = res.headers.get("content-type") || ""
+  if (res.status !== 200 || !ct.includes("application/json")) return false
+  let text = ""
+  try {
+    text = await res.clone().text()
+  } catch {
+    return false
+  }
+  if (text.length > 8192) return false
+  if (/"code"\s*:\s*(401|403)\b/.test(text)) return true
+  return /token无效|token 无效|invalid token|unauthorized/i.test(text)
+}
 
 /**
  * 把 JSON Schema 里的 `additionalProperties` **非布尔值**原地换成 `true`。
@@ -447,6 +471,8 @@ export async function rewriteCreditRefusal(res) {
 }
 
 export function makeLoader(c) {
+  /** 已经写回 store 的 key —— 避免每个请求都去读一次 store */
+  const adopted = new Set()
   return async (getAuth) => {
     const auth = await getAuth()
     if (!auth) return {}
@@ -489,12 +515,53 @@ export function makeLoader(c) {
         // 四处请求体改写，全在 rewriteRequestBody 里（那里有实测出处）
         body = rewriteRequestBody(body)
 
-        return rewriteCreditRefusal(await fetch(url, {
-          method: init?.method ?? "POST",
-          headers,
-          body,
-          signal: init?.signal ?? req?.signal ?? AbortSignal.timeout(300_000),
-        }))
+        const signal = init?.signal ?? req?.signal ?? AbortSignal.timeout(300_000)
+        const sendWith = (apiKey) =>
+          fetch(url, {
+            method: init?.method ?? "POST",
+            headers: { ...headers, authorization: `Bearer ${apiKey}` },
+            body,
+            signal,
+          })
+
+        // 同一账号可能握着两把 key（magpie 的 refresh 一条、插件 store 一条），
+        // 服务端只认最新签发的那把 —— 静态挑必然有一半踩空，只能逐把试。
+        // 详见 src/keys.mjs 的 keyCandidates 注释（2026-10-29 五个账号的实测表）。
+        const cands = await keyCandidates(c, getAuth)
+        if (!cands.length) throw new Error(`${c.SHORT} 未登录（拿不到可用的 key）`)
+
+        for (const cand of cands) {
+          const res = await sendWith(cand.apiKey)
+          if (!(await isKeyRejected(res))) {
+            // 这把能用 —— 写回 store，让 ensureKey / 额度那几路也用同一把
+            if (!adopted.has(cand.apiKey)) {
+              adopted.add(cand.apiKey)
+              adoptKey(c, fresh, cand.apiKey, cand.expiresAt)
+            }
+            return rewriteCreditRefusal(res)
+          }
+        }
+
+        // 这个账号的 key 全被拒。上游给的是 403「token无效」，magpie 会判成
+        // 「不可重试」直接抛给客户端（ZCode 显示 auth_failed / token无效）。
+        // 改写成 402：magpie 的 failure(402) 是 failCredit → 把这个账号 rest 掉、
+        // 去问下一个账号 / 组的下一个成员。与 0.3.26 的「积分不足」同一条通路。
+        return new Response(
+          JSON.stringify({
+            error: {
+              message:
+                `${c.SHORT}：本账号的 ${cands.length} 把密钥均已被上游拒绝，已切换到下一个账号。` +
+                `（该站只认最新签发的 key；持续出现请重新登录这个账号）`,
+              type: "account_unavailable",
+              code: 402,
+            },
+          }),
+          {
+            status: 402,
+            statusText: "Payment Required",
+            headers: { "content-type": "application/json" },
+          },
+        )
       },
     }
   }
