@@ -285,7 +285,7 @@ function orgCodeOf(json) {
  * 用刚建好的组织码把 token 绑上（前端 `magicOrganizationSync` 那一步）。
  * 返回 magic 侧真正的组织码；绑不上就返回空，让上层用建组织返回的那个码兜底。
  */
-async function bindOrganization(site, jwt, orgCode) {
+export async function bindOrganization(site, jwt, orgCode) {
   const url = `${site.host}/api/v1/auth/status?login_code=`
   const variants = [
     { authorization: jwt, "Organization-Code": orgCode },

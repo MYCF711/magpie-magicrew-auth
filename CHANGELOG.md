@@ -1,5 +1,21 @@
 # 更新记录
 
+## 0.3.46 — 2026-10-29
+
+**浏览器登录也走「无组织就建第一个组织」**
+
+0.3.44 只在验证码登录那条路补了建组织；浏览器登录（本机浏览器 / 插件拉起的窗口）拿到的是
+localStorage 里的 `authorization` + `organizationCode`，**无组织账号的 organizationCode 是空的**，
+于是 `completeSignIn` 拿空组织码去 `fetchPoints` 必失败，报「没有可用的组织码」。
+
+- `completeSignIn`（`src/hooks/methods.mjs`）：候选组织全验不过时，重新探测一次组织列表；
+  仍为空且 `auth/status` 回过 **3102** → 建首个组织（邀请码在这一步消费）→ 绑定 → 再验一次
+- 只认 3102，别的失败（网络抖动 / token 过期）绝不顺手建组织
+- `bindOrganization` 从 `headless.mjs` 导出复用
+- 这样三条登录路（验证码 / 浏览器 / 登录态）对「已注册但 Magic 没组织」的号行为一致
+
+验证：`tests/code-login.mjs` 45 条、`tests/browser-login.mjs` 顺序断言、`tests/invite-policy.mjs` 23 条全过
+
 ## 0.3.45 — 2026-10-29
 
 **建组织回 `{code:1000, data:[]}` 时不再误报「没有组织码」**
