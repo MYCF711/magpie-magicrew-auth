@@ -90,11 +90,14 @@ console.log("\n═══ ③ 没有浏览器数据时安静返回 null ═══
 {
   const empty = mkdtempSync(join(tmpdir(), "magicrew-local-empty-"))
   const saved = process.env.LOCALAPPDATA
+  const savedHome = process.env.HOME
   process.env.LOCALAPPDATA = empty
   process.env.USERPROFILE = empty
+  process.env.HOME = empty // macOS / Linux 的 roots() 用 homedir()
   const r = readLocalCreds("www.letsmagic.cn")
   ok(r === null, "空目录 → null（调用方据此降级到窗口登录）")
   process.env.LOCALAPPDATA = saved
+  process.env.HOME = savedHome
   process.env.USERPROFILE = fake
   rmSync(empty, { recursive: true, force: true })
 }
