@@ -54,7 +54,7 @@ export function makeUsage(c) {
         balance: total,
         unit: "积分",
         display: total > 0 ? `${fmt(total)} 积分` : "已耗尽",
-        ...(total > 0 ? runsOutOf(batches) : {}),
+        ...(total > 0 ? runsOutOf(batches) : { resetsAt: nextGrantAt() }),
       }]
 
       if (total > 0) {
@@ -115,6 +115,41 @@ function runsOutOf(expiring) {
     runsOutAt: new Date(next.ms).toISOString(),
     runsOut: next.points,
   }
+}
+
+/**
+ * 积分耗尽时，账户下一次有积分的时刻 → magpie 的 `resetsAt`。
+ *
+ * 为什么必须有它（2026-10-29 实测）：
+ *
+ * 宿主把「余额 ≤ 0」读成「用掉 100%」（provider/routing.go 里 balance→used
+ * 的换算），于是这个账号进 smart 的最后一档（spent）。但 spent 只是**排在
+ * 后面**，不是被排除 —— 一池账号全耗尽时，宿主仍然会一个一个去试，每个都
+ * 回一次 402。
+ *
+ * 而上游的 402 文案里写着「充值」，宿主读成 failCredit；failCredit 的休息
+ * 是「猜的」：一分钟后就再问一次（routing.go 里 guessed → askAt）。于是
+ * 账号被反复叫醒、反复撞：一天 1,332 次 402（每个国内号 30 分钟内 134 次）。
+ *
+ * 报上 `resetsAt`，宿主就知道这个账户的额度是「满的，直到那一刻」：
+ *   · Allowance.Full() 有值了（它要 used ≥ 98 **且** Resets 在未来）；
+ *   · 休息睡到那一刻，而不是一分钟后；
+ *   · 积分补上后（宿主重读到余额变了）自动醒。
+ *
+ * 每日积分的周期是**北京时间每天 00:00**（服务端给的每日批次 23:59 到期，
+ * 次日新的一批到账），所以下一次补充就在下一个 00:00。
+ */
+function nextGrantAt() {
+  const now = Date.now()
+  // 北京时间的当下（UTC+8）
+  const bj = new Date(now + 8 * 3600e3)
+  const nextMidnight = Date.UTC(
+    bj.getUTCFullYear(),
+    bj.getUTCMonth(),
+    bj.getUTCDate() + 1,
+    0, 0, 0, 0,
+  ) - 8 * 3600e3
+  return new Date(nextMidnight).toISOString()
 }
 
 function pickEarliest(expiring) {
