@@ -33,7 +33,7 @@ const ctx = await MagicrewIntlAuthPlugin({ client: null, directory: "." })
 const methods = ctx.auth.methods
 
 // 「浏览器登录」是唯一不带 prompts 的（点了直接开窗口/开页面）
-const browserMethod = methods.find((m) => !m.prompts?.length)
+const browserMethod = methods.find((m) => /浏览器登录/.test(m.label))
 
 console.log("═══ ① authorize 立刻返回、无输入 ═══")
 console.log("  label    :", browserMethod?.label)
@@ -94,16 +94,17 @@ const fail = (msg) => {
   process.exitCode = 1
 }
 
-if (methods.length !== 5) fail(`应该有 5 条登录方法，实际 ${methods.length} 条`)
+if (methods.length !== 6) fail(`应该有 6 条登录方法，实际 ${methods.length} 条`)
 // 站点 id → 谁排前面。国际站用户大多是邮箱注册的，所以邮箱在前。
 if (!/邮箱验证码/.test(labels[0] ?? "")) fail(`国际站第一条应该是「邮箱验证码」，实际是 ${labels[0]}`)
-if (!/手机号验证码/.test(labels[1] ?? "")) fail(`国际站第二条应该是「手机号验证码」，实际是 ${labels[1]}`)
-if (!/浏览器登录/.test(labels[2] ?? "")) fail(`第三条应该是「浏览器登录」，实际是 ${labels[2]}`)
-if (!/登录态/.test(labels[3] ?? "")) fail(`第四条应该是「登录态（JWT + 组织码）」，实际是 ${labels[3]}`)
-if (!/邀请码/.test(labels[4] ?? "")) fail(`第五条应该是「邀请码」，实际是 ${labels[4]}`)
+if (!/临时邮箱/.test(labels[1] ?? "")) fail(`国际站第二条应该是「临时邮箱自动」，实际是 ${labels[1]}`)
+if (!/手机号验证码/.test(labels[2] ?? "")) fail(`国际站第三条应该是「手机号验证码」，实际是 ${labels[2]}`)
+if (!/浏览器登录/.test(labels[3] ?? "")) fail(`第四条应该是「浏览器登录」，实际是 ${labels[3]}`)
+if (!/登录态/.test(labels[4] ?? "")) fail(`第五条应该是「登录态（JWT + 组织码）」，实际是 ${labels[4]}`)
+if (!/邀请码/.test(labels[5] ?? "")) fail(`第六条应该是「邀请码」，实际是 ${labels[5]}`)
 if (labels[0] === labels[1]) fail("前两条方法的标题不能一样（magpie 列表里会分不出来）")
 
-if (!process.exitCode) console.log("  ✓ 顺序正确：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码")
+if (!process.exitCode) console.log("  ✓ 顺序正确：邮箱 → 临时邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码")
 
 // ⚠ 这一份**会真的拉起浏览器**（见 ①），留着的句柄让 node 的事件循环不空 ——
 // 光设 process.exitCode 不会结束进程。实测：结论早就打完，进程还挂着，
