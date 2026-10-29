@@ -648,10 +648,17 @@ function thinkingSkippedBody(original) {
  * 救回来的"。只加响应头、不动正文，客户端忽略它也没有任何影响。
  */
 function markDegraded(res, mode) {
+  // ⚠ 不能直接 res.headers.set：fetch() 返回的 Response，其 headers guard 是
+  // **immutable** —— set 会抛 TypeError（被 catch 吞掉，于是这道脚印静默消失，
+  // 2026-10-29 踩过：以为没降级，其实降了）。必须复制成一个新的 Response；
+  // body 是 ReadableStream，原样传过去，SSE 不受影响。
   try {
-    res.headers.set("x-magicrew-thinking", mode)
-  } catch {}
-  return res
+    const headers = new Headers(res.headers)
+    headers.set("x-magicrew-thinking", mode)
+    return new Response(res.body, { status: res.status, statusText: res.statusText, headers })
+  } catch {
+    return res
+  }
 }
 
 /**

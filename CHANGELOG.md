@@ -1,3 +1,12 @@
+## 0.3.60 — 2026-10-29
+
+**修 0.3.59 的脚印静默消失：fetch 的 Response.headers 是 immutable**
+
+- `res.headers.set(...)` 在 fetch 返回的 Response 上会抛 TypeError（guard = immutable），
+  被 catch 吞掉后响应头根本没加上 —— 看起来像"没降级"，其实降了。改成复制一个新
+  Response（body 是 ReadableStream，原样传，SSE 不受影响）再加头
+- 验证：`tests/thinking-refusal.mjs` 36 项；真机 `x-magicrew-thinking` 头出现
+
 ## 0.3.59 — 2026-10-29
 
 **降级响应头：`x-magicrew-thinking: adaptive | stripped`**
