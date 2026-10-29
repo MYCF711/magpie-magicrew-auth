@@ -1,5 +1,45 @@
 # 更新记录
 
+## 0.3.44 — 2026-10-29
+
+**修掉「登录成功但拿不到组织码」：无组织的新号自动建首个组织（邀请码在这一步消费）**
+
+真机症状（用户截图）：验证码登录成功、拿到了 438 字符的 `access_token`，但组织探测全是空：
+
+```
+login-data/Bearer  200 但列表为空
+auth-status/Bearer 3103 authorization 不合法
+auth-status/裸     3102 用户尚未创建账号   ← 关键
+me-organizations   3103
+```
+
+原因不是「令牌不对」，是**这个号在用户中心登录成功了，但 Magic 里还没有用户/组织**。
+上游前端的正解不是报错，是建第一个组织 —— 邀请码也正是在这一步才消费（不是登录那一下）。
+
+改动（`src/headless.mjs`）：
+
+- `finishCodeLogin` 在「组织探测为空 **且** `auth/status` 回过 3102」时，自动建首个组织：
+  - 有邀请码 → `POST {keewood}/v4/user/organizations`
+    `{ name:"个人组织", industry_type:"其他", register_code:<邀请码>, logo:{} }`
+  - 码已被用（2152）→ 自动改走 `POST {keewood}/v4/users/organizations/create` `{invite_code:""}`（前端「继续登录」那条）
+  - 建完用 `GET /api/v1/auth/status` + `Organization-Code:<新码>` 再绑一次，拿 magic 侧真正的组织码
+  - 建组织返回的码也保留为候选，`completeSignIn` 会逐个用 `fetchPoints` 验
+- **只认 3102 才建**：3103（token 过期）、网络抖动、有组织但探测失败，都不会顺手新建组织 ——
+  否则会给已有账号多建一个组织
+- `methods.mjs` 把当前邀请码（`inviteToUse`）传进 `finishCodeLogin`
+- **附带修掉一个只有纯 HTTP 客户端才踩的坑（`src/captcha.mjs`）**：`/captcha/generate` 会回
+  `set-cookie: acw_tc=…`（阿里云 WAF），`/captcha/verify` 不带回去就回 `2000 客户端信息不匹配`。
+  Node 的 fetch 默认没有 cookie 罐，现在自己记住并在后续每个 keewood 请求里带上。
+  真机实测：带 cookie 后同样的验证请求从「客户端信息不匹配」变成按角度判的「验证不通过」
+
+验证：
+
+- `tests/code-login.mjs` 新增 8 条：端点/请求体/authorization/origin、绑定、2152 兜底、失败不吞错、
+  **没有 3102 不建组织**、WAF cookie 回传
+- 真机端点核对（2026-10-29）：用真实 354 字符 JWT 调 `check-create` 回 `{"code":1000,"data":{"result":true}}`；
+  同一把令牌 POST `/v4/user/organizations` + 无效邀请码回 `{"code":2152,"message":"邀请码错误"}`
+  ⇒ 端点、裸令牌（不带 Bearer）、请求体都对得上；这一步不创建任何组织
+
 ## 0.3.43 — 2026-10-29
 
 **国际站「邀请码」之后默认改问邮箱（原来写死手机号）**

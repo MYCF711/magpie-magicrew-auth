@@ -19,6 +19,7 @@ import {
   extractCreds,
   generateCaptcha,
   identKind,
+  keewoodOf,
   loginByCode,
   sendCode,
   verifyCaptcha,
@@ -147,7 +148,7 @@ export async function startSmsLogin(site, { mobile, stateCode = "+86" } = {}) {
  *     · 组织码找不着就调 `/api/v1/aggregation/login-data`（带 authorization 头，
  *       服务端会回这个账号所在的组织列表）—— 这条路径是文档里查得到的
  */
-export async function finishCodeLogin(site, { code, device, redirect, ...ident } = {}) {
+export async function finishCodeLogin(site, { code, device, redirect, inviteCode = "", ...ident } = {}) {
   const { json, status, text } = await loginByCode(site, { code, device, redirect, ...ident })
   if (!json) {
     throw new Error(`登录接口回了非 JSON（HTTP ${status}）：${String(text).slice(0, 200)}`)
@@ -170,7 +171,28 @@ export async function finishCodeLogin(site, { code, device, redirect, ...ident }
   }
   // 响应里给了组织码就用它；没给就把该账号的组织**全列出来**，
   // 由调用方逐个拿 fetchPoints 验（见 methods.mjs 的 completeSignIn）。
-  const orgs = org ? [org] : await fetchOrgs(site, jwt)
+  let orgs = org ? [org] : await fetchOrgs(site, jwt)
+  let createdOrg = ""
+
+  // 一个组织都没有 = 这个号在用户中心已经登录，但 Magic 里还没建用户。
+  // 上游前端的正解不是报错，是**建第一个组织**（邀请码就在这一步消费）——
+  // 见下面 createFirstOrganization 头上的注释。少了这一步，新号永远
+  // 停在「登录成功但拿不到组织码」。
+  //
+  // ⚠ 只认 `auth/status` 回的 **3102**（用户尚未创建账号）才建：
+  //   别的失败（3103 token 过期、网络抖动、账号有组织但探测失败）绝不能
+  //   顺手建一个新组织 —— 那会给已有账号多建一个组织。
+  const notCreated = orgProbeCodes().some((x) => x.code === 3102)
+  if (!orgs.length && notCreated) {
+    const made = await createFirstOrganization(site, jwt, inviteCode)
+    createdOrg = made.org
+    // 建完还要用 auth/status + Organization-Code 绑一次，拿到 magic 侧真正的组织码。
+    // 建组织返回的那个也留在候选里：万一绑定接口抽风，completeSignIn 还能拿它试一次。
+    const bound = await bindOrganization(site, jwt, made.org)
+    orgs = bound.length ? [...new Set([...bound, made.org])] : [made.org]
+    lastOrgProbeErrors.push(`建首个组织：${made.via} → ${made.org}`)
+  }
+
   if (!orgs.length) {
     throw Object.assign(
       new Error(
@@ -182,7 +204,144 @@ export async function finishCodeLogin(site, { code, device, redirect, ...ident }
       { raw: json },
     )
   }
-  return { jwt, org: orgs[0], orgs, raw: json }
+  return { jwt, org: orgs[0], orgs, raw: json, createdOrg }
+}
+
+// ═══ 无组织的新号：在用户中心建第一个组织（邀请码在这一步才消费）════════
+//
+// 这不是猜的：上游前端 magic-web 的登录页 chunk（`assets/login-KOsbWlyY.js`）
+// 在 `auth/status` 回 3102 USER_NOT_CREATE_ACCOUNT 时走的就是这几条：
+//
+//   有邀请码 → POST {keewood}/v4/user/organizations
+//              { name:"个人组织", industry_type:"其他", register_code:<邀请码>, logo:{} }
+//              → 响应里的 code 是新组织码
+//              → 再 GET /api/v1/auth/status（authorization + Organization-Code:<新码>）绑定
+//   码已被用（2152）→ 前端弹窗问「继续登录吗」→ 继续就走下面无邀请码那条
+//   没有邀请码 → POST {keewood}/v4/users/organizations/create { invite_code:"" }
+//
+// 配置文字来自官方 locale：`invite.inviteForm.defaultValue.name` = 个人组织、
+// `industryType` = 其他。
+//
+// ⚠ 少了这一步，新号在插件里永远停在「登录成功但拿不到组织码」——
+//   用户中心已经登录成功，但 Magic 侧还没有用户/组织。
+// ⚠ 这个接口在 **keewood 用户中心**（`keewoodOf(site)`），不是 magic-service；
+//   `valid /v4/user/organizations`（单数 user）和 `/v4/users/organizations/create`
+//   （复数 users）也是两个不同端点，别合并。
+
+async function postKeewoodJSON(site, path, body, jwt) {
+  const res = await fetch(`${keewoodOf(site)}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: jwt,
+      origin: site.web,
+      "user-agent": "magpie-magicrew-auth",
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+  })
+  const text = await res.text().catch(() => "")
+  if (!res.ok) throw new Error(`${path} HTTP ${res.status}：${text.slice(0, 140)}`)
+  let json = null
+  try {
+    json = JSON.parse(text)
+  } catch {}
+  if (!json) throw new Error(`${path} 回了非 JSON：${text.slice(0, 140)}`)
+  return json
+}
+
+/** 建组织接口把新组织码放在哪 —— 客户端会先 unwrap data，所以两种形状都认 */
+function orgCodeOf(json) {
+  const d = json?.data ?? {}
+  for (const v of [
+    d.code,
+    d.organization_code,
+    d.magic_organization_code,
+    d.third_platform_organization_code,
+    json?.code,
+  ]) {
+    if (typeof v === "string" && /^[a-z0-9]{6,32}$/i.test(v)) return v
+  }
+  return ""
+}
+
+/**
+ * 用刚建好的组织码把 token 绑上（前端 `magicOrganizationSync` 那一步）。
+ * 返回 magic 侧真正的组织码；绑不上就返回空，让上层用建组织返回的那个码兜底。
+ */
+async function bindOrganization(site, jwt, orgCode) {
+  const url = `${site.host}/api/v1/auth/status?login_code=`
+  const variants = [
+    { authorization: jwt, "Organization-Code": orgCode },
+    { authorization: `Bearer ${jwt}`, "Organization-Code": orgCode },
+  ]
+  for (const headers of variants) {
+    try {
+      const res = await fetch(url, {
+        headers: { ...headers, "user-agent": "magpie-magicrew-auth" },
+        signal: AbortSignal.timeout(20_000),
+      })
+      const text = await res.text().catch(() => "")
+      if (!res.ok) continue
+      let j = null
+      try {
+        j = JSON.parse(text)
+      } catch {
+        continue
+      }
+      if (j?.code !== 1000) continue
+      const list = j?.data ?? j
+      const orgs = Array.isArray(list) ? parseOrgs(list) : []
+      if (orgs.length) return orgs
+    } catch {}
+  }
+  return []
+}
+
+/**
+ * 给「登录成功但 Magic 里没用户」的号建第一个组织。
+ * @returns {Promise<{org:string, via:"邀请码"|"无邀请码"}>}
+ */
+export async function createFirstOrganization(site, jwt, inviteCode = "") {
+  const code = String(inviteCode || "").trim()
+  const problems = []
+
+  if (code) {
+    try {
+      const json = await postKeewoodJSON(
+        site,
+        "/v4/user/organizations",
+        { name: "个人组织", industry_type: "其他", register_code: code, logo: {} },
+        jwt,
+      )
+      if (json.code !== 1000) {
+        throw Object.assign(new Error(`建组织失败：${json.message ?? json.code}`), {
+          code: json.code,
+          raw: json,
+        })
+      }
+      const org = orgCodeOf(json)
+      if (org) return { org, via: "邀请码" }
+      problems.push(`POST /v4/user/organizations 回了 1000 但没有组织码：${describeShape(json)}`)
+    } catch (e) {
+      if (e?.code !== 2152) throw e
+      problems.push("邀请码已被使用（2152）")
+    }
+  }
+
+  // 没码 / 码已被用：前端「继续登录」那条路
+  const json = await postKeewoodJSON(site, "/v4/users/organizations/create", { invite_code: "" }, jwt)
+  if (json.code !== 1000) {
+    throw Object.assign(
+      new Error(
+        `建首个组织失败：${json.message ?? json.code}` + (problems.length ? `（${problems.join("；")}）` : ""),
+      ),
+      { code: json.code, raw: json },
+    )
+  }
+  const org = orgCodeOf(json)
+  if (!org) throw new Error(`建组织回了 1000 但没有组织码：${describeShape(json)}`)
+  return { org, via: "无邀请码" }
 }
 
 /** 旧签名兼容：手机号验证码换登录态 */
@@ -252,12 +411,18 @@ function extractLoginCreds(json) {
  *   全失败时把每一步的真实原因记在模块变量里，供上层错误信息引用。
  */
 let lastOrgProbeErrors = []
+let lastOrgProbeCodes = []
 export function orgProbeErrors() {
   return lastOrgProbeErrors.slice()
+}
+/** 每个探测接口回的业务码 —— 建首个组织只认 `auth/status` 的 3102（用户尚未创建账号） */
+export function orgProbeCodes() {
+  return lastOrgProbeCodes.slice()
 }
 
 export async function fetchOrgs(site, jwt) {
   lastOrgProbeErrors = []
+  lastOrgProbeCodes = []
 
   // 三个端点 × 两种 authorization 写法，全试一遍 —— 它们对令牌形态的宽容度不一样：
   //   · login-data       前端是 h.set("authorization", token)（无 Bearer），但它同时
@@ -301,6 +466,7 @@ export async function fetchOrgs(site, jwt) {
     }
     if (j?.code !== 1000) {
       lastOrgProbeErrors.push(`${p.tag}：code ${j?.code} ${j?.message ?? ""}`.trim())
+      lastOrgProbeCodes.push({ tag: p.tag, code: j?.code })
       continue
     }
     const list = p.pick(j)

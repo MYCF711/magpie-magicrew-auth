@@ -326,7 +326,7 @@ function makeCodeMethod(c, kind) {
           if (c0.length < 4) return { type: "failed", error: "验证码是 4~8 位数字" }
           let creds
           try {
-            creds = await finishCodeLogin(c, { ...ident, code: c0, redirect: loginUrl })
+            creds = await finishCodeLogin(c, { ...ident, code: c0, redirect: loginUrl, inviteCode })
           } catch (e) {
             return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
           }
