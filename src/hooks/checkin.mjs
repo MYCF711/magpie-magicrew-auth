@@ -20,6 +20,15 @@ export function makeCheckin(c) {
       // 滚动仍会丢；挂在这里（magpie 保证每天跑一次）可以第二天补上。
       // rollInvite 内部自带超时和 try/catch，失败不影响签到。
       await rollInvite(c.id, auth.jwt, auth.org, c.host)
+      // 首选模式下顺手看一眼邀请上级满没满，满了就换真实邮箱号。
+      // 走独立模块按需加载：它挂了不能拖垮签到；自带 10 分钟节流，
+      // 同一天多个账号签到不会重复查。故意**await**：签到是每天唯一
+      // 保证会跑一次的钩子，不等它就等于「可能永远不切」。
+      try {
+        const { enforceInviteSwitch } = await import("../invite-quota.mjs")
+        const sw = await enforceInviteSwitch(c)
+        if (sw.switched) console.error(`[magicrew] 邀请上级已切换（${c.id}）：${sw.reason}`)
+      } catch {}
       const { runCheckin } = await import("../tasks.mjs")
       const result = await runCheckin({ ...auth, host: c.host })
       // 签到成功后再给自动更新一次机会（config 启动时已试过一次；

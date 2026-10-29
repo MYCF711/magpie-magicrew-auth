@@ -283,6 +283,86 @@ Electron 的 `Cache/Cache_Data/data_*` 里留着客户端访问过的全部 URL 
 
 ---
 
+### 邀请名额：上游不给上限（0.3.62 实测）
+
+`/api/v1/invitations/info` 的完整返回（2026-10-29，国内站真实账号，原样）：
+
+```
+{"code":1000,"message":"ok","data":{
+  "invite_code":"IV3D3CRUCPH3",
+  "invite_count":1,
+  "invited_users":[{"invited_user_id":"usi_6e0c…","invited_user_name":"***",
+                    "registration_code":"IV3D3CRUCPH3","used_at":"2026-10-29 00:34:38"}]}}
+```
+
+**只有「已经邀了几个」，没有「还能邀几个」。** 为了找上限，探过 17 条候选路径：
+
+```
+/api/v1/invitations/activity            → 200  {"code":1000,"data":{"current_activity":2}}
+/api/v1/invitations/activity/{2,detail,config} → 404
+/api/v1/invitations/{config,limit,info/limit,rules,statistics,stats,records,list,quota,codes} → 404
+/api/v1/invite/info、/api/v1/share-incentive/config、/api/v1/share_incentive/activity → 404
+```
+
+⇒ 活动配置根本不下发。上限只能按**官方奖励口径**换算，也就是 ④b 里那张表：
+
+| 站点 | 每次注册奖励 | 邀请注册封顶 | ⇒ 名额 |
+|---|---|---|---|
+| 国内 | 1,000 | 60,000 | **60 次** |
+| 国际 | 200 | 10,000 | **50 次** |
+
+2026-10-29 用户在国际站界面上复核：邀请一个人 +200、被邀请 +200、
+邀请获得积分上限 +10,000 ⇒ 与表一致。
+
+⚠ 活动号会变（`current_activity` 已经是 2），所以这张表放在
+`src/api.mjs` 的 `INVITE_QUOTA`，并允许
+`~/.cache/magpie/magicrew-invite-quota-config-<site>.json` 覆盖
+（`{perInvite, capPoints, realMailDomains, allowPhoneAccounts}`）。
+
+**判满两条路取或**，少看一条都会误判：
+
+- `invite_count >= 名额` —— 注册即计数，不等到账；
+- `total_earned_points >= 封顶` —— 被邀请人开套餐后，订阅奖励会把封顶吃满，
+  那时名额还没用光。
+
+只看前者会漏「订阅奖励顶到封顶」；只看后者会漏「注册了但没完成任务、积分还没结算」，
+那种号名额其实已经占了。
+
+### 「真实邮箱」只认白名单后缀
+
+`plugin-auth.json` 里的 `accountId` 有两种形态（实测）：
+
+```
+真实邮箱账号     1451895195@qq.com / 1470292681@qq.com
+临时邮箱或抓不到  dkroe85ii62n / 7fli52t2tc2b / 189****051
+```
+
+temp-mail.io 的域名是**动态**的（实测 `jbsze.net`、`yzcalo.com` 都不是长期域名），
+所以黑名单永远追不上 —— 判定只认「正常邮箱服务商后缀」白名单
+（qq.com / 163.com / gmail.com / 189.cn …），其余一律不算。自建域名走配置追加。
+
+⚠ **国内站没有邮箱登录**：www.letsmagic.cn/login 只有微信 / 苹果 / 密码 / 手机 /
+私有部署；同一个发信请求 `/v4/user/send-email` 国内站回 `2000 服务异常`、
+国际站回 `1000 请求成功`（见 ④ 章）。所以国内站账号全是打码手机号，
+按邮箱白名单永远判假 ⇒ **国内站默认不会自动换上级**。要换，
+显式打开 `{"allowPhoneAccounts":true}`（只认 `189****051` 这种形态，
+随机串仍然不算）。
+
+### 自动换上级只动插件的策略，不动 magpie 的「首选」
+
+满了之后换人的实现只写 `magicrew-invite-policy-<site>.json`（`mode:"fixed"`），
+**不改** `~/.config/magpie/logins.json` 的 `first`：
+
+1. 插件对 magpie 目录只有读的份（坑 13），写文件未必被重新读进内存；
+2. 改 `first` 会顺手改变模型调用的路由账号 —— 那是另一件事；
+3. 「首选模式」在这个包里本来就是指邀请策略的 `fixed`（登录页「邀请码」输入 `1`
+   保存的那份快照），换它的指向就是用户要的行为。
+
+触发点：**签到（每天一次）+ 每次登录成功**，同一站点 10 分钟节流
+（`magicrew-invite-switch-<site>.json` 记时间），切换留痕到
+`magicrew-invite-switch-<site>.log`。替补按「真实邮箱 + 未满 + 剩余名额最多」挑，
+最多问 15 个候选（每个候选两个请求）。
+
 ## 五、一个包两个供应商
 
 magpie 把包里的**每个具名导出**当成一个独立插件。所以：
