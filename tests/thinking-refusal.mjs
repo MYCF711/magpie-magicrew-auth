@@ -298,6 +298,16 @@ await checkAsync("magpie 已转出手动 budget 时，也要走换形状（不�
   assert.equal(second.output_config.effort, "max")
 })
 
+await checkAsync("降级成功时响应头写上走了哪一步（adaptive / stripped）", async () => {
+  const a = fakeSend([400, 200])
+  const resA = await sendSkippingThinking(a.send, JSON.stringify({ reasoning_effort: "max", messages: [] }))
+  assert.equal(resA.headers.get("x-magicrew-thinking"), "adaptive")
+
+  const b = fakeSend([400, 400, 200])
+  const resB = await sendSkippingThinking(b.send, JSON.stringify({ reasoning_effort: "max", messages: [] }))
+  assert.equal(resB.headers.get("x-magicrew-thinking"), "stripped")
+})
+
 await checkAsync("第一次就 200 → 只发一次，body 原样", async () => {
   const { send, seen } = fakeSend([200])
   const req = JSON.stringify({ model: "x", reasoning_effort: "max", messages: [] })

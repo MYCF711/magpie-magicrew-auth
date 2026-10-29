@@ -639,6 +639,22 @@ function thinkingSkippedBody(original) {
 }
 
 /**
+ * 在响应头里留一道脚印：这一轮是**降级**过的，以及降到了哪一步。
+ *
+ *   x-magicrew-thinking: adaptive   ← 换成了 adaptive+output_config，思考还在
+ *   x-magicrew-thinking: stripped   ← 整条思考被剥掉了（能跑，但没思考）
+ *
+ * 为什么值得留：这条降级链**自己会重发请求**，出问题时最需要知道"到底是哪一步
+ * 救回来的"。只加响应头、不动正文，客户端忽略它也没有任何影响。
+ */
+function markDegraded(res, mode) {
+  try {
+    res.headers.set("x-magicrew-thinking", mode)
+  } catch {}
+  return res
+}
+
+/**
  * 发一次请求；上游因为 thinking 参数拒了，就按「换形状 → 剥掉」的顺序重发，
  * 别让这一条 400 打死整轮（见上面那节的长注释）。
  *
@@ -659,7 +675,7 @@ export async function sendSkippingThinking(send, body) {
       await first.body?.cancel()
     } catch {}
     const second = await send(adaptive)
-    if (!(await isThinkingBudgetRefusal(second))) return second
+    if (!(await isThinkingBudgetRefusal(second))) return markDegraded(second, "adaptive")
     try {
       await second.body?.cancel()
     } catch {}
@@ -669,7 +685,7 @@ export async function sendSkippingThinking(send, body) {
   if (!bare) return first
 
   const third = await send(bare)
-  if (!(await isThinkingBudgetRefusal(third))) return third
+  if (!(await isThinkingBudgetRefusal(third))) return markDegraded(third, "stripped")
 
   let text = ""
   try {
