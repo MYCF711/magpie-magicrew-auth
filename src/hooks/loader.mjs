@@ -467,7 +467,19 @@ export function rewriteRequestBody(raw) {
  * 大小写不敏感：一条来自 MagiCrew 自己，一条是 Anthropic 原文，别指望统一。
  */
 const THINKING_BUDGET_REFUSAL =
-  /thinking budget must be below[^"]*output token limit|manual thinking budgets are not supported|thinking\.budget_tokens/i
+  /thinking budget must be below[^"]*output token limit|manual thinking budgets are not supported|thinking\.budget_tokens|is not supported for this model[\s\S]{0,200}?adaptive/i
+
+/**
+ * 第三条文案（2026-10-29 追加实测，`max_tokens=64000` 时才出现，MagiCrew 把字段名
+ * 打成了 `***`）：
+ *
+ *   {"error":{"message":"\"***.***.enabled\" is not supported for this model.
+ *    Use \"***.***.adaptive\" and \"output_config.effort\" …"}}
+ *
+ * 原文是 `thinking.type.enabled` —— 同一条规则的另一种说法（Bedrock 转发的
+ * Anthropic 报文）。所以这条按「is not supported for this model … adaptive」认，
+ * 不打码也照样命中；别的 "not supported for this model" 不会带 adaptive，吃不到。
+ */
 
 /** 这段文本是不是「上游拒绝了 thinking 参数」 */
 export function isThinkingBudgetText(text) {
