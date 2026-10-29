@@ -56,8 +56,15 @@ console.log("\n═══ ② 空组织码、过期凭据都不算 ═══")
     rec("www.letsmagic.cn", "organizationCode2", "orgooooold1")
   ok(_internal.credsNear(text, "www.letsmagic.cn").length === 1, "解析层拿到 1 条（过期与否在 readLocalCreds 里判）")
 
-  // 直接验 readLocalCreds 的过期过滤：在临时浏览器目录里落一份过期记录
-  const dir = join(fake, "Microsoft", "Edge", "User Data", "Default", "Local Storage", "leveldb")
+  // 直接验 readLocalCreds 的过期过滤：在临时浏览器目录里落一份过期记录。
+  // Edge 的 User Data 路径三平台不同；以前写死 Windows 路径，Linux CI 读不到 fixture。
+  const edgeRoot =
+    process.platform === "win32"
+      ? join(fake, "Microsoft", "Edge", "User Data")
+      : process.platform === "darwin"
+        ? join(fake, "Library", "Application Support", "Microsoft Edge")
+        : join(fake, ".config", "microsoft-edge")
+  const dir = join(edgeRoot, "Default", "Local Storage", "leveldb")
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, "000003.log"), text)
   ok(readLocalCreds("www.letsmagic.cn") === null, "只有过期 jwt → 返回 null")
@@ -83,11 +90,14 @@ console.log("\n═══ ③ 没有浏览器数据时安静返回 null ═══
 {
   const empty = mkdtempSync(join(tmpdir(), "magicrew-local-empty-"))
   const saved = process.env.LOCALAPPDATA
+  const savedHome = process.env.HOME
   process.env.LOCALAPPDATA = empty
   process.env.USERPROFILE = empty
+  process.env.HOME = empty // macOS / Linux 的 roots() 用 homedir()
   const r = readLocalCreds("www.letsmagic.cn")
   ok(r === null, "空目录 → null（调用方据此降级到窗口登录）")
   process.env.LOCALAPPDATA = saved
+  process.env.HOME = savedHome
   process.env.USERPROFILE = fake
   rmSync(empty, { recursive: true, force: true })
 }
