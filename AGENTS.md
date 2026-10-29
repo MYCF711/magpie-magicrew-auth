@@ -43,8 +43,8 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | **要发版本** | **[UPDATING.md](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/UPDATING.md)**（脚手架的，七步） | CHECKLIST B 表全勾 + 四条验证 |
 | **用户说「更新了没变化」** | 本文件坑 12（git 源只提示、要手动点更新） | `magpie plugin list` 里的 commit 真的变了 |
 
-**最容易漏的是「要发版本」这一行。** `git push` 只是七步里的第 4 步 ——
-本仓库真踩过：0.3.14 只 push，结果 GitHub 右侧「暂无发布版本」、npm 停在 0.3.8。
+**最容易漏的是「要发版本」这一行。** 禁止直接推 main：只能推功能分支，
+PR 的 `rules` 检查全绿并合并后，才从与 `origin/main` 一致的提交发布。
 
 ---
 
