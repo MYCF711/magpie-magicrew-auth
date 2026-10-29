@@ -210,6 +210,47 @@ https://www.letsmagic.cn/?invitation=<code>
 字段名来自 `types/login.ts`：`invite_code?: string`。
 错误码 `2152` = 邀请码已被使用（`constants/api.ts`）。
 
+### 建首个组织（0.3.44 实测/源码核对）
+
+上游前端登录页 chunk `assets/login-KOsbWlyY.js` 在 `auth/status` 回 **3102
+USER_NOT_CREATE_ACCOUNT** 时走的分支（逐字符抄下来）：
+
+```js
+if (code === 3102) {
+  if ((await checkWhetherRegistrationIsOpen()).data.result) {
+    const code = 邀请码()                       // V()，来自 URL / cookie
+    if (code) {
+      const { code: org } = await submitInviteCode({
+        name: "个人组织",                        // locale: invite.inviteForm.defaultValue.name
+        industry_type: "其他",                   // locale: ...industryType
+        register_code: code,
+        logo: {},
+      })                                      // POST {keewood}/v4/user/organizations
+      await magicOrganizationSync(clusterCode, authorization, org)  // GET auth/status + Organization-Code
+    } else {
+      await registerCreateFirstOrganization({ invite_code: "" })    // POST {keewood}/v4/users/organizations/create
+    }
+  }
+}
+```
+
+| 端点 | 主机 | 认证 | 请求体 | 响应 |
+|---|---|---|---|---|
+| `POST /v4/user/organizations` | **keewood 用户中心**（国际 `keewood-service.magicrew.ai` / 国内 `i-keewood-service.teamshare.cn`） | `authorization: <access_token>` **裸的**（加 `Bearer` 被 nginx 401） | `{name, industry_type, register_code, logo:{}}` | `{code:1000,data:{code:"<新组织码>"}}`（客户端会 unwrap `data`，所以前端只解构 `code`） |
+| `POST /v4/users/organizations/create` | 同上 | 同上 | `{invite_code:""}` | 同上 |
+| `GET /v4/users/organizations/check-create` | 同上 | 同上 | — | `{code:1000,data:{result:true/false}}` |
+| `GET /api/v1/auth/status?login_code=` | **magic-service**（`site.host`） | `authorization: <access_token>` + `Organization-Code: <新组织码>` | — | `{code:1000,data:[MagicOrganization…]}` |
+
+真机核对（2026-10-29，国际站，用已保存的 354 字符网页 JWT）：
+
+```
+GET  /v4/users/organizations/check-create          → {"code":1000,"data":{"result":true}}
+POST /v4/user/organizations  (register_code=无效码) → {"code":2152,"message":"邀请码错误"}
+```
+
+⚠ 注意 `2152` 的文案是「邀请码错误」，不一定是「已被使用」——**无效码和用过的码同一个错误码**。
+⚠ 单数 `user` 与复数 `users` 是两个不同端点，别合并。
+
 ### 接口只认客户端登录的 JWT
 
 同一账号签的两把 JWT：

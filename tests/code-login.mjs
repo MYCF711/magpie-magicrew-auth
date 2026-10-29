@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict"
 
-import { identFields, identKind, generateCaptcha, verifyCaptcha, sendCode, loginByCode } from "../src/captcha.mjs"
+import { identFields, identKind, generateCaptcha, verifyCaptcha, sendCode, loginByCode, resetKeewoodCookies } from "../src/captcha.mjs"
 import { finishCodeLogin, startSmsLogin, startCodeLogin } from "../src/headless.mjs"
 import { SITES } from "../src/api.mjs"
 
@@ -41,7 +41,10 @@ globalThis.fetch = async (url, init = {}) => {
     headers: Object.fromEntries(Object.entries(init.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v])),
   })
   const next = queue.shift() ?? { code: 1000, data: {} }
-  return new Response(JSON.stringify(next), { status: 200, headers: { "content-type": "application/json" } })
+  const headers = { "content-type": "application/json" }
+  // 模拟 keewood 的 WAF cookie：`acw_tc` 必须带回 verify，否则 2000 客户端信息不匹配
+  if (next.__setCookie) headers["set-cookie"] = next.__setCookie
+  return new Response(JSON.stringify(next), { status: 200, headers })
 }
 
 const reset = (...responses) => {
@@ -143,6 +146,25 @@ await (async () => {
       mobile: "13800138000",
       state_code: "+86",
     })
+  })
+})()
+
+await (async () => {
+  // WAF cookie：generate 回的 acw_tc 必须带回 verify，否则 2000 客户端信息不匹配
+  resetKeewoodCookies()
+  reset(
+    {
+      code: 1000,
+      data: { token: "tok_cookie", image: "data:image/webp;base64,AAAA", expire_time: 1793200000 },
+      __setCookie: "acw_tc=cookie123;path=/;HttpOnly",
+    },
+    { code: 1000, data: { verified: true, business_token: "biz_cookie" } },
+  )
+  await generateCaptcha(site, { email: "cookie@example.com" })
+  await verifyCaptcha(site, { token: "tok_cookie", deg: 90, email: "cookie@example.com" })
+  check("generate 的 set-cookie 会带回 verify（acw_tc 客户端校验）", () => {
+    assert.equal(calls[1].url, `${KE}/captcha/verify`)
+    assert.equal(calls[1].headers.cookie, "acw_tc=cookie123")
   })
 })()
 
@@ -298,6 +320,127 @@ await (async () => {
       "新号竟然直接发码了 —— 免图判断把「没注册」也放行了",
     )
     assert.ok(threw, "假服务端下过不了图，应该抛错")
+  })
+})()
+
+// ── ⑥b 无组织的新号：建第一个组织（邀请码在这一步消费）────────────
+console.log("\n⑥b 无组织新号：auth/status 列表空 → 建首个组织 → 再绑定")
+
+const KEEWOOD_INTL = "https://keewood-service.magicrew.ai"
+// 6 个组织探测：与真机截图里的顺序/错误码一致 —— auth/status 裸令牌回 3102
+const probeReplies = () => [
+  { code: 1000, data: { auth_status: [] } }, // login-data/Bearer
+  { code: 1000, data: { auth_status: [] } }, // login-data/裸
+  { code: 3103, message: "authorization 不合法" }, // auth-status/Bearer
+  { code: 3102, message: "用户尚未创建账号" }, // auth-status/裸
+  { code: 1000, data: { items: [] } }, // me-organizations/Bearer
+  { code: 1000, data: { items: [] } }, // me-organizations/裸
+]
+
+await (async () => {
+  reset(
+    { code: 1000, data: { access_token: "tok-new-account" } }, // 登录成功
+    ...probeReplies(), // 6 个组织探测：3102 用户尚未创建账号
+    { code: 1000, data: { code: "ORGcreated01" } }, // 建组织
+    { code: 1000, data: [{ magic_organization_code: "MAGICORG01" }] }, // 带 Organization-Code 再绑一次
+  )
+  const r = await finishCodeLogin(site, {
+    email: "brand-new@example.com",
+    code: "123456",
+    inviteCode: "IVNEWCODE01",
+  })
+  const create = calls.find((c) => c.url === `${KEEWOOD_INTL}/v4/user/organizations`)
+  check("无组织新号会打 /v4/user/organizations（用户中心，不是 magic-service）", () => {
+    assert.ok(create, `没打建组织接口：${calls.map((c) => c.url).join(" / ")}`)
+    assert.equal(create.method, "POST")
+  })
+  check("建组织请求体 = {name:个人组织, industry_type:其他, register_code:<邀请码>, logo:{}}", () => {
+    assert.deepEqual(create.body, {
+      name: "个人组织",
+      industry_type: "其他",
+      register_code: "IVNEWCODE01",
+      logo: {},
+    })
+  })
+  check("建组织带 authorization（access_token 原样）+ origin", () => {
+    assert.equal(create.headers.authorization, "tok-new-account")
+    assert.equal(create.headers.origin, site.web)
+  })
+  check("建完用 Organization-Code 再绑一次，拿 magic 侧组织码", () => {
+    const bind = calls.find(
+      (c) =>
+        c.url.endsWith("/api/v1/auth/status?login_code=") &&
+        c.headers["organization-code"] === "ORGcreated01",
+    )
+    assert.ok(bind, "没有带 Organization-Code 的 auth/status")
+    assert.equal(r.org, "MAGICORG01")
+    assert.equal(r.createdOrg, "ORGcreated01")
+  })
+})()
+
+await (async () => {
+  // 反例：组织列表为空，但不是 3102 → **绝不能**顺手建组织（会给已有账号多建一个）
+  reset(
+    { code: 1000, data: { access_token: "tok-no-3102" } },
+    { code: 1000, data: { auth_status: [] } },
+    { code: 1000, data: { auth_status: [] } },
+    { code: 1000, data: [] },
+    { code: 1000, data: [] },
+    { code: 1000, data: { items: [] } },
+    { code: 1000, data: { items: [] } },
+  )
+  let err = null
+  try {
+    await finishCodeLogin(site, { email: "has-org@example.com", code: "123456", inviteCode: "IVX0000001" })
+  } catch (e) {
+    err = e
+  }
+  check("没有 3102 → 不建组织，仍报「拿不到组织码」", () => {
+    assert.ok(err, "应该抛")
+    assert.match(String(err.message), /拿不到组织码/)
+    assert.ok(
+      !calls.some((c) => c.url === `${KEEWOOD_INTL}/v4/user/organizations`),
+      "不是 3102 竟然也去建组织了",
+    )
+  })
+})()
+
+await (async () => {
+  // 邀请码已被用（2152）→ 前端「继续登录」那条：无邀请码建组织
+  reset(
+    { code: 1000, data: { access_token: "tok-2" } },
+    ...probeReplies(),
+    { code: 2152, message: "邀请码已被使用" },
+    { code: 1000, data: { code: "ORGFALLBACK" } },
+  )
+  const r = await finishCodeLogin(site, {
+    email: "another@example.com",
+    code: "123456",
+    inviteCode: "IVUSED00001",
+  })
+  check("邀请码 2152 → 自动走 /v4/users/organizations/create 兜底", () => {
+    const fallback = calls.find((c) => c.url === `${KEEWOOD_INTL}/v4/users/organizations/create`)
+    assert.ok(fallback, "没走无邀请码兜底")
+    assert.deepEqual(fallback.body, { invite_code: "" })
+    assert.equal(r.createdOrg, "ORGFALLBACK")
+  })
+})()
+
+await (async () => {
+  reset(
+    { code: 1000, data: { access_token: "tok-3" } },
+    ...probeReplies(),
+    { code: 2000, message: "注册未开放" },
+  )
+  let err = null
+  try {
+    await finishCodeLogin(site, { email: "x@example.com", code: "123456", inviteCode: "IVX0000001" })
+  } catch (e) {
+    err = e
+  }
+  check("建组织失败 → 抛出且不吞错", () => {
+    assert.ok(err, "应该抛")
+    assert.match(String(err.message), /注册未开放|建组织失败/)
   })
 })()
 

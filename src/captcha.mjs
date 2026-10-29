@@ -162,13 +162,62 @@ export function clockSpread(a, b) {
 /** 分歧超过这个值就认为「有人把方向看反了」，宁可重来也不要瞎提交 */
 export const CLOCK_MAX_SPREAD = 1.5
 
+/**
+ * keewood 的 cookie 罐。
+ *
+ * ⚠ 这是**必须的**：`/captcha/generate` 会回一个阿里云 WAF 的 `acw_tc` cookie，
+ *   `/captcha/verify` 不带它回去就回 `2000 客户端信息不匹配`（实测 2026-10-29）。
+ *   Node 的 fetch 没有 cookie jar，所以这里自己记住、后续每个 keewood 请求都带上。
+ *   浏览器天生带这个 cookie，所以前端从来没这个问题 —— 只有插件这种纯 HTTP 客户端会踩。
+ */
+const cookieJar = new Map() // origin -> Map(name, value)
+
+function cookieHeader(origin) {
+  const jar = cookieJar.get(origin)
+  if (!jar || !jar.size) return ""
+  return [...jar].map(([k, v]) => `${k}=${v}`).join("; ")
+}
+
+function rememberCookies(origin, res) {
+  let list = []
+  try {
+    list = res.headers.getSetCookie?.() ?? []
+  } catch {
+    /* 老运行时没有 getSetCookie */
+  }
+  if (!list.length) {
+    const raw = res.headers.get("set-cookie")
+    if (raw) list = [raw]
+  }
+  if (!list.length) return
+  let jar = cookieJar.get(origin)
+  if (!jar) {
+    jar = new Map()
+    cookieJar.set(origin, jar)
+  }
+  for (const line of list) {
+    const first = String(line).split(";")[0]
+    const at = first.indexOf("=")
+    if (at <= 0) continue
+    jar.set(first.slice(0, at).trim(), first.slice(at + 1).trim())
+  }
+}
+
+/** 测试用：清掉罐子，避免测试之间互相串 */
+export function resetKeewoodCookies() {
+  cookieJar.clear()
+}
+
 async function postJSON(url, body, { headers = {}, timeoutMs = 20_000 } = {}) {
+  const origin = new URL(url).origin
+  const cookie = cookieHeader(origin)
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...headers, ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   })
+  rememberCookies(origin, res)
   const text = await res.text()
   let json = null
   try {
