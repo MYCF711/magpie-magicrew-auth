@@ -1,3 +1,17 @@
+## 0.3.57 — 2026-10-29
+
+**补上 magpie 自己转出来的那条路径：`thinking:{type:"enabled",budget_tokens}` 也要换成 adaptive**
+
+- 0.3.56 只认 `reasoning_effort` / `reasoning.effort`，实测漏掉了真正发生的那条：
+  magpie 看到模型名是 `claude-*` 就走 Anthropic 语义，**先把 `reasoning_effort` 换成手动
+  budget** 再交给插件，于是插件收到的 body 里已经没有 effort，降级链直接跳到「剥光」
+  —— 请求能跑，但思考被一起剥掉了（`usage.reasoning_tokens: 0`）
+- 现在 `toAdaptiveThinking` 也认 `thinking.type === "enabled"`：用 `budget_tokens` 按 magpie
+  `effortOfBudget` 的分档反推级别（≤4096 low / ≤12000 medium / ≤24000 high / 其余 max），
+  再输出 `thinking:{type:"adaptive"}` + `output_config.effort`
+- 验证：`tests/thinking-refusal.mjs` 32 项（新增「magpie 已转出手动 budget 时也要走换形状，
+  不能直接剥光」）；真机 `group/claude-haiku-5.5` + `reasoning_effort=max` 从 400 变 200
+
 ## 0.3.56 — 2026-10-29
 
 **上游拒绝 thinking 参数时换形状重发，而不是把整轮打死**

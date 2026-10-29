@@ -506,6 +506,19 @@ function anthropicEffort(level) {
 }
 
 /**
+ * 手动 budget → effort 级别，按 magpie `effortOfBudget` 的同一套分档
+ * （`internal/gateway/ir.go`：≤4096 low、≤12000 medium、≤24000 high、其余 xhigh）。
+ * xhigh 最终由 {@link anthropicEffort} 折成 max。
+ */
+function effortOfBudget(n) {
+  if (!n || n <= 0) return ""
+  if (n <= 4096) return "low"
+  if (n <= 12000) return "medium"
+  if (n <= 24000) return "high"
+  return "xhigh"
+}
+
+/**
  * 把请求体里的思考参数换成 Anthropic 新形状：`thinking:{type:"adaptive"}` +
  * `output_config:{effort}`，并删掉 OpenAI/Chat 侧的 `reasoning_effort` /
  * `reasoning`。
@@ -526,8 +539,18 @@ export function toAdaptiveThinking(raw) {
   }
   if (!j || typeof j !== "object") return null
 
+  // 两条来源，都要认：
+  //   · OpenAI/Chat 侧：reasoning_effort / reasoning.effort（客户端直接发的）
+  //   · Anthropic 侧：thinking:{type:"enabled",budget_tokens} —— **magpie 自己
+  //     转的**。magpie 看到模型名是 claude-* 就走 Anthropic 语义，把
+  //     reasoning_effort 换成手动 budget 再交给插件，于是插件看到 body 里
+  //     已经没有 effort 了（2026-10-29 实测：只认 reasoning_effort 的版本
+  //     会漏掉这条路，降级链直接跳到「剥光」，思考被一起剥掉）。
   let effort = typeof j.reasoning_effort === "string" ? j.reasoning_effort : ""
   if (!effort && j.reasoning && typeof j.reasoning.effort === "string") effort = j.reasoning.effort
+  if (!effort && j.thinking && typeof j.thinking === "object" && j.thinking.type === "enabled") {
+    effort = effortOfBudget(Number(j.thinking.budget_tokens) || 0)
+  }
   const level = anthropicEffort(effort)
   if (!level) return null
 

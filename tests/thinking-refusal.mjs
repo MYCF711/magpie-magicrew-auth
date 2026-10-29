@@ -155,6 +155,24 @@ check("已有的 output_config.format 保留", () => {
   assert.deepEqual(out.output_config.format, { type: "json_schema" })
 })
 
+check("magpie 转出的 thinking.enabled+budget 也能换成 adaptive", () => {
+  const out = JSON.parse(toAdaptiveThinking(JSON.stringify({ model: "claude-haiku-5.5", thinking: { type: "enabled", budget_tokens: 32000 } })))
+  assert.deepEqual(out.thinking, { type: "adaptive" })
+  assert.equal(out.output_config.effort, "max", "32000 落在 xhigh 档，再折成 max")
+})
+
+check("budget 分档：4096→low、10000→medium、24000→high", () => {
+  for (const [budget, want] of [[4096, "low"], [10000, "medium"], [24000, "high"]]) {
+    const out = JSON.parse(toAdaptiveThinking(JSON.stringify({ thinking: { type: "enabled", budget_tokens: budget } })))
+    assert.equal(out.output_config.effort, want, `${budget} → ${want}`)
+  }
+})
+
+check("budget 是 0/缺失 → null（没要思考）", () => {
+  assert.equal(toAdaptiveThinking(JSON.stringify({ thinking: { type: "enabled" } })), null)
+  assert.equal(toAdaptiveThinking(JSON.stringify({ thinking: { type: "enabled", budget_tokens: 0 } })), null)
+})
+
 check("没有 effort → null（不该碰这种请求）", () => {
   assert.equal(toAdaptiveThinking(JSON.stringify({ model: "x", max_tokens: 64 })), null)
 })
@@ -247,6 +265,17 @@ await checkAsync("三次都被拒 → 交回带 code 的错误（不再是无码
   const body = JSON.parse(await res.text())
   assert.equal(body.error.code, "thinking_unsupported")
   assert.ok(body.error.message.includes("Thinking budget must be below"), "上游原文要带出来")
+})
+
+await checkAsync("magpie 已转出手动 budget 时，也要走换形状（不能直接剥光）", async () => {
+  const { send, seen } = fakeSend([400, 200])
+  const req = JSON.stringify({ model: "claude-haiku-5.5", max_tokens: 64000, thinking: { type: "enabled", budget_tokens: 32000 }, messages: [] })
+  const res = await sendSkippingThinking(send, req)
+  assert.equal(res.status, 200)
+  assert.equal(seen.length, 2, "换形状一次就该成，不该走到剥光")
+  const second = JSON.parse(seen[1])
+  assert.deepEqual(second.thinking, { type: "adaptive" })
+  assert.equal(second.output_config.effort, "max")
 })
 
 await checkAsync("第一次就 200 → 只发一次，body 原样", async () => {
