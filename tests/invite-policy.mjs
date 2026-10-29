@@ -283,13 +283,14 @@ await checkAsync("首选账号没有码 → 保存 auto", async () => {
   seedLogins("orgA")
 })
 
-check("标题与当前策略同源（固定时带上级，auto 不带）", () => {
+check("标题不带上级（加载时缓存，动态信息放 instructions）", () => {
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
   const label = makeMethods(c).find((m) => /手机号/.test(m.label)).label
-  assert.match(label, /（上级 181\*\*\*\*632）/)
+  // 0.3.50：label 在插件加载时被 magpie 缓存，不能放会变的上级 —— 改了策略也不会刷新。
+  assert.doesNotMatch(label, /上级/)
   writeInvitePolicy(SITE, { mode: "auto" })
   const auto = makeMethods(c).find((m) => /手机号/.test(m.label)).label
-  assert.doesNotMatch(auto, /（上级/)
+  assert.doesNotMatch(auto, /上级/)
 })
 
 // ═══ ④ backfill ══════════════════════════════════════════════════════
