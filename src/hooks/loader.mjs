@@ -764,6 +764,79 @@ export async function rewriteCreditRefusal(res) {
   })
 }
 
+// ═══ 上游「积分不足」的 402 → 「额度已用尽」 ═════════════════════════════
+//
+// 实测（2026-10-29，本机一天 1,332 次 402）：
+//
+//   magicrew@178****697   30 分钟内被撞 134 次
+//   magicrew-intl@1hsj2j5l08sr  同样 30 分钟内 140 次
+//   每次请求 tries=13 —— 13 个国内账号一个一个挨过去，各回一次 402
+//
+// 为什么一直撞：宿主把「余额 ≤ 0」读成「用掉 100%」，账号进 smart 的最后
+// 一档（spent）。但 spent 只是**排在后面**，不是被排除 —— 一池全耗尽时，
+// 宿主仍然挨个去试。
+//
+// 挨个试也就罢了，休息也救不了：上游这条文案里有「充值」，宿主读成
+// failCredit（creditWords 命中「充值」），而 failCredit 的休息是**猜的**
+// —— 一分钟后就再问一次（routing.go：guessed → askAt = now + 1 分钟），
+// 不管那 30 分钟的 rest 有多长。于是：撞 402 → 睡 1 分钟 → 又被叫醒 → 又撞。
+//
+// 修法只改插件这一层：把「充值 / 积分不足」这套说法，换成「额度 / 用量」
+// 这套说法。宿主读成 failQuota（usedUpWords 命中「额度」「用量」，且不含
+// creditWords 的「充值」），failQuota 的休息是「睡到它说的那一刻」：
+//
+//   · 搭配 auth.usage 报的 resetsAt（余额 ≤ 0 时报下一次补充积分的时刻），
+//     账号睡到次日 00:00 积分补上为止，不再一分钟一醒；
+//   · 积分补上后宿主重读到余额变了，自动醒。
+//
+// 原始文案不丢：原 message 原样放进响应头 X-Magpie-Origin-Reason。
+// ⚠ 不能留在 body 里 —— 宿主判「额度 / 充值」是**通读整个 body**的
+//   （failure() → wordsOf(body)），body 里只要还留着一个「充值」，
+//   它就仍然读成 out-of-credit，那一分钟一醒的老毛病照旧。
+const QUOTA_REFUSAL = "当前对话的可用额度已用尽（用量上限），请稍后再试。"
+const ORIGIN_REASON = "X-Magpie-Origin-Reason"
+
+/**
+ * 把上游「积分/余额不足」的 402 正文改写成「额度已用尽」的说法，让宿主
+ * 把它读成 out-of-quota（睡到额度恢复）而不是 out-of-credit（一分钟就醒）。
+ * 其余响应原样返回。
+ *
+ * @param {Response} res
+ * @returns {Promise<Response>}
+ */
+export async function rewriteCreditToQuota(res) {
+  if (!res || res.status !== 402) return res
+  let text
+  try {
+    text = await res.clone().text()
+  } catch {
+    return res
+  }
+  if (!isCreditExhausted(text)) return res
+  let body
+  try {
+    body = JSON.parse(text)
+  } catch {
+    return res // 不是 JSON 就别动它
+  }
+  const err = body?.error
+  if (!err || typeof err !== "object") return res
+  const original = typeof err.message === "string" ? err.message : ""
+  if (!original) return res
+  err.message = QUOTA_REFUSAL
+  const headers = new Headers(res.headers)
+  headers.delete("content-length")
+  headers.delete("content-encoding")
+  headers.set("content-type", "application/json")
+  // 原文放头上（宿主判词只看 body），终端/排障时还看得到上游原话
+  headers.set(ORIGIN_REASON, encodeURIComponent(original))
+  return new Response(JSON.stringify(body), {
+    status: 402,
+    statusText: "Payment Required",
+    headers,
+  })
+}
+
 /**
  * 上游（Swow/PHP）对请求体有 ~8MB 的硬上限（实测 6MB 过、8MB 拒），
  * 超了直接回 413 的 HTML 页 —— magpie 只能显示成难懂的
@@ -856,7 +929,7 @@ export function makeLoader(c) {
               adopted.add(cand.apiKey)
               adoptKey(c, fresh, cand.apiKey, cand.expiresAt)
             }
-            return rewriteTooLarge(await rewriteCreditRefusal(res), c.SHORT)
+            return rewriteTooLarge(await rewriteCreditToQuota(await rewriteCreditRefusal(res)), c.SHORT)
           }
           // 这把被拒：响应不再使用，显式取消 body —— 否则逐把试时
           // 每条死连接的响应体都挂着，等 GC 才释放。
@@ -875,7 +948,7 @@ export function makeLoader(c) {
               const res = await sendSkippingThinking((payload) => sendWith(renewed.apiKey, payload), body)
               if (!(await isKeyRejected(res))) {
                 adoptKey(c, fresh, renewed.apiKey, renewed.expiresAt)
-                return rewriteTooLarge(await rewriteCreditRefusal(res), c.SHORT)
+                return rewriteTooLarge(await rewriteCreditToQuota(await rewriteCreditRefusal(res)), c.SHORT)
               }
             }
           }
