@@ -1,0 +1,108 @@
+name: release
+
+# 只允许发布「已经合进默认分支」的提交。
+# tag 必须先通过版本一致性、祖先关系、离线测试与打包清单检查，才建 Release / 发 npm。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要重新生成正文的已有 tag，例如 v0.3.63
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: tag 必须对应版本，且提交已合进默认分支
+        env:
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          expected="v$(node -p "require('./package.json').version")"
+          test "$REF_NAME" = "$expected"
+          git fetch origin "$DEFAULT_BRANCH" --quiet
+          git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"
+      - name: 离线测试与打包预演
+        run: |
+          set -euo pipefail
+          for f in tests/*.mjs; do
+            case "$f" in
+              tests/smoke.mjs|tests/browser-login.mjs)
+                echo "跳过环境依赖测试：$f"
+                ;;
+              *)
+                echo "== $f =="
+                node "$f"
+                ;;
+            esac
+          done
+          npm pack --dry-run
+
+  release:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: 从 CHANGELOG.md 抽正文
+        env:
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ver="${REF_NAME#v}"
+          test -f CHANGELOG.md
+          awk -v ver="$ver" '
+            /^## / { if (f) exit; if (substr($0, 4, length(ver)) == ver) { f = 1; next } }
+            f { print }
+          ' CHANGELOG.md | sed '/^[[:space:]]*$/d' > notes.md
+          test -s notes.md
+      - name: 建或刷新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$REF_NAME" --title "$REF_NAME" --notes-file notes.md --draft=false
+          else
+            gh release create "$REF_NAME" --title "$REF_NAME" --notes-file notes.md
+          fi
+
+  npm:
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "没配 NPM_TOKEN —— 跳过 npm 发布（git 源与 Release 不受影响）"
+            exit 0
+          fi
+          npm run publish:npm
