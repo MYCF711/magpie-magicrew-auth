@@ -66,6 +66,26 @@ check("Anthropic 的 Manual thinking budgets are not supported…", () => {
   assert.equal(isThinkingBudgetText(REFUSAL_ADAPTIVE), true)
 })
 
+check("Bedrock 转发的那条（字段名被 MagiCrew 打成 ***）也认", () => {
+  assert.equal(
+    isThinkingBudgetText(
+      '"***.***.enabled" is not supported for this model. Use "***.***.adaptive" and "output_config.effort"',
+    ),
+    true,
+  )
+})
+
+check("同一句不打码时也认", () => {
+  assert.equal(
+    isThinkingBudgetText('"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive"'),
+    true,
+  )
+})
+
+check("别的 not supported for this model 不吃（没有 adaptive 字样）", () => {
+  assert.equal(isThinkingBudgetText("max_tokens is not supported for this model"), false)
+})
+
 check("裸 thinking.budget_tokens 字段报错也认", () => {
   assert.equal(isThinkingBudgetText('{"error":{"message":"thinking.budget_tokens: 32000"}}'), true)
 })

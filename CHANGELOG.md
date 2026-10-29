@@ -1,3 +1,14 @@
+## 0.3.58 — 2026-10-29
+
+**第三条拒绝文案：Bedrock 转发的 `"thinking.type.enabled" is not supported for this model`**
+
+- `max_tokens=64000` 时才出现的说法（MagiCrew 把字段名打成 `***`）：同一条规则的另一种
+  表述，0.3.57 没认，于是这条 400 直接穿过去、整轮照旧失败
+- 正则按「`is not supported for this model` … `adaptive`」认，打码与不打码都命中；
+  不带 adaptive 的 "not supported for this model" 不吃
+- 验证：`tests/thinking-refusal.mjs` 35 项；真机 `max_tokens=64000` + `reasoning_effort=max`
+  从 400 变 200
+
 ## 0.3.57 — 2026-10-29
 
 **补上 magpie 自己转出来的那条路径：`thinking:{type:"enabled",budget_tokens}` 也要换成 adaptive**
