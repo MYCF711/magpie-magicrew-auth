@@ -204,15 +204,11 @@ check("提示灰色字：当前模式，自动 → 输入 1 切换首选", () =>
 check("提示灰色字只有自动 / 首选两种（保存的首选快照也显示首选）", () => {
   seedLogins("orgA")
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
-  // 0.3.62 起首选的灰色字带上「上级 + 剩余名额」（名额来自本地缓存，测试里没有
-  // 缓存就不显示数字），所以用前缀 + 后缀两头钉，中间那段数字交给 invite-quota 测试。
-  const p1 = inviteMethod().prompts[0].placeholder
-  assert.match(p1, /^当前模式：首选 · 181\*\*\*\*632/)
-  assert.match(p1, /输入 0 切换：自动$/)
-  seedLogins("orgC") // 首选项后来变了，保存的快照仍显示首选 + 同一个上级
-  const p2 = inviteMethod().prompts[0].placeholder
-  assert.match(p2, /^当前模式：首选 · 181\*\*\*\*632/)
-  assert.match(p2, /输入 0 切换：自动$/)
+  // 0.3.63 撤回：框里只写模式（不写上级、不写邀请次数）。
+  // 次数在额度卡片上已经有了，而且带邮箱后整串放不进输入框会被截断。
+  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
+  seedLogins("orgC") // 首选项后来变了，保存的快照仍显示首选
+  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
   seedLogins("orgA")
 })
 

@@ -43,8 +43,6 @@ import {
   readInvitePolicy,
 } from "../store.mjs"
 import { readLocalCreds } from "../local-browser.mjs"
-// 只引纯读函数（读缓存、算名额），不触网 —— prompts 是同步的，这里不可能等 API。
-import { quotaOf, readQuotaCache } from "../invite-quota.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
 import { captureCredential } from "../credentials.mjs"
@@ -424,29 +422,10 @@ function makeCodeMethod(c, kind) {
 function inviteNote(c) {
   const pol = readInvitePolicy(c.id)
   if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code && !orgDead(c, pol.org)) {
-    return `\n本次邀请上级：${pol.accountId || pol.code}${quotaSuffix(c, pol.org)}（想换：登录页「邀请码」）。`
+    return `\n本次邀请上级：${pol.accountId || pol.code}（想换：登录页「邀请码」）。`
   }
   return ""
 }
-
-/**
- * 上级还剩几个名额 —— **只读缓存**，不发网络请求。
- *
- * prompts / instructions 都是同步生成的，等不了 API。缓存由三条路径写入：
- *   · 额度钩子（usage，约 5 分钟一次）
- *   · 签到（每天一次）
- *   · 登录成功（每次都在切之前先查一次）
- * 所以这里显示的数字最多旧 5 分钟 —— 对一个「还剩几个人」的展示足够。
- * 缓存里没有这个账号就不显示，不猜。
- */
-function quotaSuffix(c, org) {
-  const e = readQuotaCache(c.id)[String(org || "").trim()]
-  if (!e) return ""
-  const q = quotaOf(c.id, { count: e.count, earned: e.earned })
-  if (!q.limit) return ""
-  return q.full ? ` · 邀请 ${q.count}/${q.limit} 已满` : ` · 邀请 ${q.count}/${q.limit}`
-}
-
 
 // ═══ 邀请码：登录页一个按钮 + 一个数字文本框 ═══════════════════════
 //
@@ -476,10 +455,12 @@ function modeHint(c) {
   // 只有两种模式：自动 / 首选。fixed 就是「上次保存的首选快照」，
   // 不再另叫「固定」—— 首选项后来变了也还是「首选」，输入 0 即可回自动。
   if (pol.mode === "auto" || !pol.code) return "当前模式：自动，输入 1 切换：首选"
-  // 首选模式把「挂谁的码 + 那个号还剩几个名额」写进灰色字 —— 用户点开这一项
-  // 最想知道的就这两件事。会自动切换时，这里显示的就是切换后的新上级。
-  const who = String(pol.accountId || pol.code)
-  return `当前模式：首选 · ${who}${quotaSuffix(c, pol.org)}，输入 0 切换：自动`
+  //
+  // ⚠ 这里**只写模式**，不写上级账号、也不写邀请次数（0.3.63 撤回）：
+  //   ① 邀请次数额度卡片上已经有了（「邀请次数 45 / 50 次」），框里再写一遍是重复；
+  //   ② 加上邮箱后整串放不进那个输入框，会被截成「…· 邀请 45/50，输入」。
+  //   上级是谁在 authorize 的 instructions 里说（那里空间够）。
+  return "当前模式：首选，输入 0 切换：自动"
 }
 
 function invitePrompt(c) {
