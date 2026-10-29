@@ -17,7 +17,14 @@ function fromEdge() {
   let jwt = ""
   let org = ""
   let best = 0
-  for (const f of readdirSync(EDGE_DIR)) {
+  let files
+  try {
+    files = readdirSync(EDGE_DIR)
+  } catch {
+    // 非 Windows / 本机没装 Edge：这是「没有凭据」，不是测试崩溃。
+    return { jwt, org }
+  }
+  for (const f of files) {
     let d
     try {
       d = readFileSync(join(EDGE_DIR, f))
