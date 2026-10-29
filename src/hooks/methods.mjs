@@ -45,6 +45,7 @@ import {
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
+import { tempMailAvailable, claimTempMailbox, waitTempCode } from "../tempmail-client.mjs"
 import {
   bindOrganization,
   createFirstOrganization,
@@ -459,6 +460,60 @@ function saveInviteChoice(c, raw) {
   writeInvitePolicy(c.id, { mode: "auto" })
 }
 
+/**
+ * 邮箱自动捕获验证码（国际站）：登录+自动过图在 Magicrew 插件；建邮箱/收信/抽码在
+ * `magpie-tempmail` 插件（本机 HTTP 服务，风险集中在那里）。
+ *
+ * 只在国际站、且临时邮箱插件正在运行时挂出来 —— 没装/没启用就没有这个按钮。
+ */
+function autoCodeMethod(c) {
+  return {
+    type: "oauth",
+    label: `${c.SHORT} 邮箱自动捕获验证码`,
+    prompts: [],
+    async authorize() {
+      const mb = await claimTempMailbox(c.id)
+      const inviteCode = inviteToUse(c.id)
+      const loginUrl = inviteCode
+        ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+        : `${c.web}/login`
+      return {
+        url: loginUrl,
+        instructions: `邮箱 ${mb.address} 已就绪（由临时邮箱插件创建）。
+插件会自动过旋转验证、收取验证码并完成登录；不需要你填邮箱或验证码。
+如果失败，这里会显示原因，直接重试即可。`,
+        method: "auto",
+        opened: true,
+        async callback() {
+          try {
+            let sent = null
+            let lastErr = null
+            for (let i = 0; i < 4 && !sent; i++) {
+              try {
+                sent = await startCodeLogin(c, { email: mb.address })
+              } catch (e) {
+                lastErr = e
+                await new Promise((r) => setTimeout(r, 2500))
+              }
+            }
+            if (!sent) throw lastErr || new Error("旋转验证没通过")
+            const code = await waitTempCode(mb.address, { timeoutMs: 150_000 })
+            const creds = await finishCodeLogin(c, {
+              email: mb.address,
+              code,
+              redirect: loginUrl,
+              inviteCode,
+            })
+            return await completeSignIn(c, creds.jwt, creds.org, creds.orgs, null, mb.address)
+          } catch (e) {
+            return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+          }
+        },
+      }
+    },
+  }
+}
+
 export function makeMethods(c) {
   // 浏览器登录的等待上限：国际站链路长、没代理时首屏/登录态写入都慢，
   // 5 分钟经常卡在「验证码刚到、窗口还没开」那一下（真机反馈）。国际站给 15 分钟。
@@ -478,7 +533,8 @@ export function makeMethods(c) {
   // 建两份的话，下次改文案 / 超时必然只改一处 —— 同一个「只写一份」的理由，
   // 见 makeCodeMethod 头上那段。
   const emailMethod = c.id === "magicrew-intl" ? makeCodeMethod(c, "email") : null
-  const codeMethods = emailMethod ? [emailMethod, mobileMethod] : [mobileMethod]
+  const autoMethod = c.id === "magicrew-intl" && tempMailAvailable() ? autoCodeMethod(c) : null
+  const codeMethods = emailMethod ? [emailMethod, ...(autoMethod ? [autoMethod] : []), mobileMethod] : [mobileMethod]
 
   // 「邀请码」入口保存完策略后接哪条验证码登录 —— **跟站点主登录方式一致**：
   //   国际站 → 邮箱（那边用户大多是邮箱注册的）
