@@ -1,5 +1,19 @@
 # 更新记录
 
+## 0.3.47 — 2026-10-29
+
+**国际站新增「邮箱验证码（临时邮箱·自动）」：点一下，插件自己建临时邮箱、过旋转验证、收码、完成登录**
+
+- 新文件 `src/tempmail-client.mjs`：temp-mail.io 公开 API（`yzcalo.com` 域名），建自定义地址、轮询收件、抽 6 位码
+- `src/hooks/methods.mjs` 的 `tempMailMethod(c)`：只挂国际站；无 prompts，`authorize` 只建邮箱（秒回），
+  `callback` 里走 `startCodeLogin → waitTempCode → finishCodeLogin → completeSignIn`
+- 为什么用 temp-mail.io：实测 `maxxspace.com`（mail.tm）/ `guerrillamailblock.com` / `mailinator.com`
+  的地址在 `/captcha/verify` 全部被拒；`qq.com` / `163.com` / `gmail.com` / `yzcalo.com` 直接过。
+  这是域名黑名单，不是识图问题
+- `tests/browser-login.mjs` 的顺序断言改成 6 条（邮箱 → 临时邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码）
+- 真机验证：`mkmvt4ecngirl1@yzcalo.com` 完整登录成功（JWT 354 字节、org `njekbb588hnn`）；
+  CLI 再登一次新地址 `mk1793253651x@yzcalo.com` 也成功，落库 key 后 `/v1/chat/completions` 回 200
+
 ## 0.3.46 — 2026-10-29
 
 **浏览器登录也走「无组织就建第一个组织」**

@@ -45,6 +45,7 @@ import {
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
+import { createTempMailbox, waitTempCode } from "../tempmail-client.mjs"
 import {
   bindOrganization,
   createFirstOrganization,
@@ -454,6 +455,54 @@ function saveInviteChoice(c, raw) {
   writeInvitePolicy(c.id, { mode: "auto" })
 }
 
+/**
+ * 邮箱验证码（临时邮箱·自动）：给新号用 temp-mail.io 的地址，插件自己过图、收码、换登录态。
+ *
+ * 为什么单独一条，而不是改 makeCodeMethod：
+ *   · 它没有 prompts —— 地址是插件造的，用户不用填；
+ *   · authorize 只建邮箱（秒回），过图/收码/换 token 全在 callback 里（magpie 给 10 分钟）；
+ *   · 失败原因直接回给 magpie 的登录面板，不崩在 `.callback()` 上。
+ *
+ * ⚠ 只在国际站挂：国内站没有邮箱登录入口，且 temp-mail.io 域名会被国内站拦。
+ */
+function tempMailMethod(c) {
+  return {
+    type: "oauth",
+    label: `${c.SHORT} 邮箱验证码（临时邮箱·自动）`,
+    prompts: [],
+    async authorize() {
+      const mb = await createTempMailbox()
+      const inviteCode = inviteToUse(c.id)
+      const loginUrl = inviteCode
+        ? `${c.web}/login?invitation=${encodeURIComponent(inviteCode)}`
+        : `${c.web}/login`
+      return {
+        url: loginUrl,
+        instructions: `临时邮箱 ${mb.address} 已创建。
+插件会自动过旋转验证、收验证码并完成登录；不需要你填邮箱或验证码。
+如果失败，这里会显示原因，直接重试即可。`,
+        method: "auto",
+        opened: true,
+        async callback() {
+          try {
+            const sent = await startCodeLogin(c, { email: mb.address })
+            const code = await waitTempCode(mb.address, { timeoutMs: 150_000 })
+            const creds = await finishCodeLogin(c, {
+              email: mb.address,
+              code,
+              redirect: loginUrl,
+              inviteCode,
+            })
+            return await completeSignIn(c, creds.jwt, creds.org, creds.orgs, null, mb.address)
+          } catch (e) {
+            return { type: "failed", error: String(e?.message ?? e).slice(0, 500) }
+          }
+        },
+      }
+    },
+  }
+}
+
 export function makeMethods(c) {
   // 顺序 = magpie 登录方式列表里的顺序。
   //
@@ -469,7 +518,8 @@ export function makeMethods(c) {
   // 建两份的话，下次改文案 / 超时必然只改一处 —— 同一个「只写一份」的理由，
   // 见 makeCodeMethod 头上那段。
   const emailMethod = c.id === "magicrew-intl" ? makeCodeMethod(c, "email") : null
-  const codeMethods = emailMethod ? [emailMethod, mobileMethod] : [mobileMethod]
+  const tempMethod = c.id === "magicrew-intl" ? tempMailMethod(c) : null
+  const codeMethods = emailMethod ? [emailMethod, ...(tempMethod ? [tempMethod] : []), mobileMethod] : [mobileMethod]
 
   // 「邀请码」入口保存完策略后接哪条验证码登录 —— **跟站点主登录方式一致**：
   //   国际站 → 邮箱（那边用户大多是邮箱注册的）
