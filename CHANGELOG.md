@@ -1,3 +1,21 @@
+## 0.3.56 — 2026-10-29
+
+**上游拒绝 thinking 参数时换形状重发，而不是把整轮打死**
+
+- 症状：DSH 显示「本轮运行失败 400: {"code":null,"message":"MagiCrew: Thinking budget
+  must be below the output token limit.",…}」，一个请求带 thinking 参数就让整轮失败
+- 根因：MagiCrew 把 OpenAI 的 `reasoning_effort` 翻成 Anthropic 的**手动** thinking
+  budget，而 Claude 新模型只认 `thinking:{type:"adaptive"}` + `output_config.effort`；
+  magpie 的 `retryable()` 把这种 400 判成 failOther，既不换账号也不降级，直接抛给客户端
+- 修法（`src/hooks/loader.mjs` 的 `sendSkippingThinking`）：命中那两条实测文案后
+  ① 换形状重发（`reasoning_effort` → `thinking.adaptive` + `output_config.effort`，xhigh→max、minimal→low）
+  ② 仍拒就整条剥掉 reasoning 字段
+  ③ 两次都拒才交出错误，并带上 `code:"thinking_unsupported"`（不再是 `code:null`）
+- 边界钉死：只认 `Thinking budget must be below…` / `Manual thinking budgets are not supported` /
+  `thinking.budget_tokens` 三条文案；schema 错误、积分不足一律不重发（不白烧积分）
+- 验证：`tests/thinking-refusal.mjs` 28 项全过（含「三次被拒 → 带码错误」与「别的 400 一次都不重发」）；
+  真机经 magpie 网关 `group/claude-haiku-5.5` + `reasoning_effort=max` 从 400 变为 200
+
 ## 0.3.55 — 2026-10-29
 
 **登录态（JWT + 组织码）不再弹浏览器：opened 从 false 改 true**

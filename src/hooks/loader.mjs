@@ -428,6 +428,228 @@ export function rewriteRequestBody(raw) {
   return changed ? JSON.stringify(j) : raw
 }
 
+// ═══ 上游拒绝 thinking 参数 → 换形状重发 / 剥掉参数，不把整轮弄死 ═══════
+//
+// 实测（2026-10-29，magicrew-intl/claude-haiku-5.5，经 magpie 网关：
+//
+//   带 reasoning_effort=max                       → 400
+//        {"code":null,"message":"MagiCrew: Thinking budget must be below the
+//         output token limit.","param":null,"type":"invalid_request_error"}
+//   带 reasoning_effort=max 且 max_tokens=64000   → 另一条 400（Anthropic 官方
+//        报文被 MagiCrew 透传）：
+//        MagiCrew: HTTP 400 请求错误: {"error":{"message":"thinking.budget_tokens:
+//        Manual thinking budgets are not supported; use ***.type=adaptive and
+//        output_config.effort (request id: …)"}}
+//   不带任何思考参数                              → 200
+//   thinking:{type:"adaptive"} + output_config:{effort:"high"} → 200，
+//        usage.completion_tokens_details.reasoning_tokens=30（思考**还在**）
+//
+// 原因：MagiCrew 把 OpenAI 的 `reasoning_effort` 翻成 Anthropic 的**手动**
+// thinking budget（`thinking:{type:"enabled",budget_tokens:N}`），而 Claude
+// 新模型只认 `thinking:{type:"adaptive"}` + `output_config.effort`。
+// 转换发生在服务端，客户端只有两条路：换形状，或去掉参数。
+//
+// **为什么必须在插件里做：** magpie 的 `retryable()` 把这种 400 判成
+// failOther —— 既不换账号、也不降级 —— 直接把 400 抛给客户端，于是整轮失败
+// （DSH 界面就是「本轮运行失败 400: …」）。插件是最后一个能改请求体的地方。
+//
+// 顺序是「先保思考、再保可用」：
+//   ① 换形状（reasoning_effort / reasoning.effort → adaptive + output_config）
+//   ② 还拒就整条剥掉 reasoning 字段
+//   ③ 两次都失败才把带明确 `code` 的错误交出去（不再是无码的裸 400）
+
+/**
+ * 上游「拒绝 thinking 参数」的两种文案（2026-10-29 实测）。
+ *
+ * 只认这两句，别的 400 一律不碰 —— schema 错误、参数错误、积分不足都各有
+ * 自己的处理，误吃会把真实故障伪装成参数问题。
+ *
+ * 大小写不敏感：一条来自 MagiCrew 自己，一条是 Anthropic 原文，别指望统一。
+ */
+const THINKING_BUDGET_REFUSAL =
+  /thinking budget must be below[^"]*output token limit|manual thinking budgets are not supported|thinking\.budget_tokens/i
+
+/** 这段文本是不是「上游拒绝了 thinking 参数」 */
+export function isThinkingBudgetText(text) {
+  return THINKING_BUDGET_REFUSAL.test(String(text ?? ""))
+}
+
+/**
+ * 判断一个响应是不是「上游拒绝了 thinking 参数」。
+ *
+ * 只读**错误响应**（400/422 + JSON + 8KB 以内）：成功响应可能是 SSE，
+ * 读它会把流弄坏。判据与 `isKeyRejected` 同一套边界。
+ *
+ * @param {Response|undefined} res
+ * @returns {Promise<boolean>}
+ */
+export async function isThinkingBudgetRefusal(res) {
+  if (!res || (res.status !== 400 && res.status !== 422)) return false
+  const ct = res.headers.get("content-type") || ""
+  if (!ct.includes("application/json")) return false
+  let text = ""
+  try {
+    text = await res.clone().text()
+  } catch {
+    return false
+  }
+  if (text.length > 8192) return false
+  return isThinkingBudgetText(text)
+}
+
+/** `xhigh` 不是 Anthropic 的选项（它有 max）；其余原样传 */
+function anthropicEffort(level) {
+  const l = String(level ?? "").toLowerCase()
+  if (l === "xhigh") return "max"
+  if (l === "minimal") return "low"
+  return l
+}
+
+/**
+ * 把请求体里的思考参数换成 Anthropic 新形状：`thinking:{type:"adaptive"}` +
+ * `output_config:{effort}`，并删掉 OpenAI/Chat 侧的 `reasoning_effort` /
+ * `reasoning`。
+ *
+ * 没有 effort 可读（客户端根本没要思考）时返回 `null` —— 那种请求本来就不
+ * 该被这条路径碰。
+ *
+ * @param {unknown} raw 请求体字符串
+ * @returns {string|null} 改写后的字符串，或 null（无可改写）
+ */
+export function toAdaptiveThinking(raw) {
+  if (typeof raw !== "string") return null
+  let j
+  try {
+    j = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!j || typeof j !== "object") return null
+
+  let effort = typeof j.reasoning_effort === "string" ? j.reasoning_effort : ""
+  if (!effort && j.reasoning && typeof j.reasoning.effort === "string") effort = j.reasoning.effort
+  const level = anthropicEffort(effort)
+  if (!level) return null
+
+  delete j.reasoning_effort
+  delete j.reasoning
+  j.thinking = { type: "adaptive" }
+  const oc = j.output_config && typeof j.output_config === "object" ? j.output_config : {}
+  oc.effort = level
+  j.output_config = oc
+  return JSON.stringify(j)
+}
+
+/**
+ * 把请求体里的思考参数整条剥掉（保底：能跑永远比能思考重要）。
+ *
+ * 同时删 `reasoning_effort` / `reasoning` / `thinking` 与 `output_config.effort`；
+ * `output_config` 里若还留着别的（format 之类）就保留它。
+ *
+ * 一个都没有时返回 `null`（不该重发）。
+ *
+ * @param {unknown} raw
+ * @returns {string|null}
+ */
+export function stripReasoning(raw) {
+  if (typeof raw !== "string") return null
+  let j
+  try {
+    j = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!j || typeof j !== "object") return null
+
+  let changed = false
+  for (const k of ["reasoning_effort", "reasoning", "thinking"]) {
+    if (Object.hasOwn(j, k)) {
+      delete j[k]
+      changed = true
+    }
+  }
+  if (j.output_config && typeof j.output_config === "object" && Object.hasOwn(j.output_config, "effort")) {
+    delete j.output_config.effort
+    if (Object.keys(j.output_config).length === 0) delete j.output_config
+    changed = true
+  }
+  return changed ? JSON.stringify(j) : null
+}
+
+/**
+ * 降级后仍然被拒时，交出去的**带码**错误。
+ *
+ * 原来上游给的是 `{"code":null,…,"type":"invalid_request_error"}` —— 码是
+ * null，客户端只能当普通失败。这里补一个稳定码，让调用方（以及看日志的人）
+ * 一眼认出「这一轮是被 thinking 参数挡的，模型本身没问题」。
+ */
+function thinkingSkippedBody(original) {
+  const detail = (() => {
+    try {
+      const b = JSON.parse(original)
+      return String(b?.message ?? b?.error?.message ?? "")
+    } catch {
+      return ""
+    }
+  })()
+  return JSON.stringify({
+    error: {
+      message:
+        `MagiCrew：本模型不吃 thinking 参数（换形状、剥参数两次重发均被拒），` +
+        `本轮已跳过思考降级发送。上游原文：${detail || original.slice(0, 400)}`,
+      type: "invalid_request_error",
+      code: "thinking_unsupported",
+    },
+  })
+}
+
+/**
+ * 发一次请求；上游因为 thinking 参数拒了，就按「换形状 → 剥掉」的顺序重发，
+ * 别让这一条 400 打死整轮（见上面那节的长注释）。
+ *
+ * `send(payload)` 由调用方提供 —— 真实的走 loader 的 fetch，测试里给假实现，
+ * 于是这条降级链本身可以脱网验证。
+ *
+ * @param {(payload: unknown) => Promise<Response>} send
+ * @param {unknown} body 已经过 rewriteRequestBody 的请求体字符串
+ * @returns {Promise<Response>}
+ */
+export async function sendSkippingThinking(send, body) {
+  const first = await send(body)
+  if (!(await isThinkingBudgetRefusal(first))) return first
+
+  const adaptive = toAdaptiveThinking(body)
+  if (adaptive) {
+    try {
+      await first.body?.cancel()
+    } catch {}
+    const second = await send(adaptive)
+    if (!(await isThinkingBudgetRefusal(second))) return second
+    try {
+      await second.body?.cancel()
+    } catch {}
+  }
+
+  const bare = stripReasoning(body)
+  if (!bare) return first
+
+  const third = await send(bare)
+  if (!(await isThinkingBudgetRefusal(third))) return third
+
+  let text = ""
+  try {
+    text = await third.clone().text()
+  } catch {}
+  try {
+    await third.body?.cancel()
+  } catch {}
+  return new Response(thinkingSkippedBody(text), {
+    status: 400,
+    statusText: "Bad Request",
+    headers: { "content-type": "application/json" },
+  })
+}
+
 // ═══ 上游「积分/余额不足」的 400 → 402 ═══════════════════════════════════
 //
 // 实测（2026-10-28 23:38，magpie 0.1.1899，DSH 走 group）：
@@ -552,11 +774,11 @@ export function makeLoader(c) {
         body = rewriteRequestBody(body)
 
         const signal = init?.signal ?? req?.signal ?? AbortSignal.timeout(300_000)
-        const sendWith = (apiKey) =>
+        const sendWith = (apiKey, payload = body) =>
           fetch(url, {
             method: init?.method ?? "POST",
             headers: { ...headers, authorization: `Bearer ${apiKey}` },
-            body,
+            body: payload,
             signal,
           })
 
@@ -569,7 +791,7 @@ export function makeLoader(c) {
         if (!cands.length) throw new Error(`${c.SHORT} 未登录（拿不到可用的 key）`)
 
         for (const cand of cands) {
-          const res = await sendWith(cand.apiKey)
+          const res = await sendSkippingThinking((payload) => sendWith(cand.apiKey, payload), body)
           if (!(await isKeyRejected(res))) {
             // 这把能用 —— 写回 store，让 ensureKey / 额度那几路也用同一把
             if (!adopted.has(cand.apiKey)) {
@@ -592,7 +814,7 @@ export function makeLoader(c) {
           if (accountOf(fresh) !== "default") {
             const renewed = await renewViaStore(c, fresh)
             if (renewed?.apiKey) {
-              const res = await sendWith(renewed.apiKey)
+              const res = await sendSkippingThinking((payload) => sendWith(renewed.apiKey, payload), body)
               if (!(await isKeyRejected(res))) {
                 adoptKey(c, fresh, renewed.apiKey, renewed.expiresAt)
                 return rewriteTooLarge(await rewriteCreditRefusal(res), c.SHORT)
