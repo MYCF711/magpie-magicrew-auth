@@ -1,4 +1,4 @@
-// 邀请码 —— 纯离线测试（0.3.41：自动=0；首选=1；保存后接手机验证码）
+// 邀请码 —— 纯离线测试（0.3.41：自动=0；首选=1；0.3.43 起保存后接本站主验证码方式）
 //
 //   node tests/invite-policy.mjs
 //
@@ -7,6 +7,7 @@
 //   · 0 / 留空 / 非法文本 = 自动（滚动码）；1 = 当前首选账号的邀请码
 //   · 首选来自 magpie logins.json 的 first（Make first 写的那一个）
 //   · 切换首选后再点 1，读到的是新的首选账号
+//   · 保存后接哪条验证码：**国际站邮箱、国内站手机号**（站点分叉，别写死）
 //   · backfillInviteCodes 给老账号补码
 //
 // 隔离 HOME，不碰真实策略/账号文件，不联网。
@@ -175,12 +176,16 @@ check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
   assert.equal(inviteToUse(SITE, true), ROLLING)
 })
 
-// ═══ ③ 邀请码：0=自动 / 1=首选，保存后接手机验证码 ═══════════════
-console.log("邀请码 —— 自动=0；首选=1；保存后接手机验证码")
+// ═══ ③ 邀请码：0=自动 / 1=首选，保存后接本站主验证码方式 ═══════
+//     （国际站 → 邮箱；国内站 → 手机号。0.3.43 之前国际站也被写死成手机号。）
+console.log("邀请码 —— 自动=0；首选=1；保存后接本站主验证码")
 
-function inviteMethod() {
-  return makeMethods(c).find((m) => m.type === "oauth" && String(m.label).includes("邀请码"))
+function inviteMethodOf(ctx) {
+  return makeMethods(ctx).find((m) => m.type === "oauth" && String(m.label).includes("邀请码"))
 }
+const inviteMethod = () => inviteMethodOf(c)
+const cIntl = siteCtx(SITES.intl)
+const INTL_SITE = cIntl.id
 
 check("preferredOrg 读 logins.json 的 first", () => {
   assert.equal(preferredOrg(SITE), "orgA")
@@ -205,7 +210,7 @@ check("提示灰色字只有自动 / 首选两种（保存的首选快照也显�
   seedLogins("orgA")
 })
 
-await checkAsync("ask 链：邀请码 → 手机号 → null", async () => {
+await checkAsync("国内站 ask 链：邀请码 → 手机号 → null", async () => {
   writeInvitePolicy(SITE, { mode: "auto" })
   const m = inviteMethod()
   const p0 = await m.ask({})
@@ -215,6 +220,29 @@ await checkAsync("ask 链：邀请码 → 手机号 → null", async () => {
   assert.equal(p1.key, "phone")
   assert.equal(p1.type, "text")
   assert.equal(await m.ask({ invite: "1", phone: "13800138000" }), null)
+})
+
+await checkAsync("国际站 ask 链：邀请码 → 邮箱 → null（0.3.43）", async () => {
+  writeInvitePolicy(INTL_SITE, { mode: "auto" })
+  const m = inviteMethodOf(cIntl)
+  const p0 = await m.ask({})
+  assert.equal(p0.key, "invite")
+  const p1 = await m.ask({ invite: "1" })
+  assert.equal(p1.key, "email", "国际站邀请码之后应该问邮箱，不是手机号")
+  assert.equal(p1.type, "text")
+  assert.equal(await m.ask({ invite: "1", email: "a@b.com" }), null)
+})
+
+await checkAsync("国际站 authorize：保存策略后接邮箱方法（缺邮箱 → 报「邮箱不完整」）", async () => {
+  writeInvitePolicy(INTL_SITE, { mode: "auto" })
+  await assert.rejects(inviteMethodOf(cIntl).authorize({ invite: "0" }), /邮箱不完整/)
+  assert.equal(readInvitePolicy(INTL_SITE).mode, "auto")
+})
+
+await checkAsync("国内站 authorize：保存策略后接手机号方法（缺手机号 → 报「手机号不完整」）", async () => {
+  writeInvitePolicy(SITE, { mode: "auto" })
+  await assert.rejects(inviteMethod().authorize({ invite: "0" }), /手机号不完整/)
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
 })
 
 await checkAsync("填 0 / 留空 / 非法文本 → 保存 auto，然后接手机验证码", async () => {
