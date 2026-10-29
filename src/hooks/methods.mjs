@@ -391,10 +391,10 @@ function preferredInvite(c) {
 
 function modeHint(c) {
   const pol = readInvitePolicy(c.id)
+  // 只有两种模式：自动 / 首选。fixed 就是「上次保存的首选快照」，
+  // 不再另叫「固定」—— 首选项后来变了也还是「首选」，输入 0 即可回自动。
   if (pol.mode === "auto" || !pol.code) return "当前模式：自动，输入 1 切换：首选"
-  const pref = preferredOrg(c.id)
-  const preferred = pol.mode === "fixed" && pref && pol.org === pref
-  return `当前模式：${preferred ? "首选" : "固定"}，输入 0 切换：自动`
+  return "当前模式：首选，输入 0 切换：自动"
 }
 
 function invitePrompt(c) {
