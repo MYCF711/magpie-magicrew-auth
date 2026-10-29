@@ -685,7 +685,9 @@ export function makeMethods(c) {
           url: `${c.web}/login`,
           instructions: "正在验证登录态…",
           method: "auto",
-          opened: false,
+          // 登录态导入全程是纯 HTTP，不需要浏览器；opened:true 让 magpie 不要再拉窗口。
+          // false 会让每次批量导入都弹一个浏览器，正是用户看到的「总是弹窗」。
+          opened: true,
           async callback() {
             let r
             try {
