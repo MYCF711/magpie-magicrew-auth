@@ -301,29 +301,45 @@ await (async () => {
   })
 })()
 
-// ── ⑦ 方法表：国际站四条（邮箱优先），国内站三条（没有邮箱）──────────
+// ── ⑦ 方法表：国际站五条（邮箱优先，末尾邀请码），国内站四条 ─────────
 console.log("\n⑦ auth.methods：国际站 邮箱优先；国内站没有邮箱那条")
 
 const { MagicrewAuthPlugin, MagicrewIntlAuthPlugin } = await import("../index.mjs")
 const cn = await MagicrewAuthPlugin({ client: null, directory: "." })
 const intl = await MagicrewIntlAuthPlugin({ client: null, directory: "." })
 
-check("国内站：手机号 → 浏览器 → 登录态，且**没有**邮箱方法", () => {
+check("国内站：手机号 → 浏览器 → 登录态 → 邀请码，且**没有**邮箱方法", () => {
   const l = cn.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 3, `应该 3 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.equal(l.length, 4, `应该 4 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /手机号验证码/)
   assert.match(l[1], /浏览器登录/)
   assert.match(l[2], /登录态/)
+  assert.match(l[3], /邀请码/)
   assert.ok(!l.some((x) => /邮箱/.test(x)), "国内站登录页没有邮箱入口，别摆出来")
 })
 
-check("国际站：邮箱 → 手机号 → 浏览器 → 登录态", () => {
+check("国际站：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
   const l = intl.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 4, `应该 4 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.equal(l.length, 5, `应该 5 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /邮箱验证码/)
   assert.match(l[1], /手机号验证码/)
   assert.match(l[2], /浏览器登录/)
   assert.match(l[3], /登录态/)
+  assert.match(l[4], /邀请码/)
+})
+
+check("国际站「邀请码」保存后接邮箱，不接手机号（0.3.43）", async () => {
+  const invites = intl.auth.methods.filter((m) => /邀请码/.test(m.label))
+  assert.equal(invites.length, 1)
+  const next = await invites[0].ask({ invite: "0" })
+  assert.equal(next?.key, "email", `国际站应该问邮箱，实际 ${next?.key}`)
+})
+
+check("国内站「邀请码」保存后接手机号（站点分叉的另一半）", async () => {
+  const invites = cn.auth.methods.filter((m) => /邀请码/.test(m.label))
+  assert.equal(invites.length, 1)
+  const next = await invites[0].ask({ invite: "0" })
+  assert.equal(next?.key, "phone", `国内站应该问手机号，实际 ${next?.key}`)
 })
 
 check("两条验证码方法各问一个字段，键名分别是 email / phone", () => {

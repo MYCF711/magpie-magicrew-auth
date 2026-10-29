@@ -429,10 +429,21 @@ export function makeMethods(c) {
   //   国内站既然没有邮箱入口，也就不存在邮箱注册的账号 —— 把这条方法摆出来，
   //   只会让用户填完邮箱撞一个看不懂的错。
   const mobileMethod = makeCodeMethod(c, "mobile")
-  const codeMethods =
-    c.id === "magicrew-intl"
-      ? [makeCodeMethod(c, "email"), mobileMethod]
-      : [mobileMethod]
+  // 国际站的邮箱方法只建一次：登录方式列表要用，末尾的「邀请码」入口也要用。
+  // 建两份的话，下次改文案 / 超时必然只改一处 —— 同一个「只写一份」的理由，
+  // 见 makeCodeMethod 头上那段。
+  const emailMethod = c.id === "magicrew-intl" ? makeCodeMethod(c, "email") : null
+  const codeMethods = emailMethod ? [emailMethod, mobileMethod] : [mobileMethod]
+
+  // 「邀请码」入口保存完策略后接哪条验证码登录 —— **跟站点主登录方式一致**：
+  //   国际站 → 邮箱（那边用户大多是邮箱注册的）
+  //   国内站 → 手机号（国内站没有邮箱方法）
+  //
+  // ⚠ 0.3.43 之前这里写死 `mobileMethod`：国际站点「邀请码」→ 保存 → 被问手机号，
+  //   等于把这个入口从「给新号带邀请码」带偏成「只有手机号能注册」。
+  //   手机号验证码本身仍然独立存在，国际站想用手机号登录直接点那一条。
+  const primaryMethod = emailMethod ?? mobileMethod
+  const primaryKey = emailMethod ? "email" : "phone"
 
   return [
     ...codeMethods,
@@ -657,10 +668,13 @@ export function makeMethods(c) {
       },
     },
 
-    // ── 邀请码：一个数字框；保存后直接接手机号验证码 ─────────────
+    // ── 邀请码：一个数字框；保存后接**本站主验证码方式** ─────────────
     //
     // 0/留空 = 自动（首次作者码，之后滚动最新号）；1 = 当前首选账号。
-    // 保存写在手机验证码**之前**：接下来无论走哪条登录，注册时读到的都是这个模式。
+    // 保存写在这条验证码登录**之前**：接下来无论走哪条登录，注册时读到的都是这个模式。
+    //
+    // ⚠ 不写死手机号：国际站接邮箱（primaryMethod），国内站接手机号。
+    //   站点分叉只在这一个变量上，别在 ask / authorize 里再抄一遍条件。
     {
       type: "oauth",
       label: `${c.SHORT} 邀请码`,
@@ -669,12 +683,12 @@ export function makeMethods(c) {
       },
       async ask(inputs) {
         if (!inputs || !Object.prototype.hasOwnProperty.call(inputs, "invite")) return invitePrompt(c)
-        if (!Object.prototype.hasOwnProperty.call(inputs, "phone")) return mobileMethod.prompts[0]
+        if (!Object.prototype.hasOwnProperty.call(inputs, primaryKey)) return primaryMethod.prompts[0]
         return null
       },
       async authorize(inputs) {
         saveInviteChoice(c, inputs?.invite)
-        return await mobileMethod.authorize(inputs)
+        return await primaryMethod.authorize(inputs)
       },
     },
   ]
