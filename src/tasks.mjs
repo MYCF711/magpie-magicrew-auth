@@ -280,9 +280,18 @@ async function autoFirstChat(h) {
       return { reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
     }
 
-    // 发出去了才写一次性标记；失败的一直不写，留给下一次
+    // 光把消息写进 topic 不算「用过」：邀请奖励 / 首任务要的是真的完成一次对话。
+    // sendChat 在 90 秒内没等到 super_magic_message 时 replies=0，但 ok=true；
+    // 这里必须看 replies，否则会把「消息发出但 AI 没回」误落成已完成，永远不再补。
+    if (!r.replies) {
+      const why = "消息已发出，但 90 秒内没有 AI 回复"
+      const f = noteAutoChatFailure(siteId, h.org, why)
+      return { reason: f.givenUp ? `${why}（已试 ${f.attempts} 次，不再重试）` : why }
+    }
+
+    // 真的收到 AI 回复才写一次性标记；失败/无回复的一直不写，留给下一次
     noteAutoChat(siteId, h.org, { topicId: r.topicId || undefined, model: r.model || undefined })
-    return { ok: true, topicName: r.topicName, model: r.model }
+    return { ok: true, topicName: r.topicName, model: r.model, replies: r.replies }
   } catch (e) {
     const why = String(e?.message ?? e)
     const f = noteAutoChatFailure(siteId, h.org, why)
