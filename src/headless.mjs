@@ -254,7 +254,7 @@ async function postKeewoodJSON(site, path, body, jwt) {
       "user-agent": "magpie-magicrew-auth",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(90_000),
   })
   const text = await res.text().catch(() => "")
   if (!res.ok) throw new Error(`${path} HTTP ${res.status}：${text.slice(0, 140)}`)
@@ -295,7 +295,7 @@ export async function bindOrganization(site, jwt, orgCode) {
     try {
       const res = await fetch(url, {
         headers: { ...headers, "user-agent": "magpie-magicrew-auth" },
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(90_000),
       })
       const text = await res.text().catch(() => "")
       if (!res.ok) continue
@@ -464,7 +464,7 @@ export async function fetchOrgs(site, jwt) {
     try {
       res = await fetch(p.url, {
         headers: { authorization: p.auth, "user-agent": "magpie-magicrew-auth" },
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(90_000),
       })
     } catch (e) {
       lastOrgProbeErrors.push(`${p.tag}：网络失败 ${String(e?.message ?? e).slice(0, 60)}`)

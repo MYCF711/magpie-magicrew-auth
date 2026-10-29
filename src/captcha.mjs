@@ -208,7 +208,7 @@ export function resetKeewoodCookies() {
   cookieJar.clear()
 }
 
-async function postJSON(url, body, { headers = {}, timeoutMs = 20_000 } = {}) {
+async function postJSON(url, body, { headers = {}, timeoutMs = 90_000 } = {}) {
   const origin = new URL(url).origin
   const cookie = cookieHeader(origin)
   const res = await fetch(url, {

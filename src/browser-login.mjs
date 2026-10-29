@@ -224,7 +224,7 @@ export function findBrowser({ candidates } = {}) {
  * @param {() => boolean} [aborted] 返回 true 就立刻放弃（比如进程已经退出了），
  *        免得为一个死掉的进程白等满 8 秒
  */
-async function waitPort(dir, timeoutMs = 8_000, aborted = null) {
+async function waitPort(dir, timeoutMs = 20_000, aborted = null) {
   const f = join(dir, "DevToolsActivePort")
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -382,7 +382,7 @@ async function launchOne(cand, url) {
     exited = code
   })
 
-  const port = await waitPort(dir, 8_000, () => exited !== null)
+  const port = await waitPort(dir, 20_000, () => exited !== null)
   if (!port) {
     await cleanupFailed({ dir, child, exe: cand.path })
     throw new Error(
@@ -417,7 +417,7 @@ function killByProfileDir(dir, exePath) {
         `$p = Get-CimInstance Win32_Process -Filter "Name='${name}'" | Where-Object { $_.CommandLine -like '*${pattern}*' }; ` +
           `$p | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; $p.Count`,
       ],
-      { stdio: "ignore", timeout: 10_000 },
+      { stdio: "ignore", timeout: 30_000 },
     )
     return 1
   } catch {
