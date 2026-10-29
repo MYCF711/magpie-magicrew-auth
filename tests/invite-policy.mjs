@@ -196,12 +196,12 @@ check("提示灰色字：当前模式，自动 → 输入 1 切换首选", () =>
   assert.equal(p.placeholder, "当前模式：自动，输入 1 切换：首选")
 })
 
-check("提示灰色字：当前首选 → 输入 0 切换自动；固定账号同理", () => {
+check("提示灰色字只有自动 / 首选两种（保存的首选快照也显示首选）", () => {
   seedLogins("orgA")
   writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
   assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
-  seedLogins("orgC") // 首选变了，保存的还是旧账号 → 固定
-  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：固定，输入 0 切换：自动")
+  seedLogins("orgC") // 首选项后来变了，保存的快照仍显示首选
+  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
   seedLogins("orgA")
 })
 
