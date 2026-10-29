@@ -36,6 +36,10 @@ jobs:
                 echo "== $f =="
                 echo "跳过：本机环境 smoke，依赖真实凭据/模型目录；PR 门禁由离线测试覆盖"
                 ;;
+              tests/browser-login.mjs)
+                echo "== $f =="
+                echo "跳过：会真的拉起浏览器；headless runner 上的耗时波动不代表登录语义，改在本机跑"
+                ;;
               *)
                 echo "== $f =="
                 node "$f"
