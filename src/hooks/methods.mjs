@@ -45,7 +45,14 @@ import {
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
-import { finishCodeLogin, startCodeLogin } from "../headless.mjs"
+import {
+  bindOrganization,
+  createFirstOrganization,
+  fetchOrgs,
+  finishCodeLogin,
+  orgProbeCodes,
+  startCodeLogin,
+} from "../headless.mjs"
 
 /**
  * 账号刚加进来（登录成功）→ 一次性把「首次 AI 工作 / 首个对话」补掉。
@@ -100,6 +107,35 @@ async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null,
       break
     } catch (e) {
       lastErr = e
+    }
+  }
+
+  // 浏览器登录那条路可能拿到一把「用户中心已登录、Magic 里没用户」的令牌
+  // （localStorage 里的 organizationCode 是空的）。和 finishCodeLogin 一样：
+  // 重新探测一次组织列表；仍为空且 auth/status 回过 3102 才建首个组织。
+  // ⚠ 只在 **3102** 时建 —— 别的失败（网络抖动 / token 过期）绝不能顺手建组织。
+  if (!picked) {
+    const found = await fetchOrgs(c, jwt).catch(() => [])
+    const more = [...found]
+    if (!more.length && orgProbeCodes().some((x) => x.code === 3102)) {
+      try {
+        const made = await createFirstOrganization(c, jwt, inviteToUse(c.id))
+        if (made.org) {
+          const bound = await bindOrganization(c, jwt, made.org)
+          more.push(...(bound.length ? bound : []), made.org)
+        }
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    for (const o of [...new Set(more)]) {
+      try {
+        await fetchPoints(jwt, o, c.host)
+        picked = o
+        break
+      } catch (e) {
+        lastErr = e
+      }
     }
   }
   if (!picked) throw lastErr ?? new Error("没有可用的组织码")
