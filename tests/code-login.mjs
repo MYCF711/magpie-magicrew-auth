@@ -379,6 +379,30 @@ await (async () => {
 })()
 
 await (async () => {
+  // 真机重试的形状：建组织回 {code:1000, message:"请求成功", data:[]} —— 1000 但没组织码。
+  // 组织其实已经建好，只是响应不带码；这时要像前端一样重新探测组织列表。
+  reset(
+    { code: 1000, data: { access_token: "tok-empty-data" } },
+    ...probeReplies(),
+    { code: 1000, message: "请求成功", data: [] },
+    // 重新探测：前三个仍空，auth-status/裸 这次带回组织
+    { code: 1000, data: { auth_status: [] } },
+    { code: 1000, data: { auth_status: [] } },
+    { code: 3103, message: "authorization 不合法" },
+    { code: 1000, data: [{ magic_organization_code: "MAGICAFTER01" }] },
+  )
+  const r = await finishCodeLogin(site, {
+    email: "empty-data@example.com",
+    code: "123456",
+    inviteCode: "IVEMPTYDATA",
+  })
+  check("建组织回 1000 + data:[] → 不报错，重新探测拿到组织", () => {
+    assert.equal(r.org, "MAGICAFTER01")
+    assert.equal(r.createdOrg, "")
+  })
+})()
+
+await (async () => {
   // 反例：组织列表为空，但不是 3102 → **绝不能**顺手建组织（会给已有账号多建一个）
   reset(
     { code: 1000, data: { access_token: "tok-no-3102" } },

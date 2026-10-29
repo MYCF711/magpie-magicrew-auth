@@ -1,5 +1,26 @@
 # 更新记录
 
+## 0.3.45 — 2026-10-29
+
+**建组织回 `{code:1000, data:[]}` 时不再误报「没有组织码」**
+
+真机（用户重试 0.3.44 的原文）：
+
+```
+the sign-in failed: 建组织回了 1000 但没有组织码：{code:number, message:str(4), data:[0]}
+```
+
+`POST /v4/user/organizations` 成功时可能回 `{code:1000, message:"请求成功", data:[]}` ——
+**1000 但没有组织码**。组织这时可能已经建好了，只是响应里不带码；上游前端拿到
+`undefined` 也照样去 `auth/status` 拉一遍组织列表。
+
+改动（`src/headless.mjs`）：
+
+- `createFirstOrganization`：1000 + 无码 → 返回 `{org:"", via}`，不再抛
+- `finishCodeLogin`：拿不到码就重新探测组织列表（0 / 1.2s / 3s 三次，给最终一致性），
+  探测到就用；三次都没有才报错
+- 测试：`tests/code-login.mjs` 新增「建组织回 1000 + data:[] → 重新探测拿到组织」
+
 ## 0.3.44 — 2026-10-29
 
 **修掉「登录成功但拿不到组织码」：无组织的新号自动建首个组织（邀请码在这一步消费）**

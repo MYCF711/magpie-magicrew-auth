@@ -186,11 +186,27 @@ export async function finishCodeLogin(site, { code, device, redirect, inviteCode
   if (!orgs.length && notCreated) {
     const made = await createFirstOrganization(site, jwt, inviteCode)
     createdOrg = made.org
-    // 建完还要用 auth/status + Organization-Code 绑一次，拿到 magic 侧真正的组织码。
-    // 建组织返回的那个也留在候选里：万一绑定接口抽风，completeSignIn 还能拿它试一次。
-    const bound = await bindOrganization(site, jwt, made.org)
-    orgs = bound.length ? [...new Set([...bound, made.org])] : [made.org]
-    lastOrgProbeErrors.push(`建首个组织：${made.via} → ${made.org}`)
+    if (made.org) {
+      // 建完还要用 auth/status + Organization-Code 绑一次，拿到 magic 侧真正的组织码。
+      // 建组织返回的那个也留在候选里：万一绑定接口抽风，completeSignIn 还能拿它试一次。
+      const bound = await bindOrganization(site, jwt, made.org)
+      orgs = bound.length ? [...new Set([...bound, made.org])] : [made.org]
+      lastOrgProbeErrors.push(`建首个组织：${made.via} → ${made.org}`)
+    } else {
+      // 实测（2026-10-29 用户重试）：建组织接口可能回 `{code:1000, message:"请求成功", data:[]}`
+      // —— 1000 但没有组织码。组织这时**可能已经建好了**，只是响应里不带码。
+      // 上游前端也容得下这种形状：它拿到 undefined 也照样去 auth/status 拉一遍。
+      // 所以这里像前端一样，直接重新探测组织列表（给一点最终一致性时间）。
+      for (const wait of [0, 1200, 3000]) {
+        if (wait) await new Promise((r) => setTimeout(r, wait))
+        const found = await fetchOrgs(site, jwt)
+        if (found.length) {
+          orgs = found
+          break
+        }
+      }
+      lastOrgProbeErrors.push(`建首个组织：${made.via} 回了 1000，但响应没带组织码（data:[]）`)
+    }
   }
 
   if (!orgs.length) {
@@ -300,6 +316,9 @@ async function bindOrganization(site, jwt, orgCode) {
 
 /**
  * 给「登录成功但 Magic 里没用户」的号建第一个组织。
+ *
+ * ⚠ `org` 可能是空串：接口回 1000 但 `data:[]`（实测 2026-10-29）时组织可能已经建好，
+ *   只是响应里不带码。调用方要像上游前端一样，拿不到码就重新探测组织列表，别直接报错。
  * @returns {Promise<{org:string, via:"邀请码"|"无邀请码"}>}
  */
 export async function createFirstOrganization(site, jwt, inviteCode = "") {
@@ -323,6 +342,7 @@ export async function createFirstOrganization(site, jwt, inviteCode = "") {
       const org = orgCodeOf(json)
       if (org) return { org, via: "邀请码" }
       problems.push(`POST /v4/user/organizations 回了 1000 但没有组织码：${describeShape(json)}`)
+      return { org: "", via: "邀请码" }
     } catch (e) {
       if (e?.code !== 2152) throw e
       problems.push("邀请码已被使用（2152）")
@@ -340,7 +360,6 @@ export async function createFirstOrganization(site, jwt, inviteCode = "") {
     )
   }
   const org = orgCodeOf(json)
-  if (!org) throw new Error(`建组织回了 1000 但没有组织码：${describeShape(json)}`)
   return { org, via: "无邀请码" }
 }
 
