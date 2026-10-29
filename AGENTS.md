@@ -38,6 +38,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | **改 key / 续期** | internals 的「十三、签新 key 会吊销旧 key」「十四、三层凭据的有效期与保活」 | 没引入第二份 refresh_token（会和 `src/keys.mjs` 分叉） |
 | **改模型目录** | internals 的「十六、上下文窗口必须查库」+ HOOKS 十一之二（`free`） | 上下文来自查库；`free` 来自厂商声明，不从 `rate` 反推 |
 | **改签到 / 首任务** | internals 的 checkin 小节（一次性闸门、五种状态） | 不漏发、不重发、失败方向是「宁可晚一轮」 |
+| **改邀请名额 / 自动换上级** | [src/invite-quota.mjs](./src/invite-quota.mjs) 头（口径 + 白名单 + 触发点）+ [tests/invite-quota.mjs](./tests/invite-quota.mjs) | 两站 `limit` 分别 60 / 50；满额判定两条取或；国内站默认不切 |
 | **代码写完，准备交付** | [CHECKLIST.md](./CHECKLIST.md) 的 **A 表** | A 表全勾 + `node scripts/check.mjs` 退出 0 |
 | **要发版本** | **[UPDATING.md](https://github.com/MYCF711/magpie-plugin-scaffold/blob/main/UPDATING.md)**（脚手架的，七步） | CHECKLIST B 表全勾 + 四条验证 |
 | **用户说「更新了没变化」** | 本文件坑 12（git 源只提示、要手动点更新） | `magpie plugin list` 里的 commit 真的变了 |
@@ -82,6 +83,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 29 | 验证码 `/captcha/verify` 回 `2000 客户端信息不匹配` | `/captcha/generate` 会回 `set-cookie: acw_tc=…`（阿里云 WAF），verify 必须把同一个 cookie 带回去；Node fetch 默认没有 cookie 罐，前端浏览器天生带所以看不出来。0.3.44 起 `src/captcha.mjs` 自带按 origin 的 cookie 罐。判据：`tests/code-login.mjs` 的「generate 的 set-cookie 会带回 verify」；真机不带 cookie 回客户端信息不匹配、带上后变成按角度判的「验证不通过」 | CHANGELOG 0.3.44 · `src/captcha.mjs` |
 | 30 | 国际站没代理时「刚报错，短信才到手机」/ 浏览器登录 5 分钟就判失败 | 默认 20s HTTP 超时对跨国链路太短，`send-sms` 会在服务端已发信、客户端已超时之间错位。0.3.49 起 keewood HTTP 统一 90s；浏览器登录等待国际站 15 分钟（国内 5）；Edge 调试端口/启动等待 20s/30s。判据：`grep -n "90_000" src/captcha.mjs src/headless.mjs`、`grep -n "browserWaitMs" src/hooks/methods.mjs` | CHANGELOG 0.3.49 · `src/captcha.mjs` / `src/headless.mjs` / `src/hooks/methods.mjs` |
 | 31 | 登录方式按钮上挂着旧的「上级 xxx」，改了邀请码策略 / 切首选也不变 | **magpie 在插件加载时把 `methods[].label` 读走并缓存**，之后重新算也不会重新展示（不是写死常量）。0.3.51 起 labels 只放稳定文案；动态的「本次邀请上级」放 `authorize` 返回的 `instructions`（每次点登录现算）。判据：`tests/code-login.mjs` 断言 labels 不含「上级」；`tests/invite-policy.mjs` 固定/auto 都不带 | CHANGELOG 0.3.51 · `src/hooks/methods.mjs` |
+| 32 | 额度里没有「邀请次数」，或首选模式满了以后新号还挂在满额号名下 | 上游 `/api/v1/invitations/info` **只给已邀人数、不给上限** —— 探过 17 条候选路径（`/limit`、`/config`、`/statistics` …）全 404，`/api/v1/invitations/activity` 只回 `{"current_activity":2}`。⇒ 上限按奖励口径换算（国际 10,000÷200=**50**、国内 60,000÷1,000=**60**），判满取「人数到顶 **或** 邀请积分封顶」两条的或。0.3.62 起额度窗口多一行 `邀请次数 20 / 50 次`（`aside`，**不给 limit**，否则被当额度算占比）；首选模式下满了自动把上级换成「真实邮箱 + 未满 + 剩余最多」的号，只改 `magicrew-invite-policy-<site>.json` 的 `fixed`，**不动 `logins.json` 的 `first`**；触发点是签到 + 登录成功，10 分钟节流。判据：`node tests/invite-quota.mjs`；真机 `_probe/invite-quota-live.mjs` | CHANGELOG 0.3.62 · `src/invite-quota.mjs` · `tests/invite-quota.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 

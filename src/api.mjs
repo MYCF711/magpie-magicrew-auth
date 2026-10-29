@@ -419,6 +419,79 @@ export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
   }
 }
 
+// ── ④b-1 邀请名额口径 + 这个账号还能邀几个 ──────────────────────────
+//
+// 上游**不给上限**（2026-10-29 实测）：`/api/v1/invitations/info` 只有
+// `invite_count` 和 `invited_users`，`/api/v1/invitations/rewards/total-points`
+// 只有已赚积分。探过 17 条候选路径（`/limit`、`/config`、`/activity/2`、
+// `/statistics` …）全 404；`/api/v1/invitations/activity` 只回
+// `{"current_activity":2}`，活动配置不下发。
+//
+// ⇒ 名额只能按官方奖励口径换算，也就是下面这张表（与文档 ④b 的注释同源）：
+//
+//            每次注册   邀请注册封顶   ⇒ 名额
+//   国内      1,000       60,000        60 次
+//   国际        200       10,000        50 次
+//
+// 2026-10-29 用户在国际站界面上复核：邀请一个人 +200、被邀请 +200、
+// 邀请获得积分上限 +10,000 ⇒ 与表一致。
+//
+// ⚠ 活动号会变（`current_activity` 已经到 2），所以这张表允许被
+//   `~/.cache/magpie/magicrew-invite-quota-config-<site>.json` 覆盖
+//   （`{ perInvite, capPoints }`），见 src/invite-quota.mjs 的 quotaConfig。
+export const INVITE_QUOTA = {
+  magicrew: { perInvite: 1000, capPoints: 60_000 },
+  "magicrew-intl": { perInvite: 200, capPoints: 10_000 },
+}
+
+/** 已赚邀请积分 —— 只用来判「封顶」和展示，取不到按 0（不能因为它坏掉整条链路） */
+export const INVITE_EARNED_PATH = "/api/v1/invitations/rewards/total-points"
+
+/**
+ * 一次拿齐「我的邀请码 + 已邀请人数 + 已赚积分」。
+ *
+ * 两个请求并行；`total-points` 失败不抛错（历史上只回 info 的账号也见过）。
+ *
+ * ⚠ 必须带超时：这个函数会被「登录成功后」和「签到」两条路径 await，
+ *   而自动换上级时还要连问最多 15 个候选。没有超时的话，上游一慢就把
+ *   登录/签到拖成几分钟（默认 fetch 不超时）。10 秒是这里的安全线：
+ *   一个「还能拉几个人」的展示不值 10 秒以上。
+ *
+ * @returns {Promise<{code:string, count:number, invited:Array<{id,usedAt}>, earned:number}>}
+ */
+const INVITE_TIMEOUT_MS = 10_000
+
+export async function fetchInviteStatus(token, org, host = SITES.cn.host) {
+  const h = headersFor(token, org, host)
+  const signal = AbortSignal.timeout(INVITE_TIMEOUT_MS)
+  const [infoRes, earnedRes] = await Promise.all([
+    fetch(`${host}${INVITE_CODE_PATH}`, { headers: h, signal }),
+    fetch(`${host}${INVITE_EARNED_PATH}`, { headers: h, signal }).catch(() => null),
+  ])
+  const body = await read(infoRes)
+  const d = body?.data ?? {}
+  const code = d.invite_code || d.inviteCode || d.code || d.invitation_code || ""
+  if (!code) throw new MagicrewError("接口通了但返回里没有 invite_code")
+
+  let earned = 0
+  if (earnedRes?.ok) {
+    try {
+      const eb = await earnedRes.json()
+      earned = Number(eb?.data?.total_earned_points ?? 0) || 0
+    } catch {}
+  }
+  const users = Array.isArray(d.invited_users) ? d.invited_users : []
+  return {
+    code,
+    count: Number(d.invite_count ?? users.length ?? 0) || 0,
+    invited: users.map((u) => ({
+      id: String(u?.invited_user_id ?? ""),
+      usedAt: String(u?.used_at ?? ""),
+    })),
+    earned,
+  }
+}
+
 // ── ④b-2 邀请奖励明细 ────────────────────────────────────────────────
 //
 //   GET /api/v1/invitations/rewards  → { page, total, list:[…] }

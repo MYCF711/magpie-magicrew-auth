@@ -26,6 +26,7 @@
 
 import { fetchPoints, SITES } from "../api.mjs"
 import { ensureCheckinDefault } from "../auto-maintenance.mjs"
+import { statusOf } from "../invite-quota.mjs"
 
 // 每日登录积分：国内 +200/天、国际 +50/天（实测，见 docs/internals.md）。
 // 今日批次的分母，只用于展示「今日还剩 / 今日额度」。
@@ -56,6 +57,27 @@ export function makeUsage(c) {
         display: total > 0 ? `${fmt(total)} 积分` : "已耗尽",
         ...(total > 0 ? runsOutOf(batches) : { resetsAt: nextGrantAt() }),
       }]
+
+      // 邀请次数：X / 上限。上游不给上限，按站点奖励口径换算（见 src/invite-quota.mjs）。
+      //
+      // 放在余额之后、批次行之前 —— 邀请额度是「这个号还能拉几个人」，和积分余额
+      // 是两件事，但都要一眼看到。
+      //
+      // ⚠ 只给 display + unit，**不给 used / amount / limit**：
+      //   邀请名额不是模型用量，标成额度会让宿主的 allowanceOf 把它算进路由占比
+      //   （HOOKS 三·①：aside 带 amount/limit 会被当「真额度」算占比）。
+      //   现有余额窗口没标 aside，所以这个号在路由里照样 Known=true。
+      //
+      // 查询失败（没登录态 / 接口抖）就整行不出现 —— 宁可少一行，不显示假数字。
+      const invite = await statusOf(c, auth.org).catch(() => null)
+      if (invite && invite.limit > 0) {
+        windows.push({
+          name: "邀请次数",
+          display: invite.full ? `${invite.count} / ${invite.limit} 次 · 已满` : `${invite.count} / ${invite.limit} 次`,
+          unit: "次",
+          aside: true,
+        })
+      }
 
       if (total > 0) {
         const today = beijingDay(Date.now())
