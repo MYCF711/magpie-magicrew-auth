@@ -1,12 +1,12 @@
-// 邀请上级 —— 纯离线测试（0.3.36：登录页一个数字文本框）
+// 邀请上级 —— 纯离线测试（0.3.40：自动=0；首选=1）
 //
 //   node tests/invite-policy.mjs
 //
 // 钉住：
 //   · 策略 auto / fixed / custom；作者码 org 为空、死号自动回落
-//   · 数字方法：0=我的（作者 MYCF711），1..N=账号（按账号名排序），-1=自动，
-//     留空 / 不存在数字回退 0
-//   · 对照表写进 prompt message；ask 每次按最新账号清单生成
+//   · 0 / 留空 / 非法文本 = 自动（滚动码）；1 = 当前首选账号的邀请码
+//   · 首选来自 magpie logins.json 的 first（Make first 写的那一个）
+//   · 切换首选后再点 1，读到的是新的首选账号
 //   · backfillInviteCodes 给老账号补码
 //
 // 隔离 HOME，不碰真实策略/账号文件，不联网。
@@ -32,6 +32,7 @@ const {
   writeInvitePolicy,
   clearInvitePolicy,
   inviteToUse,
+  preferredOrg,
   backfillInviteCodes,
 } = await import("../src/store.mjs")
 const { makeMethods } = await import("../src/hooks/methods.mjs")
@@ -48,8 +49,8 @@ function seedCodes() {
   writeFileSync(
     join(CACHE, `magicrew-invite-codes-${SITE}.json`),
     JSON.stringify({
-      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: "2026-10-29T00:00:00Z" },
-      orgB: { code: AUTHOR, accountId: "author-duplicate", at: "2026-10-29T00:00:00Z" },
+      orgA: { code: ACCOUNT_CODE, accountId: "181****632", at: "2026-10-29T00:00:00Z" },
+      orgB: { code: AUTHOR, accountId: "189****051", at: "2026-10-29T00:00:00Z" },
       orgC: { code: OTHER_CODE, accountId: "177****0000", at: "2026-10-29T00:00:00Z" },
     }),
   )
@@ -61,15 +62,25 @@ function seedAuth() {
   writeFileSync(
     join(CONFIG, "plugin-auth.json"),
     JSON.stringify({
-      [`${SITE}#abc123`]: { org: "orgA", accountId: "138****0000", type: "oauth", jwt: "jwt-orgA" },
+      [`${SITE}#abc123`]: { org: "orgA", accountId: "181****632", type: "oauth", jwt: "jwt-orgA" },
       [`${SITE}#def456`]: { org: "orgC", accountId: "177****0000", type: "oauth", jwt: "jwt-orgC" },
-      "magicrew-intl#xyz": { org: "orgB", accountId: "should-not-match@example.com", type: "oauth" },
+      "magicrew-intl#xyz": { org: "orgB", accountId: "189****051", type: "oauth" },
     }),
   )
+}
+/** magpie 的 logins.json：first=true 的账号就是账号页「首选」 */
+function seedLogins(preferred = "orgA") {
+  const rows = [
+    { agent: `plugin:${SITE}`, user: "181****632", home: `${SITE}#abc123`, on: true, first: preferred === "orgA" },
+    { agent: `plugin:${SITE}`, user: "177****0000", home: `${SITE}#def456`, on: true, first: preferred === "orgC" },
+  ]
+  if (preferred === "none") for (const r of rows) r.first = false
+  writeFileSync(join(CONFIG, "logins.json"), JSON.stringify(rows))
 }
 seedCodes()
 seedRolling()
 seedAuth()
+seedLogins("orgA")
 
 let pass = 0
 let fail = 0
@@ -105,7 +116,7 @@ check("默认是 auto", () => {
 })
 
 check("fixed：锁定打开用策略码，锁关闭回落到滚动文件", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
+  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
   assert.equal(inviteToUse(SITE, true), ACCOUNT_CODE)
   assert.equal(inviteToUse(SITE, false), ROLLING)
 })
@@ -150,7 +161,7 @@ check("滚动码归属已删除的账号 → 回落作者码", () => {
   writeFileSync(
     join(CACHE, `magicrew-invite-codes-${SITE}.json`),
     JSON.stringify({
-      orgA: { code: ACCOUNT_CODE, accountId: "138****0000", at: "x" },
+      orgA: { code: ACCOUNT_CODE, accountId: "181****632", at: "x" },
       orgDEAD: { code: "IVDEADROLL01", accountId: "已删除", at: "x" },
     }),
   )
@@ -164,93 +175,80 @@ check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
   assert.equal(inviteToUse(SITE, true), ROLLING)
 })
 
-// ═══ ③ 数字方法 ══════════════════════════════════════════════════════
-console.log("\n邀请上级（数字）—— 0=当前滚动码，1..N=账号")
+// ═══ ③ 0=自动 / 1=首选 ═══════════════════════════════════════════════
+console.log("\n邀请上级 —— 自动=0；首选=1")
 
 function inviteMethod() {
   return makeMethods(c).find((m) => m.type === "api" && String(m.label).includes("邀请上级"))
 }
 
-check("message：0=当前滚动账号，1..N=账号；0 指向的那格隐藏", () => {
-  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
+check("preferredOrg 读 logins.json 的 first", () => {
+  assert.equal(preferredOrg(SITE), "orgA")
+  seedLogins("orgC")
+  assert.equal(preferredOrg(SITE), "orgC")
+  seedLogins("orgA")
+})
+
+check("提示只有一行：自动=0；首选=1", () => {
   const msg = inviteMethod().prompts[0].message
-  assert.match(msg, /0 = 177\*\*\*\*0000（IVOTHER00001）/)
-  assert.match(msg, /1 = 138\*\*\*\*0000（IVACCOUNT001）/)
-  assert.doesNotMatch(msg, /2 = /) // orgC 是当前 0，后端占 n=2，但页面不显示
-  assert.doesNotMatch(msg, /author-duplicate/)
-  seedRolling()
+  assert.equal(msg, "邀请上级：自动=0；首选=1；不填=默认自动")
 })
 
-check("点开登录方式时 prompts getter 重新生成（滚动码变了文本跟着变）", () => {
-  const m = inviteMethod()
-  const before = m.prompts[0].message
-  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
-  const after = m.prompts[0].message
-  assert.notEqual(after, before)
-  assert.match(after, /0 = 177\*\*\*\*0000（IVOTHER00001）/)
-  seedRolling()
-})
-
-check("ask 每次按最新清单生成；已填 invite 后不再问", async () => {
+check("ask 每次按当时首选生成；已填 invite 后不再问", async () => {
+  seedLogins("orgC")
   const m = inviteMethod()
   const p = await m.ask({})
   assert.equal(p.type, "text")
-  assert.match(p.message, /IVACCOUNT001/)
+  assert.match(p.message, /首选=1/)
   assert.equal(await m.ask({ invite: "1" }), null)
+  seedLogins("orgA")
 })
 
-await checkAsync("填 0 → auto（当前滚动码）", async () => {
-  const r = await inviteMethod().authorize({ invite: "0" })
+await checkAsync("填 0 / 留空 / 非法文本 → auto", async () => {
+  for (const v of ["0", "", "abc", "-1", "99"]) {
+    await inviteMethod().authorize({ invite: v })
+    assert.equal(readInvitePolicy(SITE).mode, "auto")
+  }
+})
+
+await checkAsync("填 1 → 当前首选（orgA）的码", async () => {
+  seedLogins("orgA")
+  const r = await inviteMethod().authorize({ invite: "1" })
   assert.equal(r.type, "failed")
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-})
-
-await checkAsync("填 1 → 第一个账号", async () => {
-  await inviteMethod().authorize({ invite: "1" })
   const pol = readInvitePolicy(SITE)
   assert.equal(pol.mode, "fixed")
   assert.equal(pol.code, ACCOUNT_CODE)
   assert.equal(pol.org, "orgA")
-  assert.equal(pol.accountId, "138****0000")
+  assert.equal(pol.accountId, "181****632")
 })
 
-await checkAsync("填 2（当前 0 的账号，后端存在但页面隐藏）→ 仍可选中", async () => {
-  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: OTHER_CODE, at: "x" }))
-  await inviteMethod().authorize({ invite: "2" })
+await checkAsync("切换首选后重新点 1 → 新首选（orgC）的码", async () => {
+  seedLogins("orgC")
+  await inviteMethod().authorize({ invite: "1" })
   const pol = readInvitePolicy(SITE)
-  assert.equal(pol.mode, "fixed")
   assert.equal(pol.code, OTHER_CODE)
   assert.equal(pol.org, "orgC")
-  seedRolling()
+  seedLogins("orgA")
 })
 
-await checkAsync("填 -1（超出范围）→ 回退 0 auto", async () => {
-  await inviteMethod().authorize({ invite: "-1" })
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-})
-
-await checkAsync("留空 → 0 auto", async () => {
-  await inviteMethod().authorize({ invite: "" })
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-})
-
-await checkAsync("不存在的数字 / 非数字 → 回退 0 auto", async () => {
-  await inviteMethod().authorize({ invite: "99" })
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-  await inviteMethod().authorize({ invite: "abc" })
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-})
-
-await checkAsync("已保存提示里带账号与码", async () => {
+await checkAsync("首选账号没有码 → 回退 0 auto", async () => {
+  seedLogins("orgC")
+  // 删掉 orgC 的码，只剩 orgA
+  writeFileSync(
+    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
+    JSON.stringify({ orgA: { code: ACCOUNT_CODE, accountId: "181****632", at: "x" } }),
+  )
   const r = await inviteMethod().authorize({ invite: "1" })
-  assert.match(r.error, /138\*\*\*\*0000/)
-  assert.match(r.error, /IVACCOUNT001/)
+  assert.match(r.error, /回退 0/)
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
+  seedCodes()
+  seedLogins("orgA")
 })
 
 check("标题与当前策略同源（固定时带上级，auto 不带）", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "138****0000" })
+  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
   const label = makeMethods(c).find((m) => /手机号/.test(m.label)).label
-  assert.match(label, /（上级 138\*\*\*\*0000）/)
+  assert.match(label, /（上级 181\*\*\*\*632）/)
   writeInvitePolicy(SITE, { mode: "auto" })
   const auto = makeMethods(c).find((m) => /手机号/.test(m.label)).label
   assert.doesNotMatch(auto, /（上级/)
@@ -271,7 +269,7 @@ await checkAsync("给 plugin-auth 里有 JWT 的账号补码", async () => {
     await backfillInviteCodes()
     const codes = JSON.parse(readFileSync(join(CACHE, `magicrew-invite-codes-${SITE}.json`), "utf8"))
     assert.equal(codes.orgA.code, "IVBACK000001")
-    assert.equal(codes.orgA.accountId, "138****0000")
+    assert.equal(codes.orgA.accountId, "181****632")
   } finally {
     globalThis.fetch = orig
     seedCodes()
