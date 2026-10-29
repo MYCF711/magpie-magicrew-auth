@@ -85,11 +85,11 @@
       命令：npm pack --dry-run
       判据：清单里有 README.md / CHANGELOG.md / docs / AGENTS.md / CHECKLIST.md
 
-□ 第 3 步 · 提交
+□ 第 3 步 · 提交并推功能分支
+      判据：推的是 feat/<改动>，不是 main
 
-□ 第 4 步 · 推到默认分支
-      命令：git push origin main
-      判据：git 源装的人靠这里检测 —— 推别的分支不算
+□ 第 4 步 · PR 全绿后合并
+      判据：rules 成功、分支最新、讨论解决；禁止直接推 main
 
 □ 第 5 步 · npm publish
       命令：npm run publish:npm          ← 包内 name 是 Magicrew，npm 包名是 magicrew-auth
