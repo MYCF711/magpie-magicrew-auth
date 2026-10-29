@@ -485,15 +485,16 @@ check("国内站：手机号 → 浏览器 → 登录态 → 邀请码，且**�
   assert.ok(!l.some((x) => /邮箱/.test(x)), "国内站登录页没有邮箱入口，别摆出来")
 })
 
-check("国际站：邮箱 → 临时邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
+check("国际站：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
   const l = intl.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 6, `应该 6 条，实际 ${l.length}：${l.join(" / ")}`)
-  assert.match(l[0], /邮箱验证码（上级/)
-  assert.match(l[1], /邮箱验证码（临时邮箱/)
-  assert.match(l[2], /手机号验证码/)
-  assert.match(l[3], /浏览器登录/)
-  assert.match(l[4], /登录态/)
-  assert.match(l[5], /邀请码/)
+  assert.equal(l.length, 5, `应该 5 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.match(l[0], /邮箱验证码/)
+  assert.match(l[1], /手机号验证码/)
+  assert.match(l[2], /浏览器登录/)
+  assert.match(l[3], /登录态/)
+  // 标签在插件加载时被缓存；会变的「上级 xxx」不能在标签里（否则改策略后一直显示旧号）
+  assert.ok(!l.some((x) => /上级/.test(x)), `标签里不该出现上级：${l.join(" / ")}`)
+  assert.match(l[4], /邀请码/)
 })
 
 check("国际站「邀请码」保存后接邮箱，不接手机号（0.3.43）", async () => {

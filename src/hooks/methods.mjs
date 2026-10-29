@@ -224,7 +224,10 @@ function makeCodeMethod(c, kind) {
 
   return {
     type: "oauth",
-    label: `${c.SHORT} ${what}验证码${inviteTag(c)}`,
+    // 标签在插件加载时被 magpie 读走并缓存，**这里不放会变的「上级 xxx」** ——
+    // 改了邀请码策略也不会刷新，用户会看到过期的上级。动态信息放在 authorize 的
+    // instructions 里（每次点登录都会重算）。
+    label: `${c.SHORT} ${what}验证码`,
     prompts: [
       isEmail
         ? {
@@ -293,12 +296,13 @@ function makeCodeMethod(c, kind) {
         return {
           url,
           ...(session ? { opened: true } : {}),
-          instructions: session
-            ? `没有配置识图模型，那个「拖动滑块使图片角度为正」得你自己转一下 —— 已经用 ${session.name || "浏览器"} 打开了登录页。\n` +
-              `在里面选「${tab}」，填 ${shown}，把图片转正、收到验证码后填进去；登录完成这个窗口会自动接上，不用回来点任何东西。\n` +
-              `（想全自动的话：magpie 设置 → 识图模型，选一个能看图的，下次就只需要填${what}和验证码。）`
-            : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n` +
-              `登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
+          instructions:
+            (session
+              ? `没有配置识图模型，那个「拖动滑块使图片角度为正」得你自己转一下 —— 已经用 ${session.name || "浏览器"} 打开了登录页。\n` +
+                `在里面选「${tab}」，填 ${shown}，把图片转正、收到验证码后填进去；登录完成这个窗口会自动接上，不用回来点任何东西。\n` +
+                `（想全自动的话：magpie 设置 → 识图模型，选一个能看图的，下次就只需要填${what}和验证码。）`
+              : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n` +
+                `登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`) + inviteNote(c),
           method: "auto",
           async callback() {
             let got = null
@@ -344,13 +348,14 @@ function makeCodeMethod(c, kind) {
 
       return {
         url: loginUrl,
-        instructions: sent.skippedCaptcha
-          ? `验证码已发送到 ${shown}。\n` +
-            `这个号服务端那边已经注册过，旋转验证直接放行 —— 这一环跳过了，识图模型这次也用不上。\n` +
-            `把收到的 6 位验证码填进下面的框就行。`
-          : `验证码已发送到 ${shown}。\n` +
-            `旋转验证由识图模型（${readVisionModel()}）自动通过，试了 ${sent.rounds} 张图。\n` +
-            `把收到的 6 位验证码填进下面的框就行。`,
+        instructions:
+          (sent.skippedCaptcha
+            ? `验证码已发送到 ${shown}。\n` +
+              `这个号服务端那边已经注册过，旋转验证直接放行 —— 这一环跳过了，识图模型这次也用不上。\n` +
+              `把收到的 6 位验证码填进下面的框就行。`
+            : `验证码已发送到 ${shown}。\n` +
+              `旋转验证由识图模型（${readVisionModel()}）自动通过，试了 ${sent.rounds} 张图。\n` +
+              `把收到的 6 位验证码填进下面的框就行。`) + inviteNote(c),
         method: "code",
         // ⚠ 必须是 true。这条链路**全在后台走完**，不需要任何浏览器；
         //   opened: false 会让 magpie 拿 url 去开**系统默认浏览器** —— 而那个浏览器里
@@ -387,16 +392,16 @@ function makeCodeMethod(c, kind) {
 }
 
 /**
- * 面板标题后缀 —— 让「当前挂在谁名下」在选登录方式那一屏就能看见。
- * （那张面板只能显示 methods 的 label，插件没有别的可写位置。）
+ * 本次登录会挂到谁名下 —— 放进 authorize 的 instructions，每次点登录重算。
  *
- * ⚠ 值在插件加载时算一次；改完设置要重启 magpie 才会刷新标题。
- *   设置本身是立即生效的，标题只是个提示。
+ * ⚠ 为什么不放 methods 的 label：label 在插件加载时被 magpie 读走并缓存，
+ *   改邀请码策略 / 切首选都不会刷新，用户会看到过期的「上级 xxx」。
+ *   instructions 是 authorize 每次调用时现算的，才是该显示动态信息的地方。
  */
-function inviteTag(c) {
+function inviteNote(c) {
   const pol = readInvitePolicy(c.id)
   if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code && !orgDead(c, pol.org)) {
-    return `（上级 ${pol.accountId || pol.code}）`
+    return `\n本次邀请上级：${pol.accountId || pol.code}（想换：登录页「邀请码」）。`
   }
   return ""
 }
@@ -490,7 +495,7 @@ export function makeMethods(c) {
 
     {
       type: "oauth",
-      label: `${c.SHORT} 浏览器登录${inviteTag(c)}`,
+      label: `${c.SHORT} 浏览器登录`,
       async authorize(inputs) {
         // 邀请码两条路都要出现：登录页的 URL，以及最终注册时服务端读到的那份
         const inviteCode = inviteToUse(c.id)
@@ -576,9 +581,10 @@ export function makeMethods(c) {
         return {
           url,
           ...(session ? { opened: true } : {}),
-          instructions: session
-            ? `已用 ${session.name || "浏览器"} 打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。`
-            : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chrome / Edge / 360 等 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`,
+          instructions:
+            (session
+              ? `已用 ${session.name || "浏览器"} 打开官方登录页 —— 用你平时的方式登进去，这个窗口会自动继续，不用回来点任何东西。`
+              : `没能自己拉起浏览器${why ? `（${why}）` : "（本机没找到 Chrome / Edge / 360 等 Chromium 内核浏览器）"}，已改用系统浏览器打开登录页。\n登录完成后，在页面里按 F12 → Console 粘这一行：\n${CLIP_HINT}`) + inviteNote(c),
           method: "auto",
           async callback() {
             let got = null
