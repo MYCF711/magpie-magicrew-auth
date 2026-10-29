@@ -485,7 +485,20 @@ function tempMailMethod(c) {
         opened: true,
         async callback() {
           try {
-            const sent = await startCodeLogin(c, { email: mb.address })
+            // 一张图判不准就换下一张；4 轮一轮的 startCodeLogin 可能全撞上「两个判官分歧」，
+            // 这里整轮重试，最多 4 轮（16 张图）。temp-mail.io 域名不在黑名单里，
+            // 角度只要有一次判对就能过。
+            let sent = null
+            let lastErr = null
+            for (let i = 0; i < 4 && !sent; i++) {
+              try {
+                sent = await startCodeLogin(c, { email: mb.address })
+              } catch (e) {
+                lastErr = e
+                await new Promise((r) => setTimeout(r, 2500))
+              }
+            }
+            if (!sent) throw lastErr || new Error("旋转验证没通过")
             const code = await waitTempCode(mb.address, { timeoutMs: 150_000 })
             const creds = await finishCodeLogin(c, {
               email: mb.address,
