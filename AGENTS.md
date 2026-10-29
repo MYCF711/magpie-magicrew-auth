@@ -81,9 +81,10 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 
 **坑 14 的两个附带判据**（都实测过）：
 
-- **只有直接改「已安装副本 / 本地路径源」的代码才需要重启** —— 那是本地文件，不经过
-  magpie 的插件更新；从 git / npm 网络源更新是热加载，直接生效，不需要重启。
-  若确实改了本地副本，重启后 `curl /v1/magpie/quotas` 看窗口里的 `spans`：
+- **只有直接改「已安装副本 / 本地路径源」的代码才需要让 host 重新加载** —— 那是本地文件，
+  不经过 magpie 的网络更新流程；从 git / npm 网络源更新会自动 Restart 插件 host，
+  对用户就是热加载，不需要重启 app。若确实改了本地副本，重新加载 host 后
+  `curl /v1/magpie/quotas` 看窗口里的 `spans`：
   `[{}]` = 没标 aside，`[{"aside":true}]` = 还标着。
 - **额度读取有 1 分钟缓存**，改完立刻看可能还是旧值。
 
