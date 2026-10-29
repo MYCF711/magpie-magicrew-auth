@@ -1,3 +1,13 @@
+## 0.3.59 — 2026-10-29
+
+**降级响应头：`x-magicrew-thinking: adaptive | stripped`**
+
+- 这条降级链自己会重发请求，出问题时最需要知道"是哪一步救回来的"；只加响应头，
+  不动正文，客户端忽略也无影响
+- `adaptive` = 换成了 `thinking:{type:"adaptive"}` + `output_config.effort`（思考还在）
+- `stripped` = 整条思考被剥掉了（能跑，但没思考）—— 看到它说明上游把两种形状都拒了
+- 验证：`tests/thinking-refusal.mjs` 36 项
+
 ## 0.3.58 — 2026-10-29
 
 **第三条拒绝文案：Bedrock 转发的 `"thinking.type.enabled" is not supported for this model`**
