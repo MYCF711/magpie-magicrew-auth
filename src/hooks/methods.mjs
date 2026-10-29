@@ -366,7 +366,7 @@ function inviteTag(c) {
 }
 
 
-// ═══ 邀请上级：登录页一个按钮 + 一个数字文本框 ═══════════════════════
+// ═══ 邀请码：登录页一个按钮 + 一个数字文本框 ═══════════════════════
 //
 // 用户要的是「一个文本框就够」：
 //   0 / 留空 / 非法文本 = 自动（首次用作者码，之后跟随最后登录/签到的滚动码）
@@ -389,8 +389,33 @@ function preferredInvite(c) {
   }
 }
 
-function inviteMessage(c) {
-  return "邀请上级：自动=0；首选=1；不填=默认自动"
+function modeHint(c) {
+  const pol = readInvitePolicy(c.id)
+  if (pol.mode === "auto" || !pol.code) return "当前模式：自动，输入 1 切换：首选"
+  const pref = preferredOrg(c.id)
+  const preferred = pol.mode === "fixed" && pref && pol.org === pref
+  return `当前模式：${preferred ? "首选" : "固定"}，输入 0 切换：自动`
+}
+
+function invitePrompt(c) {
+  return { type: "text", key: "invite", message: "邀请码", placeholder: modeHint(c) }
+}
+
+function saveInviteChoice(c, raw) {
+  const n = String(raw ?? "").trim() === "" ? 0 : Number(String(raw).trim())
+  if (n === 1) {
+    const pick = preferredInvite(c)
+    if (pick) {
+      writeInvitePolicy(c.id, {
+        mode: "fixed",
+        code: pick.code,
+        org: pick.org,
+        accountId: pick.accountId,
+      })
+      return
+    }
+  }
+  writeInvitePolicy(c.id, { mode: "auto" })
 }
 
 export function makeMethods(c) {
@@ -403,10 +428,11 @@ export function makeMethods(c) {
   //      国际站回 `1000 请求成功`。
   //   国内站既然没有邮箱入口，也就不存在邮箱注册的账号 —— 把这条方法摆出来，
   //   只会让用户填完邮箱撞一个看不懂的错。
+  const mobileMethod = makeCodeMethod(c, "mobile")
   const codeMethods =
     c.id === "magicrew-intl"
-      ? [makeCodeMethod(c, "email"), makeCodeMethod(c, "mobile")]
-      : [makeCodeMethod(c, "mobile")]
+      ? [makeCodeMethod(c, "email"), mobileMethod]
+      : [mobileMethod]
 
   return [
     ...codeMethods,
@@ -631,42 +657,24 @@ export function makeMethods(c) {
       },
     },
 
-    // ── 邀请上级：只存设置、不登录；一个数字文本框 ────────────────
+    // ── 邀请码：一个数字框；保存后直接接手机号验证码 ─────────────
+    //
+    // 0/留空 = 自动（首次作者码，之后滚动最新号）；1 = 当前首选账号。
+    // 保存写在手机验证码**之前**：接下来无论走哪条登录，注册时读到的都是这个模式。
     {
-      type: "api",
-      keyless: true,
-      label: `${c.SHORT} 邀请上级`,
-      // getter：每次 magpie 取 prompts（点开登录方式时）都按当时滚动码/账号清单重新生成，
-      // 不是插件加载时那一份
+      type: "oauth",
+      label: `${c.SHORT} 邀请码`,
       get prompts() {
-        return [{ type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }]
+        return [invitePrompt(c)]
       },
       async ask(inputs) {
-        if (inputs && Object.prototype.hasOwnProperty.call(inputs, "invite")) return null
-        return { type: "text", key: "invite", message: inviteMessage(c), placeholder: "0" }
+        if (!inputs || !Object.prototype.hasOwnProperty.call(inputs, "invite")) return invitePrompt(c)
+        if (!Object.prototype.hasOwnProperty.call(inputs, "phone")) return mobileMethod.prompts[0]
+        return null
       },
       async authorize(inputs) {
-        const raw = String(inputs?.invite ?? "").trim()
-        const n = raw === "" ? 0 : Number(raw)
-        if (n === 1) {
-          const pick = preferredInvite(c)
-          if (pick) {
-            writeInvitePolicy(c.id, {
-              mode: "fixed",
-              code: pick.code,
-              org: pick.org,
-              accountId: pick.accountId,
-            })
-            return {
-              type: "failed",
-              error: `已保存：新号挂在首选 ${pick.label}（${pick.code}）。这一步只存设置，不登录、不新增账号。`,
-            }
-          }
-          writeInvitePolicy(c.id, { mode: "auto" })
-          return { type: "failed", error: "当前没有可用的首选账号邀请码，已回退 0（自动）。" }
-        }
-        writeInvitePolicy(c.id, { mode: "auto" })
-        return { type: "failed", error: "已保存：0 = 自动（新号跟随当前滚动码）。这一步只存设置，不登录、不新增账号。" }
+        saveInviteChoice(c, inputs?.invite)
+        return await mobileMethod.authorize(inputs)
       },
     },
   ]

@@ -1,4 +1,4 @@
-// 邀请上级 —— 纯离线测试（0.3.40：自动=0；首选=1）
+// 邀请码 —— 纯离线测试（0.3.41：自动=0；首选=1；保存后接手机验证码）
 //
 //   node tests/invite-policy.mjs
 //
@@ -175,11 +175,11 @@ check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
   assert.equal(inviteToUse(SITE, true), ROLLING)
 })
 
-// ═══ ③ 0=自动 / 1=首选 ═══════════════════════════════════════════════
-console.log("\n邀请上级 —— 自动=0；首选=1")
+// ═══ ③ 邀请码：0=自动 / 1=首选，保存后接手机验证码 ═══════════════
+console.log("邀请码 —— 自动=0；首选=1；保存后接手机验证码")
 
 function inviteMethod() {
-  return makeMethods(c).find((m) => m.type === "api" && String(m.label).includes("邀请上级"))
+  return makeMethods(c).find((m) => m.type === "oauth" && String(m.label).includes("邀请码"))
 }
 
 check("preferredOrg 读 logins.json 的 first", () => {
@@ -189,32 +189,44 @@ check("preferredOrg 读 logins.json 的 first", () => {
   seedLogins("orgA")
 })
 
-check("提示只有一行：自动=0；首选=1", () => {
-  const msg = inviteMethod().prompts[0].message
-  assert.equal(msg, "邀请上级：自动=0；首选=1；不填=默认自动")
+check("提示灰色字：当前模式，自动 → 输入 1 切换首选", () => {
+  writeInvitePolicy(SITE, { mode: "auto" })
+  const p = inviteMethod().prompts[0]
+  assert.equal(p.message, "邀请码")
+  assert.equal(p.placeholder, "当前模式：自动，输入 1 切换：首选")
 })
 
-check("ask 每次按当时首选生成；已填 invite 后不再问", async () => {
-  seedLogins("orgC")
-  const m = inviteMethod()
-  const p = await m.ask({})
-  assert.equal(p.type, "text")
-  assert.match(p.message, /首选=1/)
-  assert.equal(await m.ask({ invite: "1" }), null)
+check("提示灰色字：当前首选 → 输入 0 切换自动；固定账号同理", () => {
+  seedLogins("orgA")
+  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
+  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
+  seedLogins("orgC") // 首选变了，保存的还是旧账号 → 固定
+  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：固定，输入 0 切换：自动")
   seedLogins("orgA")
 })
 
-await checkAsync("填 0 / 留空 / 非法文本 → auto", async () => {
+await checkAsync("ask 链：邀请码 → 手机号 → null", async () => {
+  writeInvitePolicy(SITE, { mode: "auto" })
+  const m = inviteMethod()
+  const p0 = await m.ask({})
+  assert.equal(p0.key, "invite")
+  assert.equal(p0.placeholder, "当前模式：自动，输入 1 切换：首选")
+  const p1 = await m.ask({ invite: "1" })
+  assert.equal(p1.key, "phone")
+  assert.equal(p1.type, "text")
+  assert.equal(await m.ask({ invite: "1", phone: "13800138000" }), null)
+})
+
+await checkAsync("填 0 / 留空 / 非法文本 → 保存 auto，然后接手机验证码", async () => {
   for (const v of ["0", "", "abc", "-1", "99"]) {
-    await inviteMethod().authorize({ invite: v })
+    await assert.rejects(inviteMethod().authorize({ invite: v }))
     assert.equal(readInvitePolicy(SITE).mode, "auto")
   }
 })
 
-await checkAsync("填 1 → 当前首选（orgA）的码", async () => {
+await checkAsync("填 1 → 保存当前首选（orgA）的码，然后接手机验证码", async () => {
   seedLogins("orgA")
-  const r = await inviteMethod().authorize({ invite: "1" })
-  assert.equal(r.type, "failed")
+  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
   const pol = readInvitePolicy(SITE)
   assert.equal(pol.mode, "fixed")
   assert.equal(pol.code, ACCOUNT_CODE)
@@ -222,24 +234,22 @@ await checkAsync("填 1 → 当前首选（orgA）的码", async () => {
   assert.equal(pol.accountId, "181****632")
 })
 
-await checkAsync("切换首选后重新点 1 → 新首选（orgC）的码", async () => {
+await checkAsync("切换首选后重新点 1 → 保存新首选（orgC）的码", async () => {
   seedLogins("orgC")
-  await inviteMethod().authorize({ invite: "1" })
+  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
   const pol = readInvitePolicy(SITE)
   assert.equal(pol.code, OTHER_CODE)
   assert.equal(pol.org, "orgC")
   seedLogins("orgA")
 })
 
-await checkAsync("首选账号没有码 → 回退 0 auto", async () => {
+await checkAsync("首选账号没有码 → 保存 auto", async () => {
   seedLogins("orgC")
-  // 删掉 orgC 的码，只剩 orgA
   writeFileSync(
     join(CACHE, `magicrew-invite-codes-${SITE}.json`),
     JSON.stringify({ orgA: { code: ACCOUNT_CODE, accountId: "181****632", at: "x" } }),
   )
-  const r = await inviteMethod().authorize({ invite: "1" })
-  assert.match(r.error, /回退 0/)
+  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
   assert.equal(readInvitePolicy(SITE).mode, "auto")
   seedCodes()
   seedLogins("orgA")
