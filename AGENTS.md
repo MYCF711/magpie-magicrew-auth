@@ -73,7 +73,7 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 | 20 | 邮箱验证码登录报「phone 字段是必须的」或「captcha 字段是必须的」 | 邮箱和手机是**两套端点**：发信 `/v4/user/send-email` vs `/send-sms`，换登录态 `/v4/user/login-email` vs `/login`；邮箱那条验证码字段叫 **`captcha`**（不是 `code`）。判据：往 `/v4/user/login` 发任何 type 都回「phone 字段是必须的」 | `src/captcha.mjs` 头 · CHANGELOG 0.3.28 |
 | 21 | 无头登录「旋转验证连试 4 张图都没过」，而这号本来就是自己的 | 先分清两件事：① **已注册的号服务端根本不出图**（`/captcha/generate` 对已注册账号直接回 `business_token`）—— 所以必须**先取图、再判识图模型**，一上来就 `if (!vision) throw` 会把这条免费通道堵死；② 识图模型 `max_tokens` 太小会把推理答案饿死（`workbuddy/deepseek-v4.1-flash` 给 400 → `content:null`，判官抓空串） | CHANGELOG 0.3.28 · `src/vision.mjs` |
 | 22 | 同一账号有的请求 200、有的 403 `token无效`（`retryable=false`），换个时间又好了 | key 有两条签发路径时 store 与 magpie 各存一把，**静态挑一把必有一半踩空**。0.3.29 起 `keyCandidates()` 把 store 两槽 + `auth.access` 逐把打 chat，命中的写回 store；全被拒才交 402 让 magpie 换号。判据：`GET /v1/models` 对死 key **放行**，逐把探活必须用 `/v1/chat/completions` | CHANGELOG 0.3.29 · `tests/key-failover.mjs` |
-| 23 | 插件列表里别人有「已自动更新」徽章，magicrew 没有 | magpie 只自动更新包名以 `@magpie-community/` 开头的包（`internal/plugin/updates.go` 的 `Official()` 硬编码前缀）；第三方 npm / git 源永远只提示。本插件用 `src/auto-maintenance.mjs` 复刻：读 `plugin-updates.json` 的 `waiting` → 调 `magpie plugin update` → 成功后补 `updated[]`（徽章读它）。判据：`plugin-updates.json` 的 waiting 有 `package:"Magicrew", git:true`；`findMagpieExe()` 能解析到 magpie 可执行文件。⚠ 更新后要重启 magpie 才加载新代码 | CHANGELOG 0.3.30 · `tests/auto-maintenance.mjs` |
+| 23 | 插件列表里别人有「已自动更新」徽章，magicrew 没有 | magpie 只自动更新包名以 `@magpie-community/` 开头的包（`internal/plugin/updates.go` 的 `Official()` 硬编码前缀）；第三方 npm / git 源永远只提示。本插件用 `src/auto-maintenance.mjs` 复刻：读 `plugin-updates.json` 的 `waiting` → 调 `magpie plugin update` → 成功后补 `updated[]`（徽章读它）。判据：`plugin-updates.json` 的 waiting 有 `package:"Magicrew", git:true`；`findMagpieExe()` 能解析到 magpie 可执行文件。⚠ 网络源（git / npm）更新由 magpie 热加载，`magpie plugin update` 后直接生效，**不需要重启 magpie** | CHANGELOG 0.3.30 · `tests/auto-maintenance.mjs` |
 | 24 | 新装插件后没有任何签到记录，`plugin-checkin.json` 里没有 magicrew | magpie 的 `PluginCheckinOn()`：`pluginCheckins` 没有显式值时默认 **false**（只有 WorkBuddy / Trae / MiniMax / Qoder 有内置开关）。插件只能在加载时把 `settings.json` 的 `pluginCheckins[provider]` 补成 true —— **只在键不存在时补**，用户显式 false 不覆盖。判据：`settings.json` 的 `pluginCheckins` 有 `magicrew` / `magicrew-intl` 键 | CHANGELOG 0.3.30 · `src/auto-maintenance.mjs` |
 | 25 | 邀请码选完，第二天签到后又变回别的号 | 0.3.41 起登录页「邀请码」一个数字文本框：灰色字显示当前模式；0=自动（首次用作者码，之后跟随最后登录 / 签到的滚动码）、1=当前首选账号（magpie 账号页 Make first 的 logins.json `first`）；留空/非法文本回退 0。保存后直接接手机号验证码；切首选后重新点 1 取新首选。选中即写 `magicrew-invite-policy-<site>.json`（fixed），`inviteToUse` 优先它；死号自动回落滚动→作者码。判据：`tests/invite-policy.mjs` | CHANGELOG 0.3.40 · `src/hooks/methods.mjs` |
 | 26 | 邀请码的数字文本框有没有「右边实时显示账号」 | magpie 的 `prompts` 只有 `text` / `select`，没有复合控件；灰色字（placeholder）每次点开按当前策略生成：自动 →「当前模式：自动，输入 1 切换：首选」；首选 →「当前模式：首选，输入 0 切换：自动」。没有实时右侧显示；保存后直接进手机号验证码，不再回「已保存」提示。要真正的右侧实时刷新得等上游加控件 | CHANGELOG 0.3.41 · `src/hooks/methods.mjs` |
@@ -81,9 +81,10 @@ curl -s "https://usemagpie.ai/api/latest?channel=stable" | grep -o '"version":"[
 
 **坑 14 的两个附带判据**（都实测过）：
 
-- **改了 `src/hooks/usage.mjs` 要重启 magpie 才生效** —— 插件跑在 `magpie-bun` 子进程里，
-  模块缓存不随文件变化失效。改完先 `Stop-Process` 再 `Start-Process` 同一个 exe，
-  然后 `curl /v1/magpie/quotas` 看窗口里的 `spans`：`[{}]` = 没标 aside，`[{"aside":true}]` = 还标着。
+- **只有直接改「已安装副本 / 本地路径源」的代码才需要重启** —— 那是本地文件，不经过
+  magpie 的插件更新；从 git / npm 网络源更新是热加载，直接生效，不需要重启。
+  若确实改了本地副本，重启后 `curl /v1/magpie/quotas` 看窗口里的 `spans`：
+  `[{}]` = 没标 aside，`[{"aside":true}]` = 还标着。
 - **额度读取有 1 分钟缓存**，改完立刻看可能还是旧值。
 
 补充一条最容易误信的旧说法：
