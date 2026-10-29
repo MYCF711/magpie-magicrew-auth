@@ -31,8 +31,16 @@ jobs:
         run: |
           set -euo pipefail
           for f in tests/*.mjs; do
-            echo "== $f =="
-            node "$f"
+            case "$f" in
+              tests/smoke.mjs)
+                echo "== $f =="
+                echo "跳过：本机环境 smoke，依赖真实凭据/模型目录；PR 门禁由离线测试覆盖"
+                ;;
+              *)
+                echo "== $f =="
+                node "$f"
+                ;;
+            esac
           done
       - name: 打包面预演
         working-directory: plugin
