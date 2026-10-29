@@ -1,3 +1,13 @@
+## 0.3.57 — 2026-10-29
+
+**所有成功登录自动捕获凭证到约定目录**
+
+- 新增 `src/credentials.mjs`：`captureCredential({address,jwt,org,source})`
+- `completeSignIn`（验证码/浏览器/本机浏览器）和登录态导入方法成功后，都写
+  `~/.config/magpie/magicrew-login-states/<account>.json`
+- 只写凭证，不写 plugin-auth/logins；正式入库仍由临时邮箱插件的导入 worker 做
+- 注册机（临时邮箱插件）也往同一个目录放凭证；以后换临时邮箱源不影响 Magicrew 侧
+
 ## 0.3.56 — 2026-10-29
 
 **首任务要看到 AI 回复才算完成：replies=0 不再落「已补」标记**

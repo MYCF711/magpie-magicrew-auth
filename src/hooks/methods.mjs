@@ -45,6 +45,7 @@ import {
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
+import { captureCredential } from "../credentials.mjs"
 import {
   bindOrganization,
   createFirstOrganization,
@@ -155,6 +156,8 @@ async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null,
   //   服务端只给打码号）；无头那条路 fetchWho 挂了（438 字符的 access_token
   //   配 Bearer 头不通），于是兜底用了组织码 `h97gkbu8bruj` ⇒ 两条并存。
   const accountId = preferredAccountId || who?.name || fallbackAccountId || picked
+  // 所有登录路径的统一出口：把凭证落一份到约定目录（失败不影响登录）
+  captureCredential({ address: accountId, jwt, org: picked, source: c.id })
   return {
     type: "success",
     access: key.apiKey,
@@ -701,6 +704,7 @@ export function makeMethods(c) {
             kickoffFirstTask(c, jwt, org)
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)
+            captureCredential({ address: who?.name || org, jwt, org, source: "state-import" })
             return {
               type: "success",
               access: r.apiKey,
