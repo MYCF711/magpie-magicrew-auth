@@ -8,6 +8,7 @@
 import { readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
+import { createDirectMailbox, waitDirectCode } from "./tempmail-io.mjs"
 
 const DISCOVERY = () => join(homedir(), ".config", "magpie", "tempmail.json")
 const HEARTBEAT_MS = 15_000
@@ -48,18 +49,30 @@ async function call(path, init = {}) {
 
 /** 领取一个给 magicrew-intl 用的邮箱；没有就现建一个（建邮箱仍发生在 temp 插件里） */
 export async function claimTempMailbox(providerId) {
-  const j = await call("/mailboxes/claim", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ providerId }),
-  })
-  if (!j?.address) throw new Error("临时邮箱插件没有返回地址")
-  return { address: j.address, created: Boolean(j.created) }
+  // 优先用临时邮箱插件（面板里能看见这个邮箱）；它没在跑就直连 temp-mail.io，
+  // 保证「自动捕获验证码」是全自动的，不要求用户先去面板建邮箱。
+  try {
+    const j = await call("/mailboxes/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId }),
+      timeout: 6_000,
+    })
+    if (j?.address) return { address: j.address, created: Boolean(j.created), via: "service" }
+  } catch {}
+  const mb = await createDirectMailbox()
+  return { address: mb.address, created: true, via: "direct" }
 }
 
-/** 等临时邮箱插件收到验证码 */
+/** 等验证码：先直连 temp-mail.io（服务建的地址也在它上面），失败再问插件服务 */
 export async function waitTempCode(address, { timeoutMs = 150_000 } = {}) {
-  const j = await call(`/mailboxes/${address}/code?timeoutMs=${timeoutMs}`, { timeout: timeoutMs + 10_000 })
-  if (!j?.code) throw new Error("临时邮箱没有返回验证码")
-  return j.code
+  try {
+    return await waitDirectCode(address, { timeoutMs })
+  } catch (directErr) {
+    try {
+      const j = await call(`/mailboxes/${address}/code?timeoutMs=${timeoutMs}`, { timeout: timeoutMs + 10_000 })
+      if (j?.code) return j.code
+    } catch {}
+    throw directErr
+  }
 }

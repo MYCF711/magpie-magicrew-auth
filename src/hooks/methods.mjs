@@ -45,7 +45,7 @@ import {
 import { readLocalCreds } from "../local-browser.mjs"
 import { CLIP_HINT, clipboardText, parseCreds, pollClipboard } from "../clipboard.mjs"
 import { readVisionModel } from "../vision.mjs"
-import { tempMailAvailable, claimTempMailbox, waitTempCode } from "../tempmail-client.mjs"
+import { claimTempMailbox, waitTempCode } from "../tempmail-client.mjs"
 import {
   bindOrganization,
   createFirstOrganization,
@@ -479,7 +479,7 @@ function autoCodeMethod(c) {
         : `${c.web}/login`
       return {
         url: loginUrl,
-        instructions: `邮箱 ${mb.address} 已就绪（由临时邮箱插件创建）。
+        instructions: `邮箱 ${mb.address} 已就绪。
 插件会自动过旋转验证、收取验证码并完成登录；不需要你填邮箱或验证码。
 如果失败，这里会显示原因，直接重试即可。`,
         method: "auto",
@@ -533,7 +533,7 @@ export function makeMethods(c) {
   // 建两份的话，下次改文案 / 超时必然只改一处 —— 同一个「只写一份」的理由，
   // 见 makeCodeMethod 头上那段。
   const emailMethod = c.id === "magicrew-intl" ? makeCodeMethod(c, "email") : null
-  const autoMethod = c.id === "magicrew-intl" && tempMailAvailable() ? autoCodeMethod(c) : null
+  const autoMethod = c.id === "magicrew-intl" ? autoCodeMethod(c) : null
   const codeMethods = emailMethod ? [emailMethod, ...(autoMethod ? [autoMethod] : []), mobileMethod] : [mobileMethod]
 
   // 「邀请码」入口保存完策略后接哪条验证码登录 —— **跟站点主登录方式一致**：
