@@ -304,7 +304,7 @@ function makeCodeMethod(c, kind) {
           async callback() {
             let got = null
             if (session && browser) {
-              got = await browser.waitForCreds(session, hostFragment).catch(() => null)
+              got = await browser.waitForCreds(session, hostFragment, { timeout: browserWaitMs }).catch(() => null)
               await browser.closeSession(session).catch(() => {})
             }
             if (!got && !session) {
@@ -314,8 +314,8 @@ function makeCodeMethod(c, kind) {
               return {
                 type: "failed",
                 error: session
-                  ? "浏览器开着了，但 5 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？"
-                  : "5 分钟内没拿到登录状态。可以改用「登录态（JWT + 组织码）」那条备选。",
+                  ? `浏览器开着了，但 ${browserWaitMin} 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？`
+                  : `${browserWaitMin} 分钟内没拿到登录状态。可以改用「登录态（JWT + 组织码）」那条备选。`,
               }
             }
             try {
@@ -517,6 +517,10 @@ function tempMailMethod(c) {
 }
 
 export function makeMethods(c) {
+  // 浏览器登录的等待上限：国际站链路长、没代理时首屏/登录态写入都慢，
+  // 5 分钟经常卡在「验证码刚到、窗口还没开」那一下（真机反馈）。国际站给 15 分钟。
+  const browserWaitMs = c.id === "magicrew-intl" ? 15 * 60_000 : 5 * 60_000
+  const browserWaitMin = Math.round(browserWaitMs / 60_000)
   // 顺序 = magpie 登录方式列表里的顺序。
   //
   // ⚠ **邮箱验证码只有国际站有**，国内站不给。实测两件事：
@@ -644,7 +648,7 @@ export function makeMethods(c) {
 
             // ① 首选：从我们自己拉起来的浏览器里读
             if (session && browser) {
-              got = await browser.waitForCreds(session, hostFragment).catch(() => null)
+              got = await browser.waitForCreds(session, hostFragment, { timeout: browserWaitMs }).catch(() => null)
               // 拿到就关窗：先 Browser.close 让它把 cookie 刷到磁盘，
               // 关不掉再 taskkill 整棵进程树
               await browser.closeSession(session).catch(() => {})
@@ -660,8 +664,8 @@ export function makeMethods(c) {
               return {
                 type: "failed",
                 error: session
-                  ? "浏览器开着了，但 5 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？"
-                  : "5 分钟内没拿到登录状态。可以改用「登录态（JWT + 组织码）」那条备选。",
+                  ? `浏览器开着了，但 ${browserWaitMin} 分钟内没在里面读到登录状态 —— 是还没登完，还是登的不是这个站点？`
+                  : `${browserWaitMin} 分钟内没拿到登录状态。可以改用「登录态（JWT + 组织码）」那条备选。`,
               }
             }
 

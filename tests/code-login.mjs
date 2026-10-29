@@ -468,7 +468,7 @@ await (async () => {
   })
 })()
 
-// ── ⑦ 方法表：国际站五条（邮箱优先，末尾邀请码），国内站四条 ─────────
+// ── ⑦ 方法表：国际站六条（邮箱优先，第二是临时邮箱，末尾邀请码），国内站四条 ─
 console.log("\n⑦ auth.methods：国际站 邮箱优先；国内站没有邮箱那条")
 
 const { MagicrewAuthPlugin, MagicrewIntlAuthPlugin } = await import("../index.mjs")
@@ -485,14 +485,15 @@ check("国内站：手机号 → 浏览器 → 登录态 → 邀请码，且**�
   assert.ok(!l.some((x) => /邮箱/.test(x)), "国内站登录页没有邮箱入口，别摆出来")
 })
 
-check("国际站：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
+check("国际站：邮箱 → 临时邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
   const l = intl.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 5, `应该 5 条，实际 ${l.length}：${l.join(" / ")}`)
-  assert.match(l[0], /邮箱验证码/)
-  assert.match(l[1], /手机号验证码/)
-  assert.match(l[2], /浏览器登录/)
-  assert.match(l[3], /登录态/)
-  assert.match(l[4], /邀请码/)
+  assert.equal(l.length, 6, `应该 6 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.match(l[0], /邮箱验证码（上级/)
+  assert.match(l[1], /邮箱验证码（临时邮箱/)
+  assert.match(l[2], /手机号验证码/)
+  assert.match(l[3], /浏览器登录/)
+  assert.match(l[4], /登录态/)
+  assert.match(l[5], /邀请码/)
 })
 
 check("国际站「邀请码」保存后接邮箱，不接手机号（0.3.43）", async () => {
@@ -510,11 +511,11 @@ check("国内站「邀请码」保存后接手机号（站点分叉的另一半�
 })
 
 check("两条验证码方法各问一个字段，键名分别是 email / phone", () => {
-  const email = intl.auth.methods[0]
-  const phone = intl.auth.methods[1]
+  const email = intl.auth.methods.find((m) => m.prompts?.[0]?.key === "email")
+  const phone = intl.auth.methods.find((m) => m.prompts?.[0]?.key === "phone")
+  assert.ok(email && phone, "没找到 email/phone 两条验证码方法")
   assert.equal(email.prompts.length, 1)
-  assert.equal(email.prompts[0].key, "email")
-  assert.equal(phone.prompts[0].key, "phone")
+  assert.equal(phone.prompts.length, 1)
   assert.equal(email.prompts[0].validate("a@b.com"), undefined)
   assert.ok(email.prompts[0].validate("a@b"), "坏邮箱要拦下")
   assert.equal(phone.prompts[0].validate("13800138000"), undefined)
@@ -522,7 +523,10 @@ check("两条验证码方法各问一个字段，键名分别是 email / phone",
 })
 
 check("两类验证码方法都声明 type=oauth（magpie 按它认登录方式）", () => {
-  for (const m of [intl.auth.methods[0], intl.auth.methods[1]]) assert.equal(m.type, "oauth")
+  for (const key of ["email", "phone"]) {
+    const m = intl.auth.methods.find((x) => x.prompts?.[0]?.key === key)
+    assert.equal(m.type, "oauth")
+  }
 })
 
 // ── 收尾 ─────────────────────────────────────────────────────────────
