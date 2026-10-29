@@ -30,9 +30,8 @@ import {
 } from "../api.mjs"
 import {
   inviteToUse,
-  readInvite,
   liveOrgs,
-  authorInvite,
+  preferredOrg,
   readAccountCodes,
   writeInvitePolicy,
   readSession,
@@ -369,63 +368,29 @@ function inviteTag(c) {
 
 // ═══ 邀请上级：登录页一个按钮 + 一个数字文本框 ═══════════════════════
 //
-// 用户要的是「一个文本框就够」：0 = 我的（作者 MYCF711），1..N = 已登录账号
-// （按账号名排序），-1 = 自动（跟随最后一个登录 / 签到的号）；留空 / 不存在的
-// 数字回退 0。
+// 用户要的是「一个文本框就够」：
+//   0 / 留空 / 非法文本 = 自动（首次用作者码，之后跟随最后登录/签到的滚动码）
+//   1 = 当前首选账号（magpie 账号页「首选」那个）的邀请码
+// 没有列表、没有 1..N —— 想换首选就在 magpie 账号页切首选，再点这个按钮。
 //
-// magpie 的 prompts 只有 text / select，没有「右边实时显示对应账号」的复合控件；
-// 所以把「0=…；1=…」的对照表写进 message，用户填数字、下一步后回一条已保存说明。
-//
-// 用 ask（而不是静态 prompts）是为了每次打开都按最新账号清单生成对照表 ——
-// 插件加载时 backfill 可能还没跑完。
+// 0 的自动不需要在这里算：store.inviteToUse 的 auto 分支就是
+// readInvite(site) || AUTHOR_INVITE。1 每次点开时读 logins.json 的 first。
 
-function inviteZero(c) {
-  const codes = readAccountCodes(c.id)
-  const author = authorInvite(c.id)
-  const rolling = readInvite(c.id)
-  const code = rolling || author
-  // 0 = 老的滚动规则最新那个码；找到归属就显示账号名，否则退作者码
-  if (rolling && code !== author) {
-    const owner = Object.keys(codes).find((o) => codes[o]?.code === code)
-    if (owner) {
-      const accountId = String(codes[owner].accountId || owner)
-      return { code, label: accountId, org: owner, accountId }
-    }
-    return { code, label: "自动（滚动）", org: "", accountId: "" }
+function preferredInvite(c) {
+  const org = preferredOrg(c.id)
+  if (!org) return null
+  const v = readAccountCodes(c.id)[org]
+  if (!v?.code) return null
+  return {
+    code: v.code,
+    label: String(v.accountId || org),
+    org,
+    accountId: String(v.accountId || org),
   }
-  return { code: author, label: "自动（作者 MYCF711）", org: "", accountId: "MYCF711" }
-}
-
-function inviteEntries(c) {
-  const codes = readAccountCodes(c.id)
-  const author = authorInvite(c.id)
-  const live = liveOrgs(c.id)
-  const out = []
-  let n = 1
-  for (const [org, v] of Object.entries(codes)) {
-    if (!v?.code || v.code === author) continue
-    if (live && live.size && !live.has(org)) continue
-    out.push({
-      n: n++,
-      label: String(v.accountId || org),
-      code: v.code,
-      org,
-      accountId: String(v.accountId || org),
-    })
-  }
-  return out
 }
 
 function inviteMessage(c) {
-  const zero = inviteZero(c)
-  const parts = ["邀请上级：填数字后点下一步", `0 = ${zero.label}（${zero.code}）`]
-  for (const e of inviteEntries(c)) {
-    // 0 指向的那个账号在 1..N 里也有一格，但当前不显示（换了 0 就露出来）
-    if (e.code === zero.code) continue
-    parts.push(`${e.n} = ${e.label}（${e.code}）`)
-  }
-  parts.push("留空 / 非法文本 = 0")
-  return parts.join("；")
+  return "邀请上级：自动=0；首选=1；不填=默认自动"
 }
 
 export function makeMethods(c) {
@@ -682,28 +647,26 @@ export function makeMethods(c) {
       },
       async authorize(inputs) {
         const raw = String(inputs?.invite ?? "").trim()
-        let n = raw === "" ? 0 : Number(raw)
-        if (!Number.isInteger(n) || n < 0) n = 0
-        if (n === 0) {
+        const n = raw === "" ? 0 : Number(raw)
+        if (n === 1) {
+          const pick = preferredInvite(c)
+          if (pick) {
+            writeInvitePolicy(c.id, {
+              mode: "fixed",
+              code: pick.code,
+              org: pick.org,
+              accountId: pick.accountId,
+            })
+            return {
+              type: "failed",
+              error: `已保存：新号挂在首选 ${pick.label}（${pick.code}）。这一步只存设置，不登录、不新增账号。`,
+            }
+          }
           writeInvitePolicy(c.id, { mode: "auto" })
-          return { type: "failed", error: "已保存：0 = 自动（新号跟随当前滚动码）。这一步只存设置，不登录、不新增账号。" }
+          return { type: "failed", error: "当前没有可用的首选账号邀请码，已回退 0（自动）。" }
         }
-        const entries = inviteEntries(c)
-        const pick = entries.find((e) => e.n === n)
-        if (!pick) {
-          writeInvitePolicy(c.id, { mode: "auto" })
-          return { type: "failed", error: "数字没有对应账号，已回退 0（自动）。这一步只存设置，不登录、不新增账号。" }
-        }
-        writeInvitePolicy(c.id, {
-          mode: "fixed",
-          code: pick.code,
-          org: pick.org,
-          accountId: pick.accountId,
-        })
-        return {
-          type: "failed",
-          error: `已保存：新号挂在 ${pick.label}（${pick.code}）。这一步只存设置，不登录、不新增账号。`,
-        }
+        writeInvitePolicy(c.id, { mode: "auto" })
+        return { type: "failed", error: "已保存：0 = 自动（新号跟随当前滚动码）。这一步只存设置，不登录、不新增账号。" }
       },
     },
   ]

@@ -156,6 +156,31 @@ export function liveOrgs(siteId) {
   }
 }
 
+/**
+ * magpie 账号页上「首选」那个账号的 org（只读 logins.json）。
+ *
+ * magpie 把首选存在 logins.json 的 first 字段（Make first / 拖到第一行会写），
+ * 账号行里的 home 是 plugin-auth.json 的 key，借它换回 org。
+ */
+export function preferredOrg(siteId) {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "logins.json"), "utf8"))
+    const agent = "plugin:" + siteId
+    const rows = (Array.isArray(raw) ? raw : []).filter((l) => l && l.agent === agent && l.home)
+    if (!rows.length) return ""
+    const first =
+      rows.find((l) => l.first === true) ||
+      rows.filter((l) => Number(l.order) > 0).sort((a, b) => Number(a.order) - Number(b.order))[0] ||
+      rows[0]
+    const home = String(first?.home || "").trim()
+    if (!home) return ""
+    const auth = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+    return String(auth?.[home]?.org || "").trim()
+  } catch {
+    return ""
+  }
+}
+
 /** 作者自己的码（「我的」那一项） */
 export function authorInvite(siteId) {
   return AUTHOR_INVITE[siteId] || ""
