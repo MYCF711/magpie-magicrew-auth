@@ -1,4 +1,5 @@
 // 「注册成功那一下就把八个新人任务补完」—— kickoffOnboarding 的接线 + runCheckin 的幂等
+//   ＋ 顺带钉住「注册成功那一刻把邀请码记成『最后注册的新号』」（0.3.67）
 //
 //   node tests/onboarding-kickoff.mjs
 //
@@ -8,10 +9,12 @@
 // 实现没重写一套：登录成功的公共出口 `kickoffOnboarding()` 里多触发一次
 // `tasks.runCheckin()` —— 它本来就有 pending 过滤 / first_ai_work / 其余 7 项 PUT。
 //
-// 这份测试锁三件事：
+// 这份测试锁四件事：
 //   ① **fire-and-forget**：runCheckin 再慢也不许卡住登录 callback（用永不 resolve 的 fake 计时）；
 //   ② **接线**：JWT 登录那条路的 `callback()` 返回 success 之后，runCheckin 确实被触发一次；
-//   ③ **幂等**：连跑两轮不重复 PUT / 不重复领每日积分；同一账号并发两轮只跑一轮。
+//   ③ **注册落点**：第一次见的 org 要把自己的邀请码记成「最后注册的新号」，重登不许覆盖
+//      （0.3.67 起自动模式跟的是它，不是「最后一个登录 / 签到的号」）；
+//   ④ **幂等**：连跑两轮不重复 PUT / 不重复领每日积分；同一账号并发两轮只跑一轮。
 //
 // ⚠ 假 HOME 必须在 import methods.mjs **之前**设好：credentials.mjs 在模块初始化时
 //   就把 `~/.config/magpie/magicrew-login-states` 算成常量；设晚了测试会往真目录写凭证。
@@ -107,7 +110,7 @@ console.log("\n② JWT 登录 callback —— 先返回 success，再在后台�
  * 登录链路（JWT 那条）需要的假上游。
  * `login-gift` 故意挂住：如果 callback 偷偷 await 了 runCheckin，测试会直接超时。
  */
-function installLoginServer() {
+function installLoginServer({ inviteCode = "IVTESTCODE1" } = {}) {
   const orig = globalThis.fetch
   const state = { giftCalls: 0, release: null, gate: null }
   state.gate = new Promise((r) => { state.release = r })
@@ -119,7 +122,7 @@ function installLoginServer() {
     if (u.includes("/api/v1/model-gateway/tokens") && method === "POST") {
       return json({ code: 1000, data: { api_key: "mgw_test", refresh_token: "rt_test", api_key_expires_at: "2026-10-31T00:00:00Z", refresh_token_expires_at: "2026-11-30T00:00:00Z" } })
     }
-    if (u.includes("/api/v1/invitations/info")) return json({ code: 1000, data: { invite_code: "IVTESTCODE1", invite_count: 0, invited_users: [] } })
+    if (u.includes("/api/v1/invitations/info")) return json({ code: 1000, data: { invite_code: inviteCode, invite_count: 0, invited_users: [] } })
     if (u.includes("/api/v1/contact/accounts/me/users")) return json({ code: 1000, data: { items: [{ phone: "13800000000" }] } })
     if (u.includes("/api/v1/login-gift")) {
       state.giftCalls++
@@ -154,9 +157,53 @@ await checkAsync("callback() 在 runCheckin 还卡着时就返回 success（< 1s
   }
 })
 
-// ══ 三、runCheckin 幂等 ═════════════════════════════════════════════════
+// ══ 三、注册那一刻记下「最后注册的新号」的邀请码 ═══════════════════════
+//
+// 主人 2026-10-30 的要求：自动模式要跟「最后一个注册进来的新号」，
+// 不是「最后一个登录 / 签到的号」。所以注册成功那一刻要把这个号的邀请码记下来，
+// 而重登同一个号只能刷滚动码、不许改这条记录。
 
-console.log("\n③ runCheckin 幂等 —— 重复调用不重复领奖")
+console.log("\n③ 注册那一刻记下它的邀请码（重登不覆盖）")
+
+const { readRegisteredInvite, readInvite } = await import("../src/store.mjs")
+const SITE_ID = SITES.cn.id
+
+/** 走 JWT 登录那条路，org 已给定时用它自己的邀请码 */
+async function jwtLogin(org, inviteCode) {
+  const srv = installLoginServer({ inviteCode })
+  try {
+    const methods = makeMethods(site)
+    const method = methods.find((m) => String(m.label).includes("登录态"))
+    const flow = await method.authorize({ jwt: "eyJ" + "x".repeat(60), org })
+    const r = await flow.callback()
+    await new Promise((res) => setTimeout(res, 30))
+    return r
+  } finally {
+    srv.state.release()
+    await new Promise((res) => setTimeout(res, 30))
+    srv.restore()
+  }
+}
+
+await checkAsync("magpie 里第一次见的 org → 记成「最后注册的新号」", async () => {
+  const r = await jwtLogin("orgreg001", "IVNEWACCT001")
+  assert.equal(r?.type, "success", `要返回 success，实际 ${JSON.stringify(r)}`)
+  const reg = readRegisteredInvite(SITE_ID)
+  assert.ok(reg, "要写下注册记录")
+  assert.equal(reg.code, "IVNEWACCT001")
+  assert.equal(reg.org, "orgreg001")
+})
+
+await checkAsync("同一个号再登一次 → 注册记录不动，只刷滚动码", async () => {
+  const r = await jwtLogin("orgreg001", "IVNEWACCT002")
+  assert.equal(r?.type, "success")
+  assert.equal(readRegisteredInvite(SITE_ID).code, "IVNEWACCT001", "重登不许改「最后注册的新号」")
+  assert.equal(readInvite(SITE_ID), "IVNEWACCT002", "滚动码照旧刷新（它只是兜底）")
+})
+
+// ══ 四、runCheckin 幂等 ═════════════════════════════════════════════════
+
+console.log("\n④ runCheckin 幂等 —— 重复调用不重复领奖")
 
 /** 有状态的假上游：签到接口会真的把任务标记完成、把积分加上去 */
 function installCheckinServer() {

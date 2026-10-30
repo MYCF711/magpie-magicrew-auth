@@ -37,6 +37,8 @@ import {
   writeSession,
   noteLoginFailure,
   noteOrg,
+  noteRegisteredInvite,
+  readAccountCodes,
   readKnownOrgs,
   rollInvite,
   readInvitePolicy,
@@ -92,17 +94,29 @@ export function kickoffOnboarding(c, jwt, org, deps = {}) {
 }
 
 /**
- * 登录成功后统一做的两件事：滚邀请码 + 看一眼邀请上级满没满。
+ * 登录成功后统一做的三件事：滚邀请码 + （注册成功才）记「最后注册的新号」 + 看邀请上级满没满。
  *
  * 两个都**不挡登录**：rollInvite 自带超时和 try/catch；enforceInviteSwitch
  * 整体包在 try 里，并且内部有 10 分钟节流（一次登录只多查一次）。
  * 邀请这块出任何问题都不能让用户登不进来 —— 它只是副作用，不是登录条件。
  *
+ * ⚠ 只有 `isNewRegistration === true` 才写 `noteRegisteredInvite`：
+ *   自动模式现在跟的是「最后一个注册成功的新号」（主人 2026-10-30 的要求），
+ *   普通重登 / 签到只更新滚动码，绝不能把那个记录改回旧号 ——
+ *   否则「重登一下旧号」就把后面新号的邀请上级换掉了。
+ *
  * 为什么在登录路径上也要切：新号注册完的这一刻，正好是「上一个上级又多吃了一个」
  * 的时刻。只靠每天一次的签到，最坏要等一天才切，期间新号全挂在满额号名下白送。
+ *
+ * @param {boolean} [opts.isNewRegistration] 这次登录是不是「刚注册成功」
  */
-async function afterSignIn(c, jwt, org) {
-  await rollInvite(c.id, jwt, org, c.host)
+async function afterSignIn(c, jwt, org, { isNewRegistration = false } = {}) {
+  const code = await rollInvite(c.id, jwt, org, c.host)
+  if (isNewRegistration) {
+    // rollInvite 失败（返回空）时退到「这个账号的码」缓存 —— 签到/上次登录记下的
+    const own = code || readAccountCodes(c.id)[org]?.code || ""
+    if (own) noteRegisteredInvite(c.id, { code: own, org })
+  }
   try {
     const { enforceInviteSwitch } = await import("../invite-quota.mjs")
     await enforceInviteSwitch(c)
@@ -136,7 +150,7 @@ async function afterSignIn(c, jwt, org) {
  *   头都一样），不能拿来判断。⇒ 多组织账号在无头这条路上会落到列表第一个组织，
  *   这是已知限制，不是 bug。
  */
-async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null, fallbackAccountId = null) {
+async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null, fallbackAccountId = null, isNewRegistration = null) {
   const candidates = [org, ...orgs.filter((o) => o && o !== org)]
   let lastErr = null
   let picked = null
@@ -182,11 +196,17 @@ async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null,
   }
   if (!picked) throw lastErr ?? new Error("没有可用的组织码")
 
+  // 是不是「第一次添加进来的号」—— 必须在 noteOrg 之前算。
+  // 验证码那条路拿得到更准的信号（服务端有没有跳过旋转图 = 这个号注册过没有），
+  // 它会显式传 isNewRegistration；浏览器 / JWT 那条只能按「magpie 没见过这个 org」估。
+  const wasKnown = readKnownOrgs(c.id).includes(picked)
+  const registered = isNewRegistration === null ? !wasKnown : Boolean(isNewRegistration)
+
   const key = await issueGatewayKey(jwt, picked, c.host)
   writeSession(c.id, jwt, picked)
   noteOrg(c.id, picked)
-  // 滚邀请码：把这个账号自己的码存成下一次用的；顺手看上级满没满
-  await afterSignIn(c, jwt, picked)
+  // 滚邀请码：把这个账号自己的码存成下一次用的；注册成功的话同时记成「最后一个新号」
+  await afterSignIn(c, jwt, picked, { isNewRegistration: registered })
   kickoffOnboarding(c, jwt, picked)
   const who = await fetchWho(jwt, picked, c.host).catch(() => null)
 
@@ -425,6 +445,9 @@ function makeCodeMethod(c, kind) {
               creds.orgs,
               isEmail ? null : shown,
               isEmail ? ident.email : null,
+              // 服务端没出旋转图 = 这个号早就注册过；出了图并走完验证 = 这次是**注册**。
+              // 只有后者能把「最后一个注册的新号」改成自己（见 afterSignIn）。
+              !sent.skippedCaptcha,
             )
           } catch (e) {
             return { type: "failed", error: `登录成功了，但换 key 失败：${String(e?.message ?? e).slice(0, 300)}` }
@@ -544,7 +567,8 @@ export function makeMethods(c) {
               noteOrg(c.id, local.org)
               // 等它落盘再返回：这条以前是 .catch(()=>{}) 发射后不管，
               // 一旦 host 进程在 callback 之后被回收，滚动就永远不生效
-              await afterSignIn(c, local.jwt, local.org)
+              // 这条分支只在「这个 org 还没加过」时才进（见上面 readKnownOrgs 的判断）⇒ 算新号
+              await afterSignIn(c, local.jwt, local.org, { isNewRegistration: true })
               kickoffOnboarding(c, local.jwt, local.org)
               const who = await fetchWho(local.jwt, local.org, c.host).catch(() => null)
               return {
@@ -624,10 +648,13 @@ export function makeMethods(c) {
               // 真的验一次：读积分能过，说明 JWT + 组织码都对
               await fetchPoints(got.jwt, got.org, c.host)
               const key = await issueGatewayKey(got.jwt, got.org, c.host)
+              // 「magpie 里第一次见这个 org」= 当作新加进来的号（浏览器那条路没有
+              // 「服务端有没有跳过旋转图」这种准信号，只能按这个估）
+              const wasKnown = readKnownOrgs(c.id).includes(got.org)
               writeSession(c.id, got.jwt, got.org)
               noteOrg(c.id, got.org)
               // 滚邀请码：把这个账号自己的码存成下一次用的（等落盘再返回）
-              await afterSignIn(c, got.jwt, got.org)
+              await afterSignIn(c, got.jwt, got.org, { isNewRegistration: !wasKnown })
               kickoffOnboarding(c, got.jwt, got.org)
               return {
                 type: "success",
@@ -702,9 +729,11 @@ export function makeMethods(c) {
             } catch (e) {
               return { type: "failed", error: String(e?.message ?? e) }
             }
+            // 同浏览器那条：magpie 里第一次见这个 org 才当成「新加进来的号」
+            const wasKnown = readKnownOrgs(c.id).includes(org)
             writeSession(c.id, jwt, org)
             noteOrg(c.id, org)
-            await afterSignIn(c, jwt, org)
+            await afterSignIn(c, jwt, org, { isNewRegistration: !wasKnown })
             kickoffOnboarding(c, jwt, org)
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)

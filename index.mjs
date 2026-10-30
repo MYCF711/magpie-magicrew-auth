@@ -82,13 +82,14 @@ function buildPlugin(c) {
         // `input.magpie.option(provider, key)` 读，**改完不重启 host**。
         //
         // 只有这一个开关 = 只有两种模式（自动 / 首选）。要「指定任意码」就得有
-        // 一个能装字符串的控件，而选项只能是布尔 —— 那正是这次拆掉的登录页文本框。
+        // 一个能装字符串的控件，而选项只能是布尔 —— 那正是这次拆掉的登录页文本框；
+        // 「列出账号让人挑」同理，也做不了（settings.PluginOptions 是 map[string]bool）。
         options: [
           {
             key: INVITE_FIRST_OPTION,
             label: "邀请码挂到首选账号",
             description:
-              "开：新号注册挂在 magpie 账号页「首选」那个账号名下，它满了自动换到未满的真实邮箱号。关：跟随最后一个登录 / 签到的账号（默认）。",
+              "开：新号注册挂在 magpie 账号页「首选」那个账号名下，它满了自动换到未满的真实邮箱号。关：跟随最后一个注册成功的新号（默认）。",
             default: false,
           },
         ],

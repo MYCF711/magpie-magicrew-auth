@@ -1,3 +1,51 @@
+## 0.3.67 — 2026-10-30
+
+**自动模式改跟「最后一个注册成功的新号」，不再跟「最后一个登录 / 签到的号」**
+
+### 主人原话
+
+> 然后麦吉的这个跟随最后一个登录/签到的，不对，要跟随最后一个注册进来的新号。
+> 或者这里直接把可选账号列出来让人选，显示账号名就行了
+
+### 一、改了什么
+
+- **新增「最后注册的新号」这条记录**：`~/.cache/magpie/magicrew-invite-registered-<站点>.json`
+  （`{code, org, at}`）。**只有注册成功那一刻**才写（`src/hooks/methods.mjs` 的 `afterSignIn`）。
+- **自动模式（开关关）的落点顺序改成**：
+  `最后注册的新号 → 滚动码 → 作者码`（那个新号被删了才往下走）。
+  滚动码文件照旧由签到 / 登录刷新，但它**降级成兜底**，再也顶不掉注册记录。
+- **怎么判断「这次是注册」**：
+  · 验证码登录（手机 / 邮箱）：以**服务端有没有跳过旋转验证**为准
+    （`startCodeLogin` 的 `skippedCaptcha`；出了图并走完验证 = 这次是注册，准信号）；
+  · 浏览器登录 / JWT 导入：以「magpie 里第一次见这个 org」为准（没有更准的信号可用）。
+  两者都**不会**在普通重登时触发 —— 重登只刷滚动码。
+- 上一版（0.3.66）让登录那一刻补完新人任务，这次顺手对齐：注册号记录与补任务同一条路。
+
+### 二、「列出账号让人选」—— 做不了，有源码依据
+
+magpie 的插件选项**只存布尔**，装不下「从 N 项里选一个」：
+
+| 证据 | 位置 |
+|---|---|
+| `PluginOptions map[string]map[string]bool`（注释原文：the user's values of the switches plugins declare） | `internal/settings/settings.go:276-279` |
+| 设置接口 `POST /api/settings/plugin-option` 的入参只有 `{Provider string; Key string; On bool}` | `internal/gui/api.go:1945-1950` |
+| 插件侧声明的选项是 `plugin.Option` + `On bool`（"the switches the plugin declares (auth.options, #2038)"） | `internal/gui/plugins.go:39-49` |
+
+（核对于本机 magpie **0.1.2145** 的源码快照。0.3.64 那会儿记的是
+`providers.go:170-187` 的 `Default bool`，讲的是同一件事，以本条为准。）
+
+⇒ 现在能选的只有「自动 / 首选」两种模式（就是那一个布开关）。想让用户直接点账号名，
+得等 magpie 本体给 `auth.options` 加枚举类型；插件侧无法绕过。
+README 的「邀请码」一节与 AGENTS 坑 26 已写明这条限制。
+
+### 三、验证
+
+- `node tests/invite-policy.mjs`：**35 条全过**（新增 7 条）—— 无注册记录时行为不变、
+  注册记录优先于滚动码、`rollInvite` 只刷新滚动码覆盖不了注册号、
+  注册号被删则作废回落、开关开时首选仍优先、空码不写、删掉记录回老行为。
+- `node tests/onboarding-kickoff.mjs`：**7 条全过**（新增 2 条）—— JWT 登录第一次见某 org
+  会把它的码写成注册记录；同一个号再登一次（服务端给了新码）只刷滚动码、注册记录不动。
+
 ## 0.3.66 — 2026-10-30
 
 **注册成功那一刻就补完八个新人任务，不再等每天一次的签到**
