@@ -31,7 +31,7 @@
 
 import { SITES, siteCtx, REFRESH_LEAD_MS } from "./src/context.mjs"
 import { makeConfig } from "./src/hooks/config.mjs"
-import { backfillInviteCodes } from "./src/store.mjs"
+import { backfillInviteCodes, setInviteOptionReader, INVITE_FIRST_OPTION } from "./src/store.mjs"
 import { makeMethods } from "./src/hooks/methods.mjs"
 import { makeRefresh } from "./src/hooks/refresh.mjs"
 import { makeLoader } from "./src/hooks/loader.mjs"
@@ -42,12 +42,28 @@ import { makeHeaders } from "./src/hooks/headers.mjs"
 
 /** 一个站点进，一个完整插件出 */
 function buildPlugin(c) {
-  return async () => {
+  return async (input) => {
+    // 把「怎么读这个供应商的开关」交给 store —— 邀请码模式就靠它。
+    //
+    // ⚠ 必须传**读取函数**，不能在这里读一次存下来：magpie 的 option 是
+    //   「拨一下 -> 立刻生效」的（providers.go 的 setProviderOptions 不重启
+    //   host，只把新值递过去），每读一次才是当前值。
+    //   input 可能是 undefined（老 magpie / 测试直接调工厂），一律可选链。
+    setInviteOptionReader(c.PROVIDER, (key) => input?.magpie?.option?.(c.PROVIDER, key) === true)
+
     return {
       // 老用户升级上来时码缓存可能是空的：延迟补一次（只补缺口，失败静默）
       config: (cfg) => {
         try {
-          const t = setTimeout(() => backfillInviteCodes().catch(() => {}), 20_000)
+          const t = setTimeout(() => {
+            backfillInviteCodes().catch(() => {})
+            // 开关打开时，启动就把「首选满了没」查一次（每个站点 10 分钟节流，
+            // 启动这一次不会比登录 / 签到多打请求）。放在这里是因为用户可能
+            // 拨完开关就去注册新号，等不到下一次登录。
+            import("./src/invite-quota.mjs")
+              .then((m) => m.enforceInviteSwitch(c))
+              .catch(() => {})
+          }, 20_000)
           t.unref?.()
         } catch {}
         return makeConfig(c)(cfg)
@@ -58,6 +74,24 @@ function buildPlugin(c) {
         icon: c.ICON,
         maxConcurrency: 4,
         refreshLead: REFRESH_LEAD_MS,
+
+        // ── 供应商编辑器里的「插件选项」：邀请码挂谁 ───────────────────
+        //
+        // magpie 自己的字段（#2038）：每项都是 Off/On 一个开关，存在
+        // `settings.PluginOptions[provider][key]` 里，插件用
+        // `input.magpie.option(provider, key)` 读，**改完不重启 host**。
+        //
+        // 只有这一个开关 = 只有两种模式（自动 / 首选）。要「指定任意码」就得有
+        // 一个能装字符串的控件，而选项只能是布尔 —— 那正是这次拆掉的登录页文本框。
+        options: [
+          {
+            key: INVITE_FIRST_OPTION,
+            label: "邀请码挂到首选账号",
+            description:
+              "开：新号注册挂在 magpie 账号页「首选」那个账号名下，它满了自动换到未满的真实邮箱号。关：跟随最后一个登录 / 签到的账号（默认）。",
+            default: false,
+          },
+        ],
 
         methods: makeMethods(c),
         refresh: makeRefresh(c),

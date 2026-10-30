@@ -1,13 +1,14 @@
-// 邀请码 —— 纯离线测试（0.3.41：自动=0；首选=1；0.3.43 起保存后接本站主验证码方式）
+// 邀请码 —— 纯离线测试（0.3.64：三模式收成双模式，模式由 magpie 开关决定）
 //
 //   node tests/invite-policy.mjs
 //
 // 钉住：
-//   · 策略 auto / fixed / custom；作者码 org 为空、死号自动回落
-//   · 0 / 留空 / 非法文本 = 自动（滚动码）；1 = 当前首选账号的邀请码
-//   · 首选来自 magpie logins.json 的 first（Make first 写的那一个）
-//   · 切换首选后再点 1，读到的是新的首选账号
-//   · 保存后接哪条验证码：**国际站邮箱、国内站手机号**（站点分叉，别写死）
+//   · 只有两种模式：开关关 = 自动（滚动码）；开关开 = 挂 magpie「首选」那个账号
+//   · 开关读不到（magpie 老版本 / 没注册 reader）一律当**关** —— 老用户行为不变
+//   · 满额自动换上级的落点（策略文件 auto:true）在开关开时优先于「首选」
+//   · 作者码必须指向还有名额的号（值本身钉在这里，换码要一起改）
+//   · 死号自动回落：策略指向已删除账号 → 滚动；滚动码归属已删除 → 作者码
+//   · 登录方式列表里**不再**有「邀请码」那一条（设置搬去供应商编辑器了）
 //   · backfillInviteCodes 给老账号补码
 //
 // 隔离 HOME，不碰真实策略/账号文件，不联网。
@@ -28,15 +29,19 @@ mkdirSync(CONFIG, { recursive: true })
 
 const {
   AUTHOR_INVITE,
+  INVITE_FIRST_OPTION,
   authorInvite,
+  inviteFirstOn,
+  preferredInviteOf,
   readInvitePolicy,
   writeInvitePolicy,
   clearInvitePolicy,
   inviteToUse,
   preferredOrg,
+  setInviteOptionReader,
   backfillInviteCodes,
 } = await import("../src/store.mjs")
-const { makeMethods } = await import("../src/hooks/methods.mjs")
+const { makeMethods, inviteNote } = await import("../src/hooks/methods.mjs")
 const { siteCtx, SITES } = await import("../src/context.mjs")
 
 const c = siteCtx(SITES.cn)
@@ -45,6 +50,17 @@ const AUTHOR = AUTHOR_INVITE[SITE]
 const ACCOUNT_CODE = "IVACCOUNT001"
 const OTHER_CODE = "IVOTHER00001"
 const ROLLING = "IVROLLING001"
+
+/** 拨开关：true = 首选模式，false = 自动模式 */
+function setSwitch(on) {
+  setInviteOptionReader(SITE, (key) => key === INVITE_FIRST_OPTION && on === true)
+}
+/** 模拟 magpie 根本没有 option 能力：reader 抛错 */
+function breakSwitch() {
+  setInviteOptionReader(SITE, () => {
+    throw new Error("no option")
+  })
+}
 
 function seedCodes() {
   writeFileSync(
@@ -108,57 +124,191 @@ async function checkAsync(name, fn) {
   }
 }
 
-// ═══ ① 存储层 ════════════════════════════════════════════════════════
-console.log("邀请策略存储 —— auto / fixed / custom")
+// ═══ ① 开关本身 ═══════════════════════════════════════════════════════
+console.log("开关 —— 双模式的唯一入口（magpie 的 auth.options）")
 
-check("默认是 auto", () => {
-  clearInvitePolicy(SITE)
-  assert.deepEqual(readInvitePolicy(SITE), { mode: "auto", code: "", org: "", accountId: "", at: "" })
+check("没给这个站点注册 reader（老 magpie / 未注入）→ 开关当关", () => {
+  assert.equal(inviteFirstOn(SITE), false)
 })
 
-check("fixed：锁定打开用策略码，锁关闭回落到滚动文件", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
-  assert.equal(inviteToUse(SITE, true), ACCOUNT_CODE)
-  assert.equal(inviteToUse(SITE, false), ROLLING)
+check("reader 抛错 → 当关（不能因为读个开关把登录搞挂）", () => {
+  breakSwitch()
+  assert.equal(inviteFirstOn(SITE), false)
+  setSwitch(false)
 })
 
-check("custom：锁定打开用自定义码，锁关闭回落到滚动文件", () => {
-  writeInvitePolicy(SITE, { mode: "custom", code: "IVCUSTOM0001" })
-  assert.equal(inviteToUse(SITE, true), "IVCUSTOM0001")
-  assert.equal(inviteToUse(SITE, false), ROLLING)
+check("开关 key 是 invite-first（和 index.mjs 声明的是同一个）", () => {
+  assert.equal(INVITE_FIRST_OPTION, "invite-first")
+  let asked = null
+  setInviteOptionReader(SITE, (key) => {
+    asked = key
+    return true
+  })
+  inviteFirstOn(SITE)
+  assert.equal(asked, "invite-first")
+  setSwitch(false)
 })
 
-check("auto：无论锁定与否都用滚动文件", () => {
-  writeInvitePolicy(SITE, { mode: "auto" })
-  assert.equal(inviteToUse(SITE, true), ROLLING)
-  assert.equal(inviteToUse(SITE, false), ROLLING)
-})
+// ═══ ② 作者码 ═════════════════════════════════════════════════════════
+console.log("\n作者码 —— 必须指向还有名额的号（满了 = 新装机第一次注册白送）")
 
-check("没有滚动文件时回落到作者码", () => {
-  rmSync(join(CACHE, `magicrew-invite-${SITE}.json`), { force: true })
-  assert.equal(inviteToUse(SITE, true), AUTHOR)
-  seedRolling()
-})
-
-check("authorInvite 就是作者码", () => {
+check("两站作者码就是本次换上去的那两个", () => {
+  // 换这两个值必须同时改这里 —— 这条测试就是「换码忘记同步」的拦截网
+  assert.equal(AUTHOR_INVITE.magicrew, "IV18D8KHVZ7T")
+  assert.equal(AUTHOR_INVITE["magicrew-intl"], "IV486F5O59SC")
+  assert.equal(AUTHOR_INVITE.magicrew, AUTHOR)
   assert.equal(authorInvite(SITE), AUTHOR)
 })
 
-check('旧 org:"author" 读成空 org（作者不是账号）', () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: AUTHOR, org: "author", accountId: "MYCF711" })
-  assert.equal(readInvitePolicy(SITE).org, "")
-  assert.equal(inviteToUse(SITE, true), AUTHOR)
+// ═══ ③ 双模式语义 ═════════════════════════════════════════════════════
+console.log("\n双模式 —— 开关关=自动（滚动）；开关开=首选账号")
+
+check("开关关 → 用滚动码", () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  assert.equal(inviteToUse(SITE), ROLLING)
 })
 
-// ═══ ② 死号回退 ══════════════════════════════════════════════════════
-console.log("\n账号删除后的回落 —— fixed/滚动码不作废就注册落空")
+check("开关开 → 用 magpie 首选账号自己的码", () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("orgA")
+  assert.equal(inviteToUse(SITE), ACCOUNT_CODE, "orgA 是首选，它的码是 IVACCOUNT001")
+})
 
-check("fixed 指向已删除的账号 → 回落滚动", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" })
-  assert.equal(inviteToUse(SITE, true), ROLLING)
+check("开关开 + 换首选 → 立刻跟着换（不用重新选）", () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("orgC")
+  assert.equal(inviteToUse(SITE), OTHER_CODE)
+  seedLogins("orgA")
+})
+
+check("开关开 + 首选账号的码还没缓存 → 回落滚动", () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("orgA")
+  // 码缓存里只有 orgC，首选 orgA 一条码都没有
+  writeFileSync(
+    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
+    JSON.stringify({ orgC: { code: OTHER_CODE, accountId: "177****0000", at: "x" } }),
+  )
+  assert.equal(preferredInviteOf(SITE), null)
+  assert.equal(inviteToUse(SITE), ROLLING)
+  seedCodes()
+})
+
+check("开关开 + 首选账号被删（不在 plugin-auth）→ 回落滚动", () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("orgA")
+  writeFileSync(
+    join(CONFIG, "plugin-auth.json"),
+    JSON.stringify({ [`${SITE}#def456`]: { org: "orgC", accountId: "177****0000", type: "oauth", jwt: "jwt-orgC" } }),
+  )
+  assert.equal(inviteToUse(SITE), ROLLING)
+  seedAuth()
+})
+
+check("开关开 + 自动换的落点还在 → 用它，而不是退回满额的首选", () => {
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: "IVAUTOPIN001", org: "orgC", accountId: "177****0000" })
+  setSwitch(true)
+  seedLogins("orgA")
+  assert.equal(inviteToUse(SITE), "IVAUTOPIN001")
+  clearInvitePolicy(SITE)
+})
+
+check("开关关了 → 满额换过来的落点不再生效（回到滚动）", () => {
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: "IVAUTOPIN001", org: "orgC", accountId: "177****0000" })
+  setSwitch(true)
+  assert.equal(inviteToUse(SITE), "IVAUTOPIN001", "开关开时，自动换的落点优先")
+  setSwitch(false)
+  assert.equal(inviteToUse(SITE), ROLLING, "开关关了就回滚动码，落点不作数")
+  clearInvitePolicy(SITE)
+})
+
+check("老策略（auto:false 的 fixed，用户当年手选的）→ 开关开时被忽略，改用首选", () => {
+  // 0.3.63 及更早，fixed 是用户在登录页输 1 选出来的；现在模式归开关管，
+  // 那份快照不能再压过 magpie 的首选（不然用户换了首选也不生效）。
+  writeInvitePolicy(SITE, { mode: "fixed", code: "IVLEGACY0001", org: "orgC", accountId: "177****0000" })
+  setSwitch(true)
+  seedLogins("orgA")
+  assert.equal(inviteToUse(SITE), ACCOUNT_CODE, "应该用首选 orgA 的码，不是那份老快照")
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+})
+
+check("没有滚动文件 + 开关关 → 回落到作者码", () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  rmSync(join(CACHE, `magicrew-invite-${SITE}.json`), { force: true })
+  assert.equal(inviteToUse(SITE), AUTHOR)
+  seedRolling()
+})
+
+// ═══ ④ 存储层 ═════════════════════════════════════════════════════════
+console.log("\n策略文件 —— 只记「满额自动换过来的落点」")
+
+check("默认是 auto", () => {
+  clearInvitePolicy(SITE)
+  assert.deepEqual(readInvitePolicy(SITE), {
+    mode: "auto",
+    code: "",
+    org: "",
+    accountId: "",
+    auto: false,
+    at: "",
+  })
+})
+
+check("auto:true 能存能读（这是「满额换过来的」标记）", () => {
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
+  const pol = readInvitePolicy(SITE)
+  assert.equal(pol.mode, "fixed")
+  assert.equal(pol.auto, true)
+  assert.equal(pol.code, ACCOUNT_CODE)
+  assert.equal(pol.org, "orgA")
+  clearInvitePolicy(SITE)
+})
+
+check("老文件里的 custom 读成 auto（三模式已经收掉）", () => {
+  writeFileSync(
+    join(CACHE, `magicrew-invite-policy-${SITE}.json`),
+    JSON.stringify({ mode: "custom", code: "IVCUSTOM0001" }),
+  )
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
+  clearInvitePolicy(SITE)
+})
+
+check("乱写的 mode 一律读成 auto", () => {
+  writeFileSync(join(CACHE, `magicrew-invite-policy-${SITE}.json`), JSON.stringify({ mode: "nonsense" }))
+  assert.equal(readInvitePolicy(SITE).mode, "auto")
+  clearInvitePolicy(SITE)
+})
+
+check('旧 org:"author" 读成空 org（作者不是账号）', () => {
+  // 开关开着才会读策略（关着直接走滚动码，与这条无关）
+  setSwitch(true)
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: AUTHOR, org: "author", accountId: "MYCF711" })
+  assert.equal(readInvitePolicy(SITE).org, "")
+  assert.equal(inviteToUse(SITE), AUTHOR)
+  clearInvitePolicy(SITE)
+  setSwitch(false)
+})
+
+// ═══ ⑤ 死号回退 ══════════════════════════════════════════════════════
+console.log("\n账号删除后的回落 —— 落点/滚动码不作废就注册落空")
+
+check("自动换的落点指向已删除的账号 → 回落首选", () => {
+  setSwitch(true)
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: "IVDEAD000001", org: "orgDEAD", accountId: "已删除" })
+  seedLogins("orgA")
+  assert.equal(inviteToUse(SITE), ACCOUNT_CODE, "死落点不认，改用首选 orgA")
+  clearInvitePolicy(SITE)
 })
 
 check("滚动码归属已删除的账号 → 回落作者码", () => {
+  setSwitch(false)
   writeFileSync(
     join(CACHE, `magicrew-invite-codes-${SITE}.json`),
     JSON.stringify({
@@ -167,25 +317,18 @@ check("滚动码归属已删除的账号 → 回落作者码", () => {
     }),
   )
   writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: "IVDEADROLL01", at: "x" }))
-  assert.equal(inviteToUse(SITE, true), AUTHOR)
+  assert.equal(inviteToUse(SITE), AUTHOR)
   seedCodes()
   seedRolling()
 })
 
 check("滚动码归属不明（不在缓存里）→ 保守保留", () => {
-  assert.equal(inviteToUse(SITE, true), ROLLING)
+  setSwitch(false)
+  assert.equal(inviteToUse(SITE), ROLLING)
 })
 
-// ═══ ③ 邀请码：0=自动 / 1=首选，保存后接本站主验证码方式 ═══════
-//     （国际站 → 邮箱；国内站 → 手机号。0.3.43 之前国际站也被写死成手机号。）
-console.log("邀请码 —— 自动=0；首选=1；保存后接本站主验证码")
-
-function inviteMethodOf(ctx) {
-  return makeMethods(ctx).find((m) => m.type === "oauth" && String(m.label).includes("邀请码"))
-}
-const inviteMethod = () => inviteMethodOf(c)
-const cIntl = siteCtx(SITES.intl)
-const INTL_SITE = cIntl.id
+// ═══ ⑥ 登录方式列表 ═══════════════════════════════════════════════════
+console.log("\n登录方式列表 —— 「邀请码」那条已经拆掉（设置搬去供应商编辑器）")
 
 check("preferredOrg 读 logins.json 的 first", () => {
   assert.equal(preferredOrg(SITE), "orgA")
@@ -194,108 +337,56 @@ check("preferredOrg 读 logins.json 的 first", () => {
   seedLogins("orgA")
 })
 
-check("提示灰色字：当前模式，自动 → 输入 1 切换首选", () => {
-  writeInvitePolicy(SITE, { mode: "auto" })
-  const p = inviteMethod().prompts[0]
-  assert.equal(p.message, "邀请码")
-  assert.equal(p.placeholder, "当前模式：自动，输入 1 切换：首选")
-})
-
-check("提示灰色字只有自动 / 首选两种（保存的首选快照也显示首选）", () => {
-  seedLogins("orgA")
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
-  // 0.3.63 撤回：框里只写模式（不写上级、不写邀请次数）。
-  // 次数在额度卡片上已经有了，而且带邮箱后整串放不进输入框会被截断。
-  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
-  seedLogins("orgC") // 首选项后来变了，保存的快照仍显示首选
-  assert.equal(inviteMethod().prompts[0].placeholder, "当前模式：首选，输入 0 切换：自动")
-  seedLogins("orgA")
-})
-
-await checkAsync("国内站 ask 链：邀请码 → 手机号 → null", async () => {
-  writeInvitePolicy(SITE, { mode: "auto" })
-  const m = inviteMethod()
-  const p0 = await m.ask({})
-  assert.equal(p0.key, "invite")
-  assert.equal(p0.placeholder, "当前模式：自动，输入 1 切换：首选")
-  const p1 = await m.ask({ invite: "1" })
-  assert.equal(p1.key, "phone")
-  assert.equal(p1.type, "text")
-  assert.equal(await m.ask({ invite: "1", phone: "13800138000" }), null)
-})
-
-await checkAsync("国际站 ask 链：邀请码 → 邮箱 → null（0.3.43）", async () => {
-  writeInvitePolicy(INTL_SITE, { mode: "auto" })
-  const m = inviteMethodOf(cIntl)
-  const p0 = await m.ask({})
-  assert.equal(p0.key, "invite")
-  const p1 = await m.ask({ invite: "1" })
-  assert.equal(p1.key, "email", "国际站邀请码之后应该问邮箱，不是手机号")
-  assert.equal(p1.type, "text")
-  assert.equal(await m.ask({ invite: "1", email: "a@b.com" }), null)
-})
-
-await checkAsync("国际站 authorize：保存策略后接邮箱方法（缺邮箱 → 报「邮箱不完整」）", async () => {
-  writeInvitePolicy(INTL_SITE, { mode: "auto" })
-  await assert.rejects(inviteMethodOf(cIntl).authorize({ invite: "0" }), /邮箱不完整/)
-  assert.equal(readInvitePolicy(INTL_SITE).mode, "auto")
-})
-
-await checkAsync("国内站 authorize：保存策略后接手机号方法（缺手机号 → 报「手机号不完整」）", async () => {
-  writeInvitePolicy(SITE, { mode: "auto" })
-  await assert.rejects(inviteMethod().authorize({ invite: "0" }), /手机号不完整/)
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-})
-
-await checkAsync("填 0 / 留空 / 非法文本 → 保存 auto，然后接手机验证码", async () => {
-  for (const v of ["0", "", "abc", "-1", "99"]) {
-    await assert.rejects(inviteMethod().authorize({ invite: v }))
-    assert.equal(readInvitePolicy(SITE).mode, "auto")
+check("国内站 3 条、国际站 4 条，且都不含「邀请码」", () => {
+  const cnLabels = makeMethods(c).map((m) => m.label)
+  const intlLabels = makeMethods(siteCtx(SITES.intl)).map((m) => m.label)
+  assert.equal(cnLabels.length, 3, `国内站应该 3 条，实际：${cnLabels.join(" / ")}`)
+  assert.equal(intlLabels.length, 4, `国际站应该 4 条，实际：${intlLabels.join(" / ")}`)
+  for (const l of [...cnLabels, ...intlLabels]) {
+    assert.ok(!/邀请码/.test(l), `不该再有「邀请码」入口：${l}`)
+    // 0.3.50：label 在插件加载时被 magpie 缓存，放会变的上级就等于永远显示旧值
+    assert.ok(!/上级/.test(l), `标签里不该出现上级（加载时缓存，不会刷新）：${l}`)
   }
 })
 
-await checkAsync("填 1 → 保存当前首选（orgA）的码，然后接手机验证码", async () => {
+// ═══ ⑦ inviteNote ═════════════════════════════════════════════════════
+console.log("\ninstructions 里的「本次邀请上级」—— 每次点登录现算")
+
+await checkAsync("开关关 → 不写上级（自动模式没什么可说的）", async () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  assert.doesNotMatch(inviteNote(c), /本次邀请上级/)
+})
+
+await checkAsync("开关开 + 首选 → 写「magpie 账号页的首选」", async () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
   seedLogins("orgA")
-  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
-  const pol = readInvitePolicy(SITE)
-  assert.equal(pol.mode, "fixed")
-  assert.equal(pol.code, ACCOUNT_CODE)
-  assert.equal(pol.org, "orgA")
-  assert.equal(pol.accountId, "181****632")
+  const note = inviteNote(c)
+  assert.match(note, /本次邀请上级：181\*\*\*\*632/, `实际：${note}`)
+  assert.match(note, /首选/)
 })
 
-await checkAsync("切换首选后重新点 1 → 保存新首选（orgC）的码", async () => {
-  seedLogins("orgC")
-  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
-  const pol = readInvitePolicy(SITE)
-  assert.equal(pol.code, OTHER_CODE)
-  assert.equal(pol.org, "orgC")
+await checkAsync("开关开 + 满额换过 → 写「首选已满，自动换的」", async () => {
+  setSwitch(true)
+  writeInvitePolicy(SITE, { mode: "fixed", auto: true, code: "IVAUTOPIN001", org: "orgC", accountId: "177****0000" })
+  const note = inviteNote(c)
+  assert.match(note, /本次邀请上级：177\*\*\*\*0000/, `实际：${note}`)
+  assert.match(note, /自动换的/)
+  clearInvitePolicy(SITE)
+})
+
+await checkAsync("开关开但还没有首选 → 明说「自动」，不留空", async () => {
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("none")
+  // seedLogins("none") 时 preferredOrg 会退回 order/第一行 —— 要真没有首选就得拿掉 logins.json
+  rmSync(join(CONFIG, "logins.json"), { force: true })
+  assert.match(inviteNote(c), /自动/, `实际：${inviteNote(c)}`)
   seedLogins("orgA")
 })
 
-await checkAsync("首选账号没有码 → 保存 auto", async () => {
-  seedLogins("orgC")
-  writeFileSync(
-    join(CACHE, `magicrew-invite-codes-${SITE}.json`),
-    JSON.stringify({ orgA: { code: ACCOUNT_CODE, accountId: "181****632", at: "x" } }),
-  )
-  await assert.rejects(inviteMethod().authorize({ invite: "1" }))
-  assert.equal(readInvitePolicy(SITE).mode, "auto")
-  seedCodes()
-  seedLogins("orgA")
-})
-
-check("标题不带上级（加载时缓存，动态信息放 instructions）", () => {
-  writeInvitePolicy(SITE, { mode: "fixed", code: ACCOUNT_CODE, org: "orgA", accountId: "181****632" })
-  const label = makeMethods(c).find((m) => /手机号/.test(m.label)).label
-  // 0.3.50：label 在插件加载时被 magpie 缓存，不能放会变的上级 —— 改了策略也不会刷新。
-  assert.doesNotMatch(label, /上级/)
-  writeInvitePolicy(SITE, { mode: "auto" })
-  const auto = makeMethods(c).find((m) => /手机号/.test(m.label)).label
-  assert.doesNotMatch(auto, /上级/)
-})
-
-// ═══ ④ backfill ══════════════════════════════════════════════════════
+// ═══ ⑧ backfill ═══════════════════════════════════════════════════════
 console.log("\nbackfillInviteCodes —— 老账号补码")
 
 await checkAsync("给 plugin-auth 里有 JWT 的账号补码", async () => {
@@ -322,7 +413,10 @@ for (const k of ["HOME", "USERPROFILE"]) {
   if (ORIG[k] === undefined) delete process.env[k]
   else process.env[k] = ORIG[k]
 }
-rmSync(FAKE, { recursive: true, force: true })
+// Windows 上临时目录偶尔被占用（杀软 / 索引服务正扫着），删不掉不该让测试失败
+try {
+  rmSync(FAKE, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
+} catch {}
 
 console.log(`\n${pass} 通过 · ${fail} 失败`)
 process.exit(fail ? 1 : 0)

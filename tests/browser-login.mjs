@@ -108,17 +108,19 @@ const fail = (msg) => {
   process.exitCode = 1
 }
 
-const expected = 5
+const expected = 4
 if (methods.length !== expected) fail(`应该有 ${expected} 条登录方法，实际 ${methods.length} 条`)
 // 站点 id → 谁排前面。国际站用户大多是邮箱注册的，所以邮箱在前。
 if (!/邮箱验证码$/.test(labels[0] ?? "")) fail(`国际站第一条应该是「邮箱验证码」，实际是 ${labels[0]}`)
 if (!/手机号验证码/.test(labels[1] ?? "")) fail(`国际站第二条应该是「手机号验证码」，实际是 ${labels[1]}`)
 if (!/浏览器登录/.test(labels[2] ?? "")) fail(`第三条应该是「浏览器登录」，实际是 ${labels[2]}`)
 if (!/登录态/.test(labels[3] ?? "")) fail(`第四条应该是「登录态（JWT + 组织码）」，实际是 ${labels[3]}`)
-if (!/邀请码/.test(labels[4] ?? "")) fail(`第五条应该是「邀请码」，实际是 ${labels[4]}`)
+// 0.3.64：邀请码设置搬去了供应商编辑器里的开关（magpie 的 auth.options），
+// 登录方式列表不再有那条「邀请码」—— 它原来是三模式的入口。
+if (labels.some((x) => /邀请码/.test(x))) fail(`不该再有「邀请码」登录方式，实际有：${labels.join(" / ")}`)
 if (labels[0] === labels[1]) fail("前两条方法的标题不能一样（magpie 列表里会分不出来）")
 
-if (!process.exitCode) console.log("  ✓ 顺序正确：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码")
+if (!process.exitCode) console.log("  ✓ 顺序正确：邮箱 → 手机号 → 浏览器 → 登录态（邀请码已改成设置开关）")
 
 // ⚠ 这一份**会真的拉起浏览器**（见 ①），留着的句柄让 node 的事件循环不空 ——
 // 光设 process.exitCode 不会结束进程。实测：结论早就打完，进程还挂着，
