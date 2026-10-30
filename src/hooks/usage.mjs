@@ -23,6 +23,26 @@
 //
 // 不要再把「今日 / 限时 / 永久」做成带 used/limit 的假百分比窗口；旧写法是
 // 宿主支持余额之前的临时协议，见 CHANGELOG 0.3.20。
+//
+// ═══ 上游会给负数（欠费）—— 余额位钳到 0，只把「欠费 N」写进文案 ═══════════
+//
+// 实测（2026-10-30，国内站四个号原样返回，见 CHANGELOG 0.3.65）：
+//
+//   {"code":1000,"message":"ok","data":{
+//      "organization_total_points":-31, "total_points":-31,
+//      "expiring_quota_details":[], "next_cycle_grant":null, …}}
+//
+// ⇒ 负数**不是插件算错的**：上游钱包真的透支。模型网关是先扣钱、后判余额，
+// 一次请求就能把 0 打到负（CHANGELOG 0.3.26 也记过一次：余额 82 的号一轮对话
+// 被烧成负数）。补款后同一接口会回正，所以别把欠费缓存成「永不可用」。
+//
+// 显示纪律：
+//   · 窗口 `balance`（宿主拿去算占比的数值位）**永远 ≥ 0** —— 负数进路由只会
+//     折出一个没有意义的百分比；
+//   · 欠多少只进 `display` / 顶层 `balance` 文案：「已欠费 31 积分」；
+//   · 0 与欠费必须分开说：前者是「已耗尽」（等明天 00:00 的每日积分），
+//     后者是「已欠费 N」（该去充值），用户得能分清；
+//   · 读不到（字段缺失 / null）**不是 0**：返回 error，宁可卡片空着也不报假额度。
 
 import { fetchPoints, SITES } from "../api.mjs"
 import { ensureCheckinDefault } from "../auto-maintenance.mjs"
@@ -47,15 +67,22 @@ export function makeUsage(c) {
     if (!auth) return { error: "未登录", windows: [] }
     try {
       const p = await fetchPoints(auth.jwt, auth.org, c.host)
-      const total = Number(p?.total ?? 0)
-      if (!Number.isFinite(total)) return { error: "积分接口没有返回可用余额", windows: [] }
+      // 读不到 ≠ 0：0 是「已用完」，读不到是「不知道」。上游少给一个字段就报
+      // 「已耗尽」，那是拿假额度骗人（也骗路由）。
+      if (!p.totalKnown) return { error: "积分接口没有返回可用余额", windows: [] }
+
+      const total = p.total
+      // 上游会给负数（欠费，实测见 CHANGELOG 0.3.65）。余额位一律钳到 0：
+      // 宿主与用户看到的「剩余」永远不该是负的；欠了多少只进文案。
+      const debt = total < 0 ? -total : 0
+      const left = Math.max(0, total)
       const batches = Array.isArray(p?.expiring) ? p.expiring : []
       const windows = [{
         name: "积分余额",
-        balance: total,
+        balance: left,
         unit: "积分",
-        display: total > 0 ? `${fmt(total)} 积分` : "已耗尽",
-        ...(total > 0 ? runsOutOf(batches) : { resetsAt: nextGrantAt() }),
+        display: balanceText(left, debt),
+        ...(left > 0 ? runsOutOf(batches) : { resetsAt: nextGrantAt() }),
       }]
 
       // 邀请次数：X / 上限。上游不给上限，按站点奖励口径换算（见 src/invite-quota.mjs）。
@@ -81,13 +108,13 @@ export function makeUsage(c) {
         })
       }
 
-      if (total > 0) {
+      if (left > 0) {
         const today = beijingDay(Date.now())
         const todayBatches = batches.filter((b) => b.points > 0 && beijingDay(parseServerTime(b.expiresAt)) === today)
         const todayLeft = sum(todayBatches)
         const timedLeft = sum(batches)
         const timedRest = Math.max(0, timedLeft - todayLeft)
-        const permanent = Math.max(0, total - timedLeft)
+        const permanent = Math.max(0, left - timedLeft)
         const dailyCap = DAILY_LOGIN_GIFT[c.host === SITES.cn.host ? "cn" : "intl"]
 
         // 只展示的批次行：没有 used/limit/balance，宿主把它们当 aside 文本，
@@ -121,14 +148,38 @@ export function makeUsage(c) {
       }
 
       return {
-        plan: total > 0 ? "积分制" : "已耗尽",
-        balance: `${fmt(total)} 积分`,
+        // plan 也说清楚是哪一种：欠费不是「用完了」，余额补不上之前一样用不了，
+        // 但用户看到「已欠费」才知道该去充的是钱，不是等明天的免费额度。
+        plan: total > 0 ? "积分制" : debt > 0 ? "已欠费" : "已耗尽",
+        // 顶层 balance 是「余额值」那一格：正常时就是个数字，欠费才写成话。
+        // 它也是用户真正看到「-153 积分」的地方（窗口 display 早就写着「已耗尽」，
+        // 用户还是来问负数 —— 说明负数是从这一格漏出去的）。
+        balance: debt > 0 ? `已欠费 ${fmt(debt)} 积分` : `${fmt(left)} 积分`,
         windows,
       }
     } catch (e) {
       return { error: String(e?.message ?? e), windows: [] }
     }
   }
+}
+
+/**
+ * 「积分余额」窗口的 `display` 文案（正常 / 用完 / 欠费三种说法）。
+ *
+ *   还有余额 → `6,291 积分`
+ *   刚好用完 → `已耗尽`              （上游给 0，等明天 00:00 的每日积分）
+ *   欠费     → `已欠费 31 积分`       （上游给负数，补款前用不了）
+ *
+ * 为什么不能直接写 `-31 积分`：负数摆在「剩余」位上没人看得懂 —— 是欠 31？
+ * 是花了 31？还是插件算错了？「欠费」两个字就是事实本身。
+ *
+ * ⚠ 顶层 `balance` 不走的 0 分支：那一格是「余额值」，正常时该是纯数字
+ * （`0 积分` / `107 积分`），只有欠费才写成话（「已欠费 N 积分」）。
+ */
+function balanceText(left, debt) {
+  if (debt > 0) return `已欠费 ${fmt(debt)} 积分`
+  if (left > 0) return `${fmt(left)} 积分`
+  return "已耗尽"
 }
 
 /** 最早失效的那批 → magpie 的 `runsOutAt` / `runsOut`。 */

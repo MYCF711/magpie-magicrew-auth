@@ -61,7 +61,8 @@ const recordCount = ri >= 0 ? Number(process.argv[ri + 1] || 10) : 0
 
 const p = await fetchPoints(cred.jwt, cred.org, host)
 console.log(`站点：${SITES[siteId].label}（${host}）`)
-console.log(`积分余额：${p.total}`)
+// 排错工具就报原值：读不到（字段缺失 / null）要看得见，别退化成 0 骗自己
+console.log(`积分余额：${p.totalKnown ? p.total : `读不到（原值 ${JSON.stringify(p.totalRaw)}）`}`)
 if (p.expiring?.length) {
   console.log("会过期的额度包：")
   for (const e of p.expiring) console.log(`  ${String(e.points).padStart(7)}  ${e.expiresAt}`)
