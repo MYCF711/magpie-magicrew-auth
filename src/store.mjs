@@ -80,11 +80,25 @@ function writeSnapshot(siteId, models) {
 //            每次注册   每次订阅   邀请注册封顶   总额封顶
 //   国内      1,000      3,000       60,000      300,000
 //   国际        200        500       10,000       30,000
+//
+// ⚠ 这个码只在「这台机器第一次注册」时用，也是「谁都没登录过」时的兜底。
+//   它指向哪个号，决定了新用户第一笔邀请记在谁头上。
+//
+// 2026-10-30 换过一轮（两站各推一个新的、0 邀请的全新号）：
+//
+//     国内  IVC8BAWYXRY1（189****051）          →  IV18D8KHVZ7T（181****632）
+//     国际  IV75F0ZKVKXG（1451895195@qq.com）   →  IV486F5O59SC（mycf711@foxmail.com）
+//
+//   新码当场用上游 `/api/v1/invitations/info` 核对过（invite_code + invite_count 都是 0）。
+//
+// ⚠ 别再说「那个号满了」—— 这是 0.3.64 之前的一个错误说法，实测已推翻：
+//   上游**没有人数上限**（接口无 limit 字段，54 人仍在正常结算奖励），唯一的硬上限是
+//   邀请积分封顶（国际 10,000 / 国内 60,000）。国际那个旧号只结算了 2,000 / 10,000 分。
+//   ⇒ 「别人用了没送分」通常不是号满了，而是**被邀请人没完成首个任务/对话**（不发分）。
+//   详见 src/invite-quota.mjs 的 quotaOf 头。
 const AUTHOR_INVITE = {
-  // 国内站（2026-10-27 用作者账号 orgcode12345 从 /api/v1/invitations/info 复核）
-  magicrew: "IVC8BAWYXRY1",
-  // 国际站
-  "magicrew-intl": "IV75F0ZKVKXG",
+  magicrew: "IV18D8KHVZ7T",
+  "magicrew-intl": "IV486F5O59SC",
 }
 
 function invitePath(siteId) {
@@ -113,18 +127,24 @@ function writeInvite(siteId, code) {
   return c
 }
 
-/** 这次登录该带的邀请码：锁定 → 策略 → 记录 → 作者码 */
-function inviteToUse(siteId, locked = true) {
+/** 这次登录该带的邀请码：开关 → 策略 → 记录 → 作者码 */
+function inviteToUse(siteId) {
   const live = liveOrgs(siteId)
   // 账号文件读不到 / 一个号都没有时按「不校验」处理，行为与以前一致
   const known = live !== null && live.size > 0
-  if (locked) {
+
+  if (inviteFirstOn(siteId)) {
     const pol = readInvitePolicy(siteId)
-    if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code) {
-      // fixed 挂在某个账号上 —— 账号删了码就别再带（新号会注册落空）
-      if (!(known && pol.mode === "fixed" && pol.org && !live.has(pol.org))) return pol.code
+    // ① 满额自动换过来的落点（enforceInviteSwitch 写的 auto:true）—— 它优先，
+    //    否则每次都会退回「首选账号」那个已经满了的号。
+    if (pol.mode === "fixed" && pol.auto === true && pol.code) {
+      if (!(known && pol.org && !live.has(pol.org))) return pol.code
     }
+    // ② 首选账号自己的码（每次现算：用户可能在 magpie 账号页换过首选）
+    const pick = preferredInviteOf(siteId)
+    if (pick && !(known && pick.org && !live.has(pick.org))) return pick.code
   }
+
   const rolling = readInvite(siteId)
   if (rolling) {
     if (!known) return rolling
@@ -186,21 +206,78 @@ export function authorInvite(siteId) {
   return AUTHOR_INVITE[siteId] || ""
 }
 
-// ═══ 邀请上级策略 ═══════════════════════════════════════════════════
+// ═══ 邀请上级：双模式，由一个 magpie 开关决定 ═════════════════════════
 //
-// 三种模式，登录时选，落盘后一直生效：
+// 只有两种模式（**没有第三种**）：
 //
-//   auto   （默认）用「最后一个登录 / 签到的号」的码 —— 老行为，会漂移
-//   fixed  固定挂到某个已登录账号（存 org + code）
-//   custom 任意码，用户自己填
+//   开关关（默认）  自动 —— 跟随「最后一个登录 / 签到的号」的滚动码
+//   开关开          首选 —— 挂到 magpie 账号页「首选」那个账号
 //
-// 为什么要这个：`rollInvite` 会在每次登录、每天签到把
-// magicrew-invite-<site>.json 覆盖成最后那个号的码。奖励虽然不出圈，
-// 但「新号挂谁」就变成随机的了 —— 用户要的是可预期。
+// 开关本身不是这个文件画的：它是 magpie 的 `auth.options`（供应商编辑器里的
+// 那个 Off/On 开关，和 workbuddy 的「Free models only」同一套机制）。插件通过
+// `input.magpie.option(provider, key)` 读 —— **每次读都是当前值**，用户拨一下
+// 立刻生效，不用重启插件 host。
 //
-// ⚠ fixed 存的是**解析好的码**，不是「登录时再去问那个号要」：
-//   要问就得多一条带那个账号 jwt 的请求，而签到 / 登录路径上都没有它。
-//   代价是对方换码后要重新选一次（码实测长期不变）。
+// ⇒ 所以这里不缓存布尔值，只存「怎么读」：`setInviteOptionReader(siteId, fn)`。
+//
+// 为什么不做三模式（自动 / 首选 / 指定）：
+//   开关是布尔，magpie 只认 `=== true`（providers.go:170-187、契约 optionValue）。
+//   「指定」要带一个字符串，开关装不下 —— 想做它就得回到登录页那个 0/1 文本框，
+//   那正是这次要拆掉的东西。
+//
+// 策略文件 `magicrew-invite-policy-<site>.json` 的定位跟着变了：
+//   · 原来是「用户选的模式」（auto / fixed / custom）
+//   · 现在只记**首选模式下满额自动换过来的落点**（`{mode:"fixed", auto:true}`）
+//     模式本身由开关决定，文件不再表达「模式」。
+
+const optionReaders = new Map()
+
+/**
+ * 把「怎么读这个站点的开关」交给 store。
+ *
+ * @param {string} siteId provider id（`magicrew` / `magicrew-intl`）
+ * @param {(key:string)=>boolean} read 读一个 key 的当前值
+ */
+export function setInviteOptionReader(siteId, read) {
+  if (typeof read === "function") optionReaders.set(siteId, read)
+}
+
+/** 开关 key —— 与 index.mjs 声明 auth.options 时用的那个必须是同一个 */
+export const INVITE_FIRST_OPTION = "invite-first"
+
+/**
+ * 「邀请码挂到首选账号」这个开关现在是开的吗。
+ *
+ * 读不到（没注册 reader / magpie 老版本没有 option / 抛错）一律当**关** ——
+ * 关 = 自动，也就是升级上来的老用户保持原来的行为，不会被静默改道。
+ */
+export function inviteFirstOn(siteId) {
+  const read = optionReaders.get(siteId)
+  if (!read) return false
+  try {
+    return read(INVITE_FIRST_OPTION) === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * magpie 账号页「首选」那个账号自己的邀请码。
+ *
+ * 码来自 `magicrew-invite-codes-<site>.json`（每次登录 / 签到顺手记下的），
+ * 所以这里不发网络请求 —— prompts 是同步生成的，等不了 API。
+ */
+export function preferredInviteOf(siteId) {
+  const org = preferredOrg(siteId)
+  if (!org) return null
+  const v = readAccountCodes(siteId)[org]
+  if (!v?.code) return null
+  return {
+    code: String(v.code),
+    org,
+    accountId: String(v.accountId || org),
+  }
+}
 
 function invitePolicyPath(siteId) {
   return join(cacheDir(), `magicrew-invite-policy-${siteId}.json`)
@@ -209,7 +286,7 @@ function invitePolicyPath(siteId) {
 export function readInvitePolicy(siteId) {
   try {
     const v = JSON.parse(readFileSync(invitePolicyPath(siteId), "utf8"))
-    const mode = ["auto", "fixed", "custom"].includes(v?.mode) ? v.mode : "auto"
+    const mode = v?.mode === "fixed" ? "fixed" : "auto"
     const org = String(v?.org || "").trim()
     return {
       mode,
@@ -217,10 +294,12 @@ export function readInvitePolicy(siteId) {
       // 旧版把作者码存成 org:"author"；作者不是账号，按「无 org」处理
       org: org === "author" ? "" : org,
       accountId: String(v?.accountId || "").trim(),
+      // true = 这条 fixed 是满额自动换过来的，不是用户选的
+      auto: v?.auto === true,
       at: String(v?.at || ""),
     }
   } catch {
-    return { mode: "auto", code: "", org: "", accountId: "", at: "" }
+    return { mode: "auto", code: "", org: "", accountId: "", auto: false, at: "" }
   }
 }
 
@@ -228,7 +307,7 @@ export function writeInvitePolicy(siteId, policy) {
   try {
     const f = invitePolicyPath(siteId)
     mkdirSync(dirname(f), { recursive: true })
-    const mode = ["auto", "fixed", "custom"].includes(policy?.mode) ? policy.mode : "auto"
+    const mode = policy?.mode === "fixed" ? "fixed" : "auto"
     writeFileSync(
       f,
       JSON.stringify({
@@ -236,13 +315,14 @@ export function writeInvitePolicy(siteId, policy) {
         code: String(policy?.code || "").trim(),
         org: String(policy?.org || "").trim() === "author" ? "" : String(policy?.org || "").trim(),
         accountId: String(policy?.accountId || "").trim(),
+        auto: policy?.auto === true,
         at: new Date().toISOString(),
       }),
     )
   } catch {}
 }
 
-/** 清掉策略 —— 下次登录会重新问一次（「改回去」的唯一入口） */
+/** 清掉策略 —— 下次就退回「读开关 + 现算首选」 */
 export function clearInvitePolicy(siteId) {
   try {
     unlinkSync(invitePolicyPath(siteId))

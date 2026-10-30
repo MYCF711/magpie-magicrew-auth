@@ -37,7 +37,7 @@ const {
   findInviteSuccessor,
   enforceInviteSwitch,
 } = await import("../src/invite-quota.mjs")
-const { readInvitePolicy, writeInvitePolicy } = await import("../src/store.mjs")
+const { readInvitePolicy, writeInvitePolicy, setInviteOptionReader, INVITE_FIRST_OPTION } = await import("../src/store.mjs")
 const { siteCtx, SITES } = await import("../src/context.mjs")
 
 const cn = siteCtx(SITES.cn)
@@ -84,6 +84,27 @@ function seedAuth(rows) {
 }
 
 /**
+ * logins.json：magpie 账号页的「首选」。
+ *
+ * `preferredHome` 是**首选那一行的 home**（不是 org）—— magpie 存的就是 home，
+ * store 再借 plugin-auth 换成 org。
+ */
+function seedLogins(siteId, preferredHome) {
+  const rows = []
+  const auth = JSON.parse(readFileSync(join(CONFIG, "plugin-auth.json"), "utf8"))
+  for (const [home, v] of Object.entries(auth)) {
+    if (home !== siteId && !home.startsWith(siteId + "#")) continue
+    rows.push({ agent: `plugin:${siteId}`, home, user: v.accountId, on: true, first: home === preferredHome })
+  }
+  writeFileSync(join(CONFIG, "logins.json"), JSON.stringify(rows))
+}
+
+/** 拨邀请码模式开关：on=true 首选模式，false 自动模式 */
+function setSwitch(siteId, on) {
+  setInviteOptionReader(siteId, (key) => key === INVITE_FIRST_OPTION && on === true)
+}
+
+/**
  * mock 上游邀请接口。
  *
  * fetch 的第二个参数（headers 里有 organization-code）在 mock 里不方便区分
@@ -119,18 +140,18 @@ function mockFetch(byOrg) {
   return { calls, restore: () => { globalThis.fetch = orig } }
 }
 
-// ═══ ① 名额口径 ══════════════════════════════════════════════════════
-console.log("\n名额上限 —— 按站点奖励口径换算（上游不给 limit 字段）")
+// ═══ ① 口径 ══════════════════════════════════════════════════════════
+console.log("\n额度口径 —— 上游只给「已邀人数 / 已赚积分」，封顶按官方文案算")
 
-check("国内站 60,000÷1,000 = 60 次", () => {
+check("国内站 每次 1,000、封顶 60,000（折算 60 人）", () => {
   reset()
-  assert.deepEqual(quotaConfig("magicrew"), { perInvite: 1000, capPoints: 60_000 })
-  assert.equal(limitOf("magicrew"), 60)
+  assert.deepEqual(quotaConfig("magicrew"), { perInvite: 1000, capPoints: 60_000, countLimit: 0 })
+  assert.equal(limitOf("magicrew"), 60, "折算值只用于展示")
 })
 
-check("国际站 10,000÷200 = 50 次（用户界面复核口径）", () => {
+check("国际站 每次 200、封顶 10,000（折算 50 人）", () => {
   reset()
-  assert.deepEqual(quotaConfig("magicrew-intl"), { perInvite: 200, capPoints: 10_000 })
+  assert.deepEqual(quotaConfig("magicrew-intl"), { perInvite: 200, capPoints: 10_000, countLimit: 0 })
   assert.equal(limitOf("magicrew-intl"), 50)
 })
 
@@ -144,35 +165,49 @@ check("配置文件可以覆盖口径（活动调整时不用改代码）", () =
 })
 
 // ═══ ② 判满 ══════════════════════════════════════════════════════════
-console.log("\n判满 —— 名额用完 或 积分封顶，两条取或")
+console.log("\n判满 —— 只认「积分封顶」；人数不是上限（2026-10-30 实测推翻旧模型）")
 
-check("已邀 20 / 上限 50 → 20/50，还剩 30", () => {
+check("已邀 20 人、赚 4,000 / 10,000 → 没满，还能发 30 笔", () => {
   reset()
   const q = quotaOf("magicrew-intl", { count: 20, earned: 4000 })
-  assert.equal(q.limit, 50)
-  assert.equal(q.left, 30)
+  assert.equal(q.limit, 50, "折算参考值")
+  assert.equal(q.left, 30, "剩 6,000 分 ÷ 200 = 30 笔")
   assert.equal(q.full, false)
-  assert.equal(q.display, "20 / 50 次")
+  assert.equal(q.display, "20 人 · 4,000 / 10,000 分")
 })
 
-check("名额到顶 → 满", () => {
+check("人数到顶（54 > 折算 50）但积分没封顶 → **不满**", () => {
+  // 实测反例：1451895195@qq.com 已邀 54 人，仍在正常结算奖励。
+  // 按人数判满会把一个只花掉 2,000 / 10,000 分的好号换掉。
   reset()
-  const q = quotaOf("magicrew-intl", { count: 50, earned: 2000 })
+  const q = quotaOf("magicrew-intl", { count: 54, earned: 2000 })
+  assert.equal(q.full, false, "人数不是上限")
+  assert.equal(q.left, 40, "还剩 8,000 分 ÷ 200 = 40 笔")
+})
+
+check("积分封顶 → 满（这是唯一有官方文案支持的上限）", () => {
+  reset()
+  const q = quotaOf("magicrew-intl", { count: 42, earned: 10_000 })
   assert.equal(q.full, true)
   assert.equal(q.left, 0)
 })
 
-check("名额没到但积分已封顶（订阅奖励顶上去）→ 也满", () => {
+check("显式配 countLimit 才按人数判（保守选择，不是事实）", () => {
   reset()
-  const q = quotaOf("magicrew-intl", { count: 42, earned: 10_000 })
-  assert.equal(q.full, true)
+  writeFileSync(
+    join(CACHE, "magicrew-invite-quota-config-magicrew-intl.json"),
+    JSON.stringify({ countLimit: 50 }),
+  )
+  const q = quotaOf("magicrew-intl", { count: 54, earned: 2000 })
+  assert.equal(q.full, true, "配了 countLimit 才按人数判")
+  reset()
 })
 
 check("超额的脏数据不会算出负数剩余", () => {
   reset()
   const q = quotaOf("magicrew", { count: 999, earned: 0 })
-  assert.equal(q.left, 0)
-  assert.equal(q.full, true)
+  assert.equal(q.left, 60, "积分一分没赚，60 笔额度还在")
+  assert.equal(q.full, false)
 })
 
 // ═══ ③ 真实邮箱判定 ══════════════════════════════════════════════════
@@ -268,7 +303,7 @@ await checkAsync("拿到 count / earned / code，并写进缓存", async () => {
     assert.equal(st.count, 20)
     assert.equal(st.earned, 4000)
     assert.equal(st.limit, 50)
-    assert.equal(st.display, "20 / 50 次")
+    assert.equal(st.display, "20 人 · 4,000 / 10,000 分")
     assert.equal(st.full, false)
     assert.equal(readQuotaCache("magicrew-intl").orgA.count, 20)
   } finally {
@@ -358,37 +393,61 @@ await checkAsync("预算内一个都没查到 → 这一轮不切（返回 null�
 })
 
 // ═══ ⑦ 自动换上级 ════════════════════════════════════════════════════
-console.log("\nenforceInviteSwitch —— 首选模式下满了就换真实邮箱号")
+console.log("\nenforceInviteSwitch —— 开关开着（首选模式）时满了就换真实邮箱号")
 
-await checkAsync("非首选模式（auto）不动策略", async () => {
+await checkAsync("开关关着（自动模式）→ 一个请求都不打，不动策略", async () => {
   reset()
-  writeInvitePolicy("magicrew", { mode: "auto" })
-  const r = await enforceInviteSwitch(cn)
+  setSwitch("magicrew", false)
+  const orig = globalThis.fetch
+  let called = 0
+  globalThis.fetch = async () => {
+    called++
+    throw new Error("不该打网络")
+  }
+  try {
+    const r = await enforceInviteSwitch(cn)
+    assert.equal(r.switched, false)
+    assert.match(r.reason, /开关关着/, `实际：${r.reason}`)
+    assert.equal(called, 0, "自动模式下不该查任何额度")
+    assert.equal(readInvitePolicy("magicrew").mode, "auto")
+  } finally {
+    globalThis.fetch = orig
+  }
+})
+
+await checkAsync("开关开着但没有「首选」账号 → 不硬来", async () => {
+  reset()
+  setSwitch("magicrew", true)
+  seedAuth([{ home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" }])
+  // 不写 logins.json
+  const r = await enforceInviteSwitch(cn, { force: true })
   assert.equal(r.switched, false)
-  assert.match(r.reason, /非首选模式/)
-  assert.equal(readInvitePolicy("magicrew").mode, "auto")
+  assert.match(r.reason, /找不到「首选」账号/, `实际：${r.reason}`)
 })
 
 await checkAsync("首选未满 → 不动", async () => {
   reset()
+  setSwitch("magicrew", true)
   seedAuth([{ home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" }])
-  writeInvitePolicy("magicrew", { mode: "fixed", code: "IVAAAA000001", org: "orgA", accountId: "a@qq.com" })
+  seedLogins("magicrew", "magicrew#a")
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
   writeQuotaCache("magicrew", "orgA", { code: "IVAAAA000001", count: 20, earned: 20_000 })
   const r = await enforceInviteSwitch(cn, { force: true })
   assert.equal(r.switched, false)
-  assert.match(r.reason, /还没满/)
-  assert.equal(readInvitePolicy("magicrew").org, "orgA")
+  assert.match(r.reason, /还没满/, `实际：${r.reason}`)
+  // 没满就不该写策略 —— 首选本身就是答案
+  assert.equal(readInvitePolicy("magicrew").mode, "auto")
 })
 
-await checkAsync("首选满额 → 自动切到真实邮箱且没满的账号", async () => {
+await checkAsync("首选满额 → 自动切到真实邮箱且没满的账号，并把落点记成 auto", async () => {
   reset()
+  setSwitch("magicrew", true)
   seedAuth([
     { home: "magicrew#a", org: "orgA", accountId: "full@qq.com", jwt: "jwt-a" },
     { home: "magicrew#b", org: "orgB", accountId: "b@163.com", jwt: "jwt-b" },
     { home: "magicrew#c", org: "orgC", accountId: "tmpxxxx", jwt: "jwt-c" },
   ])
-  writeInvitePolicy("magicrew", { mode: "fixed", code: "IVAAAA000001", org: "orgA", accountId: "full@qq.com" })
+  seedLogins("magicrew", "magicrew#a") // 首选 = 那个满的号
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
   writeQuotaCache("magicrew", "orgA", { code: "IVAAAA000001", count: 60, earned: 60_000 })
   writeQuotaCache("magicrew", "orgB", { code: "IVBBBB000001", count: 5, earned: 5000 })
@@ -398,6 +457,7 @@ await checkAsync("首选满额 → 自动切到真实邮箱且没满的账号", 
   assert.match(r.reason, /b@163\.com/, "切换理由必须写清切给谁（只写「切到 0 / 50 次」没法排查）")
   const pol = readInvitePolicy("magicrew")
   assert.equal(pol.mode, "fixed")
+  assert.equal(pol.auto, true, "必须标成「满额自动换的」，否则下次会被当成用户手选的")
   assert.equal(pol.org, "orgB", "跳过临时邮箱号 orgC，选真邮箱 orgB")
   assert.equal(pol.code, "IVBBBB000001")
   assert.equal(pol.accountId, "b@163.com")
@@ -409,25 +469,45 @@ await checkAsync("首选满额 → 自动切到真实邮箱且没满的账号", 
 
 await checkAsync("满额但没有真实邮箱替补 → 保持原样并留痕", async () => {
   reset()
+  setSwitch("magicrew", true)
   seedAuth([
     { home: "magicrew#a", org: "orgA", accountId: "full@qq.com", jwt: "jwt-a" },
     { home: "magicrew#c", org: "orgC", accountId: "tmpxxxx", jwt: "jwt-c" },
   ])
-  writeInvitePolicy("magicrew", { mode: "fixed", code: "IVAAAA000001", org: "orgA", accountId: "full@qq.com" })
+  seedLogins("magicrew", "magicrew#a")
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
   writeQuotaCache("magicrew", "orgA", { code: "IVAAAA000001", count: 60, earned: 60_000 })
   writeQuotaCache("magicrew", "orgC", { code: "IVCCCC000001", count: 0, earned: 0 })
   const r = await enforceInviteSwitch(cn, { force: true })
   assert.equal(r.switched, false)
-  assert.equal(readInvitePolicy("magicrew").org, "orgA")
+  assert.equal(readInvitePolicy("magicrew").mode, "auto", "切不了就别留落点")
   const log = readFileSync(join(CACHE, "magicrew-invite-switch-magicrew.log"), "utf8")
   assert.match(log, /没有「真实邮箱 \+ 未满」的替补/)
 })
 
+await checkAsync("首选换人后，旧落点会被清掉（不能一直挂着上一个首选）", async () => {
+  reset()
+  setSwitch("magicrew", true)
+  seedAuth([
+    { home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" },
+    { home: "magicrew#b", org: "orgB", accountId: "b@163.com", jwt: "jwt-b" },
+  ])
+  // 落点是上次换过来的 orgB，但用户现在把首选改成了 orgA（没用满）
+  writeInvitePolicy("magicrew", { mode: "fixed", auto: true, code: "IVBBBB000001", org: "orgB", accountId: "b@163.com" })
+  seedLogins("magicrew", "magicrew#a")
+  const { writeQuotaCache } = await import("../src/invite-quota.mjs")
+  writeQuotaCache("magicrew", "orgA", { code: "IVAAAA000001", count: 3, earned: 3000 })
+  writeQuotaCache("magicrew", "orgB", { code: "IVBBBB000001", count: 3, earned: 3000 })
+  const r = await enforceInviteSwitch(cn, { force: true })
+  assert.equal(r.switched, false)
+  assert.equal(readInvitePolicy("magicrew").mode, "auto", "首选回来了，旧落点要清掉")
+})
+
 await checkAsync("10 分钟内重复调用直接跳过（节流）", async () => {
   reset()
+  setSwitch("magicrew", true)
   seedAuth([{ home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" }])
-  writeInvitePolicy("magicrew", { mode: "fixed", code: "IVAAAA000001", org: "orgA", accountId: "a@qq.com" })
+  seedLogins("magicrew", "magicrew#a")
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
   writeQuotaCache("magicrew", "orgA", { code: "IVAAAA000001", count: 10, earned: 10_000 })
   const first = await enforceInviteSwitch(cn, { force: true })
@@ -440,7 +520,7 @@ await checkAsync("10 分钟内重复调用直接跳过（节流）", async () =>
 // ═══ ⑧ 额度窗口里的那一行 ════════════════════════════════════════════
 console.log("\nusage —— 额度窗口里的「邀请次数」行")
 
-await checkAsync("窗口里出现「邀请次数 20 / 50 次」，并且不参与路由", async () => {
+await checkAsync("窗口里出现「邀请额度 20 人 · 4,000 / 10,000 分」，并且不参与路由", async () => {
   reset()
   seedAuth([{ home: "magicrew-intl#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" }])
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
@@ -460,9 +540,9 @@ await checkAsync("窗口里出现「邀请次数 20 / 50 次」，并且不参�
   try {
     const { makeUsage } = await import("../src/hooks/usage.mjs")
     const usage = await makeUsage(intl)(async () => ({ jwt: "jwt-a", org: "orgA" }))
-    const w = usage.windows.find((x) => x.name === "邀请次数")
-    assert.ok(w, "应该有「邀请次数」窗口")
-    assert.equal(w.display, "20 / 50 次")
+    const w = usage.windows.find((x) => x.name === "邀请额度")
+    assert.ok(w, "应该有「邀请额度」窗口")
+    assert.equal(w.display, "20 人 · 4,000 / 10,000 分")
     assert.equal(w.aside, true, "必须是 aside：不参与路由占比")
     assert.equal(w.used, undefined, "aside 行不给 used（HOOKS 三·①）")
     assert.equal(w.amount, undefined)
@@ -472,7 +552,7 @@ await checkAsync("窗口里出现「邀请次数 20 / 50 次」，并且不参�
   }
 })
 
-await checkAsync("满额的账号显示「已满」，且余额窗口仍非 aside（这个号不会从路由里消失）", async () => {
+await checkAsync("封顶的账号显示「已封顶」，且余额窗口仍非 aside（这个号不会从路由里消失）", async () => {
   reset()
   seedAuth([{ home: "magicrew-intl#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" }])
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
@@ -491,8 +571,8 @@ await checkAsync("满额的账号显示「已满」，且余额窗口仍非 asid
   try {
     const { makeUsage } = await import("../src/hooks/usage.mjs")
     const usage = await makeUsage(intl)(async () => ({ jwt: "jwt-a", org: "orgA" }))
-    const inv = usage.windows.find((x) => x.name === "邀请次数")
-    assert.equal(inv.display, "50 / 50 次 · 已满")
+    const inv = usage.windows.find((x) => x.name === "邀请额度")
+    assert.equal(inv.display, "50 人 · 10,000 / 10,000 分 · 已封顶")
     const bal = usage.windows.find((x) => x.name === "积分余额")
     assert.ok(bal)
     assert.notEqual(bal.aside, true, "余额窗口必须参与路由，否则这个号 Known=false")

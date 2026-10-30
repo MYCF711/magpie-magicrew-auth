@@ -69,12 +69,14 @@ export function makeUsage(c) {
       //   现有余额窗口没标 aside，所以这个号在路由里照样 Known=true。
       //
       // 查询失败（没登录态 / 接口抖）就整行不出现 —— 宁可少一行，不显示假数字。
+      // 口径是「已邀几个人 + 还能发多少分」：上游唯一的硬上限是**邀请积分封顶**，
+      // 人数不是上限（实测 2026-10-30：54 人仍在结算奖励，见 invite-quota.mjs 的 quotaOf 头）。
       const invite = await statusOf(c, auth.org).catch(() => null)
       if (invite && invite.limit > 0) {
         windows.push({
-          name: "邀请次数",
-          display: invite.full ? `${invite.count} / ${invite.limit} 次 · 已满` : `${invite.count} / ${invite.limit} 次`,
-          unit: "次",
+          name: "邀请额度",
+          display: invite.full ? `${invite.display} · 已封顶` : invite.display,
+          unit: "分",
           aside: true,
         })
       }

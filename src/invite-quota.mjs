@@ -9,11 +9,11 @@
 //
 // **没有任何 limit 字段。** 探过 17 条候选路径（/limit、/config、/activity/2、
 // /statistics …）全是 404；`/api/v1/invitations/activity` 只回 `{current_activity:2}`，
-// 活动配置并不下发。所以「上限」只能按官方奖励口径算：
+// 活动配置并不下发。所以「额度」只能按官方奖励口径算：
 //
-//            每次注册   邀请注册封顶     ⇒ 名额
-//   国内      1,000       60,000          60 次
-//   国际        200       10,000          50 次
+//            每次注册   邀请积分封顶     折算人数（仅供参考）
+//   国内      1,000       60,000             60
+//   国际        200       10,000             50
 //
 // 口径来自上游前端 constants（docs/internals.md 四；2026-10-29 由用户界面复核：
 // 国际站「邀请一个人 +200，被邀请 +200，邀请获得积分上限 +10,000」）。
@@ -21,14 +21,20 @@
 //   ① 常量集中在 api.mjs 的 INVITE_QUOTA，改一处即可；
 //   ② 运行时可被 `magicrew-invite-quota-config-<site>.json` 覆盖（见 quotaOf）。
 //
-// ═══ 两条判满的路，取或 ═══════════════════════════════════════════════
+// ═══ 判满只认「积分封顶」——人数不是上限 ═══════════════════════════════
 //
-//   count >= limit      名额用完（注册即计数，不等到账）
-//   earned >= capPoints 积分封顶（订阅奖励也算在内，可能先于名额到顶）
+// 0.3.62 曾把「count >= 折算人数」也当成判满的一条，2026-10-30 实测推翻：
 //
-// 只看 count 会漏掉「被邀请人开了套餐、订阅奖励把封顶吃满」的账号；
-// 只看 earned 会漏掉「注册了但没完成任务、积分还没结算」的账号 —— 那种账号
-// 名额其实已经占了，再拉人上来也不会多给分。所以两条都要看。
+//   · 国际 `1451895195@qq.com` 已邀 **54 人**（> 折算的 50），仍在正常结算奖励；
+//   · 官方文案讲的封顶是**积分**（+10,000），不是人；
+//   · 接口没有任何 limit 字段，也没有「名额已满」的错误码。
+//
+// 为什么这个错误代价大：按人数判满会把一个只花掉 2,000 / 10,000 分（还能发 40 笔）
+// 的好号判成「已满」并换掉。⇒ 现在 `full = earned >= capPoints`；
+// 想回到「按人数」这个保守口径，显式配 `{"countLimit":50}`。
+//
+// 注意：**注册不发分，被邀请人完成首个任务/对话才发**。所以「人数」远大于「已发笔数」
+// 是常态（54 人 / 10 笔），不能拿它当「有人没送分」的证据。
 //
 // ═══ 「真实邮箱」怎么认 ═══════════════════════════════════════════════
 //
@@ -49,20 +55,22 @@ import { readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fetchInviteStatus, INVITE_QUOTA } from "./api.mjs"
-import { cacheDir, readInvitePolicy, writeInvitePolicy } from "./store.mjs"
+import { cacheDir, readInvitePolicy, writeInvitePolicy, clearInvitePolicy, inviteFirstOn, preferredOrg } from "./store.mjs"
 
 // ═══ 站点口径 ═════════════════════════════════════════════════════════
 
-/** 这个站一次邀请值多少分、封顶多少分 */
+/** 这个站一次邀请值多少分、封顶多少分（以及可选的人数上限） */
 export function quotaConfig(siteId) {
   const base = INVITE_QUOTA[siteId] ?? INVITE_QUOTA.magicrew
   const override = readQuotaConfigFile(siteId)
   const perInvite = Number(override?.perInvite) > 0 ? Number(override.perInvite) : base.perInvite
   const capPoints = Number(override?.capPoints) > 0 ? Number(override.capPoints) : base.capPoints
-  return { perInvite, capPoints }
+  // 人数上限：**上游没有这个概念**，默认 0 = 不限（实测 2026-10-30，见 quotaOf 头）
+  const countLimit = Number(override?.countLimit) > 0 ? Number(override.countLimit) : 0
+  return { perInvite, capPoints, countLimit }
 }
 
-/** 名额上限（次数）—— 封顶积分 ÷ 每次积分，向上取整 */
+/** 名额参考值 —— 封顶积分 ÷ 每次积分，向上取整（「按积分折算还能拉几个人」） */
 export function limitOf(siteId) {
   const { perInvite, capPoints } = quotaConfig(siteId)
   if (!(perInvite > 0) || !(capPoints > 0)) return 0
@@ -70,19 +78,54 @@ export function limitOf(siteId) {
 }
 
 /**
- * 把人头数和已赚积分算成一条可显示的额度。
+ * 把「已邀请人数 + 已赚积分」算成一条可显示的额度。
  *
- * @returns {{limit:number, count:number, earned:number, left:number, full:boolean, display:string}}
+ * ═══ 判满只认「积分封顶」，不认人数 ══════════════════════════════════
+ *
+ * 2026-10-30 实测推翻了「人数到 60 / 50 就满」这个模型：
+ *
+ *   · 上游 `/api/v1/invitations/info` **没有 limit 字段**，也没有任何
+ *     「名额已满」的错误码（17 条候选路径全 404）；
+ *   · 唯一有官方文案支持的上限是**积分**：「邀请获得积分上限 +10,000」
+ *     （国内 60,000）—— 讲的是钱，不是人；
+ *   · 反例：国际 `1451895195@qq.com` 已邀 **54 人**（远超按 10,000÷200 折算的 50），
+ *     仍在正常结算奖励（10-29 批次里就有一笔是第 51 人之后的注册）。
+ *
+ * 「50 人」本来只是「每人 200 分、封顶 10,000 分」的**折算值**，被当成了硬上限。
+ * 按它判满的后果：把一个还能发 8,000 分（40 笔）的好号误判成「已满」并换掉。
+ *
+ * ⇒ 默认 `full = earned >= capPoints`。要回到旧行为（按人数判）得显式配
+ *   `{"countLimit": 50}` —— 那是**保守选择**，不是事实。
+ *
+ * ⚠ 别把 `limit` 当上限用：它只是展示用的折算参考值。
+ *
+ * @returns {{limit:number, count:number, earned:number, capPoints:number, left:number, full:boolean, display:string}}
  */
 export function quotaOf(siteId, { count = 0, earned = 0 } = {}) {
-  const { capPoints } = quotaConfig(siteId)
+  const { capPoints, countLimit } = quotaConfig(siteId)
   const limit = limitOf(siteId)
   const c = Math.max(0, Number(count) || 0)
   const e = Math.max(0, Number(earned) || 0)
-  const full = (limit > 0 && c >= limit) || (capPoints > 0 && e >= capPoints)
-  const left = limit > 0 ? Math.max(0, limit - c) : 0
-  const display = limit > 0 ? `${c} / ${limit} 次` : `${c} 次`
-  return { limit, count: c, earned: e, left, full, display }
+  const capFull = capPoints > 0 && e >= capPoints
+  const countFull = countLimit > 0 && c >= countLimit
+  const full = capFull || countFull
+  // 「还能拉几个人（按积分算）」= 剩余额度 ÷ 每次奖励，向下取整
+  const left = capPoints > 0 && perInviteOf(siteId) > 0 ? Math.floor(Math.max(0, capPoints - e) / perInviteOf(siteId)) : 0
+  const display =
+    capPoints > 0
+      ? `${c} 人 · ${fmt(e)} / ${fmt(capPoints)} 分`
+      : `${c} 人`
+  return { limit, count: c, earned: e, capPoints, left, full, display }
+}
+
+/** 千分位 —— 额度行要一眼看出 9,000 还是 60,000 */
+function fmt(n) {
+  return Number(n || 0).toLocaleString("en-US")
+}
+
+/** 每次邀请多少分（quotaOf 内部用，别在别处再算一遍） */
+function perInviteOf(siteId) {
+  return quotaConfig(siteId).perInvite
 }
 
 // ═══ 真实邮箱判定 ═════════════════════════════════════════════════════
@@ -362,21 +405,29 @@ function writeThrottle(siteId, at) {
 /**
  * 首选模式下，当前邀请上级满了 → 自动把上级换成「真实邮箱且没满」的账号。
  *
- * 为什么只动插件的邀请策略、不碰 magpie 账号页的 first：
+ * 「首选模式」= 供应商编辑器里那个开关（`auth.options` 的 `invite-first`）开着。
+ * 当前上级是谁：策略文件里记的落点（`auto:true`，上次换过来的）> magpie 账号页
+ * 「首选」那个号。**换的是插件自己的落点，不是 magpie 的 `first`** ——
  *   ① `first` 是 magpie 自己的内存 + logins.json，插件写文件也未必被重新读进内存
  *      （坑 13：插件对 magpie 目录只有读的份），改它等于踢一个不可控的缓存；
- *   ② 「首选模式」在这个包里本来就是指 `magicrew-invite-policy-<site>.json`
- *      的 `fixed`（登录页「邀请码」输入 1 的那个），换它的指向就是用户要的行为；
- *   ③ 不动 `first` 就不会顺手改变模型调用的路由账号 —— 那是另一件事。
+ *   ② 不动 `first` 就不会顺手改变模型调用的路由账号 —— 那是另一件事。
  *
- * 触发点：签到（每天一次）与登录成功后。带 10 分钟节流，重复调用无副作用。
+ * 触发点：签到（每天一次）、登录成功后、以及插件加载 20 秒后（拨开关立刻生效，
+ * 不用等下一次登录）。带 10 分钟节流，重复调用无副作用。
  *
  * @returns {Promise<{switched:boolean, reason:string, from?:object, to?:object}>}
  */
 export async function enforceInviteSwitch(c, { force = false, now = Date.now() } = {}) {
+  // 开关关着 = 自动模式，不动任何东西（老用户的默认状态）
+  if (!inviteFirstOn(c.id)) {
+    return { switched: false, reason: "开关关着（自动模式），不动" }
+  }
+
   const pol = readInvitePolicy(c.id)
-  if (pol.mode !== "fixed" || !pol.code) {
-    return { switched: false, reason: "非首选模式，不动" }
+  const pinned = pol.mode === "fixed" && pol.auto === true && pol.code ? pol : null
+  const org = pinned?.org || preferredOrg(c.id)
+  if (!org) {
+    return { switched: false, reason: "首选模式下找不到「首选」账号（magpie 账号页还没设首选）" }
   }
 
   const last = Number(readThrottle(c.id).at) || 0
@@ -385,29 +436,32 @@ export async function enforceInviteSwitch(c, { force = false, now = Date.now() }
   }
   writeThrottle(c.id, now)
 
-  const current = await statusOf(c, pol.org, { force })
+  const current = await statusOf(c, org, { force })
   if (!current) {
     return { switched: false, reason: "查不到当前邀请上级的额度（账号可能已删）" }
   }
   if (!current.full) {
+    // 之前换过、现在首选回来了（例如用户换了首选）→ 把旧落点清掉，避免一直用它
+    if (pinned && pol.org !== preferredOrg(c.id)) clearInvitePolicy(c.id)
     return { switched: false, reason: "当前上级还没满", quota: current }
   }
 
-  const next = await findInviteSuccessor(c, { excludeOrg: pol.org })
+  const next = await findInviteSuccessor(c, { excludeOrg: org })
   if (!next || !next.code) {
-    noteSwitch(c.id, `上级 ${pol.accountId || pol.org} 已满（${current.display}），但没有「真实邮箱 + 未满」的替补`)
+    noteSwitch(c.id, `上级 ${current.accountId || org} 已满（${current.display}），但没有「真实邮箱 + 未满」的替补`)
     return { switched: false, reason: "满额，但没有可用的真实邮箱替补", quota: current }
   }
 
   writeInvitePolicy(c.id, {
     mode: "fixed",
+    auto: true,
     code: next.code,
     org: next.org,
     accountId: next.accountId || next.org,
   })
   noteSwitch(
     c.id,
-    `上级 ${pol.accountId || pol.org} 已满（${current.display}）→ 切到 ${next.accountId || next.org}（${next.display}）`,
+    `上级 ${current.accountId || org} 已满（${current.display}）→ 切到 ${next.accountId || next.org}（${next.display}）`,
   )
   return {
     switched: true,
