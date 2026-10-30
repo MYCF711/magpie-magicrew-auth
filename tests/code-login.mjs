@@ -468,47 +468,60 @@ await (async () => {
   })
 })()
 
-// ── ⑦ 方法表：国际站六条（邮箱优先，第二是临时邮箱，末尾邀请码），国内站四条 ─
-console.log("\n⑦ auth.methods：国际站 邮箱优先；国内站没有邮箱那条")
+// ── ⑦ 方法表：国内站三条、国际站四条；「邀请码」那条 0.3.64 已拆掉 ─────
+console.log("\n⑦ auth.methods：国际站 邮箱优先；国内站没有邮箱那条；都不再有「邀请码」")
 
 const { MagicrewAuthPlugin, MagicrewIntlAuthPlugin } = await import("../index.mjs")
 const cn = await MagicrewAuthPlugin({ client: null, directory: "." })
 const intl = await MagicrewIntlAuthPlugin({ client: null, directory: "." })
 
-check("国内站：手机号 → 浏览器 → 登录态 → 邀请码，且**没有**邮箱方法", () => {
+check("国内站：手机号 → 浏览器 → 登录态，且**没有**邮箱方法", () => {
   const l = cn.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 4, `应该 4 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.equal(l.length, 3, `应该 3 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /手机号验证码/)
   assert.match(l[1], /浏览器登录/)
   assert.match(l[2], /登录态/)
-  assert.match(l[3], /邀请码/)
   assert.ok(!l.some((x) => /邮箱/.test(x)), "国内站登录页没有邮箱入口，别摆出来")
 })
 
-check("国际站：邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码", () => {
+check("国际站：邮箱 → 手机号 → 浏览器 → 登录态", () => {
   const l = intl.auth.methods.map((m) => m.label)
-  assert.equal(l.length, 5, `应该 5 条，实际 ${l.length}：${l.join(" / ")}`)
+  assert.equal(l.length, 4, `应该 4 条，实际 ${l.length}：${l.join(" / ")}`)
   assert.match(l[0], /邮箱验证码/)
   assert.match(l[1], /手机号验证码/)
   assert.match(l[2], /浏览器登录/)
   assert.match(l[3], /登录态/)
   // 标签在插件加载时被缓存；会变的「上级 xxx」不能在标签里（否则改策略后一直显示旧号）
   assert.ok(!l.some((x) => /上级/.test(x)), `标签里不该出现上级：${l.join(" / ")}`)
-  assert.match(l[4], /邀请码/)
 })
 
-check("国际站「邀请码」保存后接邮箱，不接手机号（0.3.43）", async () => {
-  const invites = intl.auth.methods.filter((m) => /邀请码/.test(m.label))
-  assert.equal(invites.length, 1)
-  const next = await invites[0].ask({ invite: "0" })
-  assert.equal(next?.key, "email", `国际站应该问邮箱，实际 ${next?.key}`)
+check("两站都不再摆「邀请码」登录方式（设置搬去供应商编辑器的开关）", () => {
+  for (const [name, p] of [["国内站", cn], ["国际站", intl]]) {
+    const hits = p.auth.methods.filter((m) => /邀请码/.test(m.label))
+    assert.equal(hits.length, 0, `${name}不该再有「邀请码」入口，实际 ${hits.length} 条`)
+  }
 })
 
-check("国内站「邀请码」保存后接手机号（站点分叉的另一半）", async () => {
-  const invites = cn.auth.methods.filter((m) => /邀请码/.test(m.label))
-  assert.equal(invites.length, 1)
-  const next = await invites[0].ask({ invite: "0" })
-  assert.equal(next?.key, "phone", `国内站应该问手机号，实际 ${next?.key}`)
+// ── ⑦b 邀请码模式：双模式开关（magpie 的 auth.options）────────────────
+console.log("    邀请码模式 = 一个布开关，两种状态")
+
+check("两站都声明了 invite-first 开关，默认关（自动模式）", () => {
+  for (const [name, p] of [["国内站", cn], ["国际站", intl]]) {
+    assert.ok(Array.isArray(p.auth.options), `${name}没声明 auth.options`)
+    assert.equal(p.auth.options.length, 1, `${name}应该只有一个开关（双模式），实际 ${p.auth.options.length}`)
+    const o = p.auth.options[0]
+    assert.equal(o.key, "invite-first")
+    assert.ok(/[a-z0-9_-]{1,40}/.test(o.key), "key 必须满足 magpie 的 OPTION_KEY 正则")
+    assert.equal(o.default, false, "默认必须关：老用户升级上来保持自动模式")
+    assert.ok(o.label && o.label.length <= 60, "label 必须非空且 ≤ 60 字（magpie 截断）")
+    assert.ok(o.description.length <= 300, "description ≤ 300 字（magpie 截断）")
+  }
+})
+
+check("字段名是 magpie 认的那几个（key / label / description / default）", () => {
+  const o = cn.auth.options[0]
+  const keys = Object.keys(o).sort()
+  assert.deepEqual(keys, ["default", "description", "key", "label"])
 })
 
 check("两条验证码方法各问一个字段，键名分别是 email / phone", () => {

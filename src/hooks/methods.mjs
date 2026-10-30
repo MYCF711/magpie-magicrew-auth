@@ -31,9 +31,8 @@ import {
 import {
   inviteToUse,
   liveOrgs,
-  preferredOrg,
-  readAccountCodes,
-  writeInvitePolicy,
+  inviteFirstOn,
+  preferredInviteOf,
   readSession,
   writeSession,
   noteLoginFailure,
@@ -416,73 +415,42 @@ function makeCodeMethod(c, kind) {
  * 本次登录会挂到谁名下 —— 放进 authorize 的 instructions，每次点登录重算。
  *
  * ⚠ 为什么不放 methods 的 label：label 在插件加载时被 magpie 读走并缓存，
- *   改邀请码策略 / 切首选都不会刷新，用户会看到过期的「上级 xxx」。
+ *   拨开关 / 切首选都不会刷新，用户会看到过期的「上级 xxx」。
  *   instructions 是 authorize 每次调用时现算的，才是该显示动态信息的地方。
  */
-function inviteNote(c) {
+// 导出是给测试用的：它只拼一行文案，测它不必绕浏览器登录那条路
+// （那条会去读本机浏览器的真实登录态，测试就变成「看这台机器登没登录」）。
+export function inviteNote(c) {
   const pol = readInvitePolicy(c.id)
-  if ((pol.mode === "fixed" || pol.mode === "custom") && pol.code && !orgDead(c, pol.org)) {
-    return `\n本次邀请上级：${pol.accountId || pol.code}（想换：登录页「邀请码」）。`
+  // 满额自动换过来的落点优先说（它不是「首选」，是「首选满了以后顶上的」）
+  if (inviteFirstOn(c.id) && pol.mode === "fixed" && pol.auto === true && pol.code && !orgDead(c, pol.org)) {
+    return `\n本次邀请上级：${pol.accountId || pol.code}（首选已满，自动换的）。`
+  }
+  if (inviteFirstOn(c.id)) {
+    const pick = preferredInviteOf(c.id)
+    if (pick && !orgDead(c, pick.org)) {
+      return `\n本次邀请上级：${pick.accountId}（magpie 账号页的「首选」）。`
+    }
+    return "\n本次邀请上级：自动（还没设首选账号）。"
   }
   return ""
 }
 
-// ═══ 邀请码：登录页一个按钮 + 一个数字文本框 ═══════════════════════
+// ═══ 邀请码：设置搬去了供应商编辑器里的开关 ═══════════════════════════
 //
-// 用户要的是「一个文本框就够」：
-//   0 / 留空 / 非法文本 = 自动（首次用作者码，之后跟随最后登录/签到的滚动码）
-//   1 = 当前首选账号（magpie 账号页「首选」那个）的邀请码
-// 没有列表、没有 1..N —— 想换首选就在 magpie 账号页切首选，再点这个按钮。
+// 以前这里是「登录页一个按钮 + 一个数字文本框」（0=自动，1=首选），
+// 0.3.64 起整条拆掉 —— 模式改由 magpie 的 `auth.options` 布尔开关决定：
 //
-// 0 的自动不需要在这里算：store.inviteToUse 的 auto 分支就是
-// readInvite(site) || AUTHOR_INVITE。1 每次点开时读 logins.json 的 first。
-
-function preferredInvite(c) {
-  const org = preferredOrg(c.id)
-  if (!org) return null
-  const v = readAccountCodes(c.id)[org]
-  if (!v?.code) return null
-  return {
-    code: v.code,
-    label: String(v.accountId || org),
-    org,
-    accountId: String(v.accountId || org),
-  }
-}
-
-function modeHint(c) {
-  const pol = readInvitePolicy(c.id)
-  // 只有两种模式：自动 / 首选。fixed 就是「上次保存的首选快照」，
-  // 不再另叫「固定」—— 首选项后来变了也还是「首选」，输入 0 即可回自动。
-  if (pol.mode === "auto" || !pol.code) return "当前模式：自动，输入 1 切换：首选"
-  //
-  // ⚠ 这里**只写模式**，不写上级账号、也不写邀请次数（0.3.63 撤回）：
-  //   ① 邀请次数额度卡片上已经有了（「邀请次数 45 / 50 次」），框里再写一遍是重复；
-  //   ② 加上邮箱后整串放不进那个输入框，会被截成「…· 邀请 45/50，输入」。
-  //   上级是谁在 authorize 的 instructions 里说（那里空间够）。
-  return "当前模式：首选，输入 0 切换：自动"
-}
-
-function invitePrompt(c) {
-  return { type: "text", key: "invite", message: "邀请码", placeholder: modeHint(c) }
-}
-
-function saveInviteChoice(c, raw) {
-  const n = String(raw ?? "").trim() === "" ? 0 : Number(String(raw).trim())
-  if (n === 1) {
-    const pick = preferredInvite(c)
-    if (pick) {
-      writeInvitePolicy(c.id, {
-        mode: "fixed",
-        code: pick.code,
-        org: pick.org,
-        accountId: pick.accountId,
-      })
-      return
-    }
-  }
-  writeInvitePolicy(c.id, { mode: "auto" })
-}
+//   供应商编辑器 → 插件选项 → 「邀请码挂到首选账号」 关 / 开
+//
+// 为什么搬：那个文本框要用户先点登录、再输一个 0 或 1，还得知道 0/1 是什么
+// 意思；开关摆在供应商设置里，一次点击、当场生效、不用重启 host。
+//
+// 为什么只剩两档：选项只能是布尔（providers.go:170-187 的 `type Option struct
+// { Default bool }`，契约 `optionValue = optionValues[provider][key] === true`），
+// 装不下「指定任意码」要带的那串字符。硬塞就得再留一个文本框 —— 那就还是三模式。
+//
+// `store.inviteToUse(siteId)` 是唯一读模式的地方，它直接问开关（`inviteFirstOn`）。
 
 export function makeMethods(c) {
   // 浏览器登录的等待上限：国际站链路长、没代理时首屏/登录态写入都慢，
@@ -504,16 +472,6 @@ export function makeMethods(c) {
   // 见 makeCodeMethod 头上那段。
   const emailMethod = c.id === "magicrew-intl" ? makeCodeMethod(c, "email") : null
   const codeMethods = emailMethod ? [emailMethod, mobileMethod] : [mobileMethod]
-
-  // 「邀请码」入口保存完策略后接哪条验证码登录 —— **跟站点主登录方式一致**：
-  //   国际站 → 邮箱（那边用户大多是邮箱注册的）
-  //   国内站 → 手机号（国内站没有邮箱方法）
-  //
-  // ⚠ 0.3.43 之前这里写死 `mobileMethod`：国际站点「邀请码」→ 保存 → 被问手机号，
-  //   等于把这个入口从「给新号带邀请码」带偏成「只有手机号能注册」。
-  //   手机号验证码本身仍然独立存在，国际站想用手机号登录直接点那一条。
-  const primaryMethod = emailMethod ?? mobileMethod
-  const primaryKey = emailMethod ? "email" : "phone"
 
   return [
     ...codeMethods,
@@ -739,30 +697,6 @@ export function makeMethods(c) {
             }
           },
         }
-      },
-    },
-
-    // ── 邀请码：一个数字框；保存后接**本站主验证码方式** ─────────────
-    //
-    // 0/留空 = 自动（首次作者码，之后滚动最新号）；1 = 当前首选账号。
-    // 保存写在这条验证码登录**之前**：接下来无论走哪条登录，注册时读到的都是这个模式。
-    //
-    // ⚠ 不写死手机号：国际站接邮箱（primaryMethod），国内站接手机号。
-    //   站点分叉只在这一个变量上，别在 ask / authorize 里再抄一遍条件。
-    {
-      type: "oauth",
-      label: `${c.SHORT} 邀请码`,
-      get prompts() {
-        return [invitePrompt(c)]
-      },
-      async ask(inputs) {
-        if (!inputs || !Object.prototype.hasOwnProperty.call(inputs, "invite")) return invitePrompt(c)
-        if (!Object.prototype.hasOwnProperty.call(inputs, primaryKey)) return primaryMethod.prompts[0]
-        return null
-      },
-      async authorize(inputs) {
-        saveInviteChoice(c, inputs?.invite)
-        return await primaryMethod.authorize(inputs)
       },
     },
   ]
