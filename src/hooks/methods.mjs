@@ -38,8 +38,10 @@ import {
   noteLoginFailure,
   noteOrg,
   noteRegisteredInvite,
+  accountNameOf,
   readAccountCodes,
   readKnownOrgs,
+  resolveInvite,
   rollInvite,
   readInvitePolicy,
 } from "../store.mjs"
@@ -458,29 +460,59 @@ function makeCodeMethod(c, kind) {
   }
 }
 
+// 导出是给测试用的：下面两个都只拼一行文案，测它们不必绕浏览器登录那条路
+// （那条会去读本机浏览器的真实登录态，测试就变成「看这台机器登没登录」）。
+/**
+ * 别的账号出现在登录页文案里时一律打码。
+ *
+ * 上游自己回手机号就是打码的（`189****051`）；这里把「自己的号」换成一个
+ * 用户认得出、又不会整串贴出去的写法。已经是打码形态的原样返回。
+ */
+export function maskName(s) {
+  const v = String(s || "").trim()
+  if (!v) return ""
+  if (v.includes("*")) return v // 上游或缓存里已经是打码形态
+  const digits = v.replace(/[\s-]/g, "").replace(/^\+?86/, "")
+  if (/^1\d{10}$/.test(digits)) return `${digits.slice(0, 3)}****${digits.slice(7)}`
+  const at = v.lastIndexOf("@")
+  if (at > 0) return `${v.slice(0, Math.min(2, at))}****@${v.slice(at + 1)}`
+  // 随机串（国际站的 org 码那种）：留头留尾，够认人就行
+  return v.length > 10 ? `${v.slice(0, 4)}…${v.slice(-4)}` : v
+}
+
+/** 自动模式下这次到底挂在谁名下（说清是注册号、滚动号还是作者码） */
+function autoWhere(siteId) {
+  const { source, org } = resolveInvite(siteId)
+  if (source === "author") return "作者的码（还没有可用的自有账号）"
+  const who = maskName(accountNameOf(siteId, org) || org)
+  if (!who) return "上一次记下的码（认不出是哪个账号）"
+  return source === "registered" ? `${who}（最后注册的新号）` : `${who}（最后一次登录 / 签到的号）`
+}
+
 /**
  * 本次登录会挂到谁名下 —— 放进 authorize 的 instructions，每次点登录重算。
  *
  * ⚠ 为什么不放 methods 的 label：label 在插件加载时被 magpie 读走并缓存，
  *   拨开关 / 切首选都不会刷新，用户会看到过期的「上级 xxx」。
- *   instructions 是 authorize 每次调用时现算的，才是该显示动态信息的地方。
+ *
+ * 0.3.68 起**开关关着也写这一行**：主人要「看得见这次挂在哪个账号名下」。
+ * 选不了（magpie 的插件选项只存布尔，见 store.mjs 的模式注释），但至少看得见。
+ * 文案里的账号名一律走 `maskName()`。
  */
-// 导出是给测试用的：它只拼一行文案，测它不必绕浏览器登录那条路
-// （那条会去读本机浏览器的真实登录态，测试就变成「看这台机器登没登录」）。
 export function inviteNote(c) {
   const pol = readInvitePolicy(c.id)
   // 满额自动换过来的落点优先说（它不是「首选」，是「首选满了以后顶上的」）
   if (inviteFirstOn(c.id) && pol.mode === "fixed" && pol.auto === true && pol.code && !orgDead(c, pol.org)) {
-    return `\n本次邀请上级：${pol.accountId || pol.code}（首选已满，自动换的）。`
+    return `\n本次邀请上级：${maskName(accountNameOf(c.id, pol.org) || pol.accountId) || pol.code}（首选已满，自动换的）。`
   }
   if (inviteFirstOn(c.id)) {
     const pick = preferredInviteOf(c.id)
     if (pick && !orgDead(c, pick.org)) {
-      return `\n本次邀请上级：${pick.accountId}（magpie 账号页的「首选」）。`
+      return `\n本次邀请上级：${maskName(accountNameOf(c.id, pick.org) || pick.accountId)}（magpie 账号页的「首选」）。`
     }
-    return "\n本次邀请上级：自动（还没设首选账号）。"
+    return `\n本次邀请上级：${autoWhere(c.id)}（开关开着，还没设首选，按自动的来）。`
   }
-  return ""
+  return `\n本次邀请上级：${autoWhere(c.id)}。`
 }
 
 // ═══ 邀请码：设置搬去了供应商编辑器里的开关 ═══════════════════════════

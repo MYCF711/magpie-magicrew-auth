@@ -167,8 +167,24 @@ export function noteRegisteredInvite(siteId, { code, org } = {}) {
   return entry
 }
 
-/** 这次登录该带的邀请码：开关 → 策略 → 最后注册的新号 → 滚动码 → 作者码 */
-function inviteToUse(siteId) {
+/**
+ * 这次登录该带的邀请码 **以及它挂在谁名下**。
+ *
+ * 登录页那句「本次邀请上级：…」必须和实际用的码同源 —— 两边各写一份判断，
+ * 早晚会出现「文案说 A、实际用 B」。所以只有这一个函数做决定，
+ * `inviteToUse()` 就是它的 `.code`，`inviteNote()` 拿 `source` / `org` 去拼文案。
+ *
+ * `source` 取值：
+ *   preferred  开关开，挂 magpie 账号页「首选」那个号
+ *   switched   开关开，首选满额后自动换过来的落点
+ *   registered 自动，跟「最后一个注册成功的新号」
+ *   rolling    自动，回落滚动码（最后一次登录 / 签到刷到的）
+ *   author     都没有 → 作者自己的码
+ *
+ * @returns {{code:string, source:"preferred"|"switched"|"registered"|"rolling"|"author", org:string}}
+ */
+export function resolveInvite(siteId) {
+  const none = { code: AUTHOR_INVITE[siteId] || "", source: "author", org: "" }
   const live = liveOrgs(siteId)
   // 账号文件读不到 / 一个号都没有时按「不校验」处理，行为与以前一致
   const known = live !== null && live.size > 0
@@ -178,11 +194,11 @@ function inviteToUse(siteId) {
     // ① 满额自动换过来的落点（enforceInviteSwitch 写的 auto:true）—— 它优先，
     //    否则每次都会退回「首选账号」那个已经满了的号。
     if (pol.mode === "fixed" && pol.auto === true && pol.code) {
-      if (!(known && pol.org && !live.has(pol.org))) return pol.code
+      if (!(known && pol.org && !live.has(pol.org))) return { code: pol.code, source: "switched", org: pol.org || "" }
     }
     // ② 首选账号自己的码（每次现算：用户可能在 magpie 账号页换过首选）
     const pick = preferredInviteOf(siteId)
-    if (pick && !(known && pick.org && !live.has(pick.org))) return pick.code
+    if (pick && !(known && pick.org && !live.has(pick.org))) return { code: pick.code, source: "preferred", org: pick.org }
   }
 
   // 自动模式：先认「最后一个注册成功的新号」。它比滚动码优先 —— 滚动码每次登录 /
@@ -190,18 +206,46 @@ function inviteToUse(siteId) {
   const registered = readRegisteredInvite(siteId)
   if (registered?.code) {
     // 那个号被删了（不在 plugin-auth）→ 这个记录作废，往下回落
-    if (!known || !registered.org || live.has(registered.org)) return registered.code
+    if (!known || !registered.org || live.has(registered.org)) {
+      return { code: registered.code, source: "registered", org: registered.org || "" }
+    }
   }
 
   const rolling = readInvite(siteId)
   if (rolling) {
-    if (!known) return rolling
+    if (!known) return { code: rolling, source: "rolling", org: "" }
     // 滚动码也可能属于已删除的账号：按码反查归属，归属没了就换作者码兜底
     const codes = readAccountCodes(siteId)
-    const owner = Object.keys(codes).find((o) => codes[o]?.code === rolling)
-    if (!owner || live.has(owner)) return rolling
+    const owner = Object.keys(codes).find((o) => codes[o]?.code === rolling) || ""
+    if (!owner || live.has(owner)) return { code: rolling, source: "rolling", org: owner }
   }
-  return AUTHOR_INVITE[siteId] || ""
+  return none
+}
+
+/** 这次登录该带的邀请码：开关 → 策略 → 最后注册的新号 → 滚动码 → 作者码 */
+function inviteToUse(siteId) {
+  return resolveInvite(siteId).code
+}
+
+/**
+ * org → 卡片上那个账号名（plugin-auth.json 的 `accountId`）。
+ *
+ * 拿不到就退回 codes 缓存里的 `accountId`，再不行用 org 自己（调用方负责打码）。
+ * 只读，不写任何东西。
+ */
+export function accountNameOf(siteId, org) {
+  const o = String(org || "").trim()
+  if (!o) return ""
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), ".config", "magpie", "plugin-auth.json"), "utf8"))
+    for (const [k, v] of Object.entries(raw || {})) {
+      if (k !== siteId && !String(k).startsWith(siteId + "#")) continue
+      if (String(v?.org || "").trim() !== o) continue
+      const id = String(v?.accountId || "").trim()
+      if (id) return id
+    }
+  } catch {}
+  return String(readAccountCodes(siteId)[o]?.accountId || "").trim() || o
 }
 
 /**
