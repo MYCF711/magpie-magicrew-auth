@@ -1,3 +1,73 @@
+## 0.3.65 — 2026-10-30
+
+**国内站的「-153 积分」是上游真给负数（不是插件读错）；余额位不再显示负数，改成「已欠费 N 积分」**
+
+### 一、判定：负数来自上游，插件没有把「已用」当「剩余」
+
+报障是「走邀请注册的号积分都被清空了 / 变成负数」。逐字段核对 → **不是解析错、不是符号取反**：
+
+| 账号 | `~/.config/magpie/quotas.json` 里存的 | 直打上游 `GET /api/v1/quota/points/total` |
+|---|---|---|
+| `magicrew/180****361` | `-1 积分` | `"total_points":-1` |
+| `magicrew/181****632` | `-31 积分` | `"total_points":-31` |
+| `magicrew/181****710` | `-1 积分` | `"total_points":-1` |
+| `magicrew/189****051` | `-32 积分` | `"total_points":-32` |
+
+上游原样返回（逐字，四个号同形，这里取 `-31` 那个）：
+
+```json
+{"code":1000,"message":"ok","data":{"organization_total_points":-31,"total_points":-31,
+ "expiring_quota_details":[],"next_cycle_grant":null,"organization_remaining_points":null,
+ "organization_limit_points":null,"user_remaining_points":null,"user_limit_points":null}}
+```
+
+⇒ `total_points` 本身就是一个 number 的负数：**没有字符串、没有单位、也没有「已用 / 剩余」互换的余地**
+（同一接口里没有任何 used 字段，`organization_limit_points` 之类全是 `null`）。
+流水接口 `POST /api/v1/quota/points/records/queries` 仍是 `HTTP 500 Internal Server Error.`
+（GET 回 `405 Allow: POST`），所以**每一笔扣了多少分拿不到**。
+
+**与「邀请注册」无关**：国内 `180****361` 邀请 **0 人**、余额 `-1`；国际 `1451895195@qq.com`
+邀请 **54 人**、余额 `+107`。`~/.config/magpie/usage.jsonl` 里国内四个号合计 **2,639 次**请求、
+**2,914 万**输入 token，国际单号也有 **1,147 次 / 1,280 万**，所以「国内号被用得多」不等于「国内号一定欠费」——
+真正的差额在**站点计价口径**（每 1,000 token 扣多少分），那层拿不到逐笔，**未验证**。
+
+上游允许透支是确定的：扣费在请求完成之后，一次请求就能把 0 打到负 ——
+0.3.26 记过同一现象（「余额 82 的账号被会话亲和留在回复链上，一轮对话把它烧到负数」）。
+
+### 二、插件改的是显示层（读法本来就是对的）
+
+- 窗口 `balance` 钳到 `Math.max(0, total)`：这个数值位进路由算占比，负数只会折出一个无意义的百分比。
+- 文案按三种状态分开：欠费 **「已欠费 N 积分」**、0 **「已耗尽」**、有余额 **「N 积分」**。
+  顶层 `balance` 不再吐 `"-31 积分"`（用户看到的就是这一格），欠费时同样写成「已欠费 N 积分」。
+- `plan`：欠费 → `已欠费`（原来与「已耗尽」混在一起，看不出是该等明天的免费额度还是该充值）。
+- 欠费**仍然报 `resetsAt`**（下一个北京 00:00）—— 0.3.29 那套「别一分钟一醒」的行为不变。
+- **签到报告也不再把负数甩出来**（`src/tasks.mjs` 的 `runCheckin`）：欠费号的签到消息原来是
+  `积分 -32（本次无变动）`，现在是 `已欠费 32 积分（本次无变动）`；领到每日积分时是
+  `积分 +200（已欠费 32 → 168）`（`before → after` 的对照留着，那是事实）。
+
+### 三、字段读取加固（`src/api.mjs` 的 `parsePointsValue`）
+
+上游现在给 number，但同一个 Go 服务在别的积分接口里带单位 / 千分位，网页复制的负数还常是
+Unicode 减号。原来 `Number(d.total_points ?? 0)` 遇到 `"-31 积分"`、`"−32"` 直接 NaN ⇒ 卡片谎报「已耗尽」。
+现在统一解析：number / `"-31"` / `"-31 积分"` / `"−32"`（U+2212）/ `"(31)"`（会计写法）/ `"1,234 积分"`。
+
+**「读不到」不再退化成 0**：`fetchPoints()` 多返 `totalKnown` / `totalRaw`；缺字段或 `null` 时
+`usage()` 返回 `error`（宁可卡片空着），不再谎报「已耗尽」。`tools/points.mjs` 也跟着打原值。
+
+### 四、验证
+
+- `node tests/negative-balance.mjs`：**25 条全过** —— 解析 12 条（number / 带单位 / Unicode 负号 /
+  会计写法 / 千分位 / 缺字段）、上游三种负数形状各 5 条断言（余额位 0 + 文案 + resetsAt + 文案无负号）、
+  缺字段三例不许伪造「已耗尽」、0 与正数老行为不回退、签到报告 2 条（欠费不动 / 领到 200）。
+- `node tests/usage-resets-at.mjs`：6 条仍全过（`total=-28` 的 `resetsAt` 断言没变）。
+- 真机（真实登录态直接调 `makeUsage()`，只打上游 GET）：国内四号全部
+  `plan="已欠费"`、`balance="已欠费 N 积分"`、窗口 `balance:0`、`resetsAt:2026-10-30T16:00:00.000Z`（= 北京 10-31 00:00）；
+  国际站 9 个号里 8 个照常读到 `"101 积分"` … `"386 积分"`（每次总有个别号回 `fetch failed`，
+  是 node 直连国际站的线路问题 —— AGENTS 已记「探针要用 magpie 自带 bun 跑」，不是本次改动引入）。
+- **未验证**：没有重启 magpie（本会话自己走它的网关），所以 `/v1/magpie/quotas` 和卡片上还是旧文案，
+  要等插件 host 下一次重载才生效。`magicrew/e6uvhf6d4170` 的 `-153 积分` 只有缓存值
+  （该账号已不在 `plugin-auth.json` 里），未复测。
+
 ## 0.3.64 — 2026-10-30
 
 **邀请码模式改用供应商编辑器里的开关（双模式）；作者码重推两个，满额那个清掉**

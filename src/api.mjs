@@ -348,19 +348,65 @@ export async function claimLoginGift(token, org, host = SITES.cn.host) {
 // ── ④ 积分与任务 ─────────────────────────────────────────────────────
 
 /**
+ * 把一个积分字段读成数字；读不到返回 `null`。
+ *
+ * 为什么不能直接 `Number(x)`（2026-10-30 实测，见 CHANGELOG 0.3.65）：
+ *
+ *   · 上游正常给 number：`total_points: -31`（欠费也是 number，不是文案）；
+ *   · 但同一套 Go 服务在别的积分接口里会带单位/千分位，前端拿去做文案的字段
+ *     还会出现 `"1,234 积分"` —— 这种 `Number()` 直接 NaN；
+ *   · 负号可能是 Unicode（`"−32"`，U+2212），`Number()` 也 NaN；
+ *   · 组织钱包还没初始化时字段是 `null` 或整条缺失。
+ *
+ * ⚠ **`null` 不能退化成 0**：0 是「已消耗完」，读不到是「不知道」。混成一个字
+ * 就是给用户报假额度（卡片显示「已耗尽」，而其实什么都没读到）。
+ */
+export function parsePointsValue(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null
+  if (typeof v === "bigint") return Number(v)
+  if (v === null || v === undefined || typeof v === "boolean") return null
+
+  // 去空白 + 千分位 + 统一负号（U+2212 −、en dash –、em dash —、全角 －）
+  let s = String(v).trim()
+  if (!s) return null
+  s = s.replace(/[−–—－]/g, "-").replace(/[,，\s\u00a0\u2009\u3000]/g, "")
+
+  // 会计写法 (31) / （31）= 负数
+  let sign = 1
+  const paren = /^[（(]([^）)]*)[)）]$/.exec(s)
+  if (paren) {
+    sign = -1
+    s = paren[1]
+  }
+
+  // 只读开头的数字，后面跟的单位（"积分" / "分" / "points" / "¥"）一律不管
+  const m = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)/.exec(s.replace(/^[¥$￥]/, ""))
+  if (!m) return null
+  const n = Number(m[0])
+  return Number.isFinite(n) ? sign * n : null
+}
+
+/**
  * 积分余额。
  *
  * expiring_quota_details 每一段是一个会过期的额度包，列表顺序 = 先过期的先扣。
+ *
+ * @returns {{total:number, totalKnown:boolean, totalRaw:unknown, expiring:Array, nextGrant:unknown}}
+ *   `total` 读不到时退化成 0，只是为了老调用方（签到前后对比）不用改判空；
+ *   判断「到底读没读到」看 `totalKnown`，`totalRaw` 留着排错。
  */
 export async function fetchPoints(token, org, host = SITES.cn.host) {
   const res = await fetch(`${host}/api/v1/quota/points/total`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const d = body?.data ?? {}
+  const total = parsePointsValue(d.total_points)
   return {
-    total: Number(d.total_points ?? 0),
-    expiring: (d.expiring_quota_details ?? []).map((q) => ({
-      points: Number(q.remaining_points ?? 0),
-      expiresAt: q.expires_at,
+    total: total ?? 0,
+    totalKnown: total !== null,
+    totalRaw: d.total_points,
+    expiring: (Array.isArray(d.expiring_quota_details) ? d.expiring_quota_details : []).map((q) => ({
+      points: parsePointsValue(q?.remaining_points) ?? 0,
+      expiresAt: q?.expires_at,
     })),
     nextGrant: d.next_cycle_grant ?? null,
   }
