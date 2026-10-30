@@ -34,11 +34,34 @@ const NOT_MANUALLY_COMPLETABLE = new Set(["first_ai_work"])
 /** 9303 = 该新人引导任务不支持手动完成 */
 const CODE_NOT_SUPPORTED = 9303
 
+// ═══ 同一账号同一时刻只允许一轮「签到 / 补新人任务」══════════════════════
+//
+// 两处会调它：magpie 每天一次的签到，和**登录成功那一刻**的补任务
+// （src/hooks/methods.mjs 的 kickoffOnboarding）。两者完全可能撞在一起 ——
+// 两轮都先读一遍「未完成」再各 PUT 一次，服务端未必去重，那就是重复领奖。
+//
+// 键必须是 host + org：宿主一个进程跑所有账号，只用 org 会在两站之间串号。
+// 撞上了就安静跳过（返回 done），让已经跑着的那一轮把活干完。
+const inFlight = new Set()
+
 /**
  * @param {{ jwt: string, org: string, host: string }} auth
  *   host 由调用方的插件闭包给（每个供应商绑定一个站点，不在 auth 里存站点代号）
  */
 export async function runCheckin(auth) {
+  const key = `${auth?.host || ""}|${auth?.org || ""}`
+  if (inFlight.has(key)) {
+    return { outcome: "done", message: "同一账号已有一轮补任务在跑，这一轮跳过（幂等）" }
+  }
+  inFlight.add(key)
+  try {
+    return await runCheckinOnce(auth)
+  } finally {
+    inFlight.delete(key)
+  }
+}
+
+async function runCheckinOnce(auth) {
   const host = auth.host
   const h = { jwt: auth.jwt, org: auth.org, host }
 

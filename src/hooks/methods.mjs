@@ -55,16 +55,40 @@ import {
 } from "../headless.mjs"
 
 /**
- * 账号刚加进来（登录成功）→ 一次性把「首次 AI 工作 / 首个对话」补掉。
+ * 账号刚加进来（登录成功）→ 立刻检查并补完「新人引导任务」。
  *
- * 不 await、不抛：建项目 + 发消息 + 兜底等结算最坏一分钟，登录必须立刻返回；
- * 失败也不该让登录报错。真正的兜底是签到 —— 两边共用同一道闸门
- * （`isAutoChatSettled`：每账号一次，永久），所以重复登录、刷新页面都不会重发。
+ * 主人 2026-10-30 的要求：八个任务不能只等每天一次的签到去跑 ——
+ * **第一次添加账号时就该检查「有没有没做完的」，没有就当场补完**。
+ *
+ * 不重复实现：pending 过滤 / `first_ai_work` 走消息通道 / 其余 7 项 PUT 这套逻辑
+ * 已经在 `tasks.runCheckin` 里写全了，这里只负责在登录成功那一刻**多触发一次**。
+ * 它和每日签到共用同一份幂等判据（服务端的 `status` / `reward_status`，加上本机
+ * `isAutoChatSettled` 那道一次性闸门），所以重复登录、重复触发都不会重复领奖。
+ *
+ * ⚠ **绝对不能 await**：
+ *   · 8 项 × 400ms 的服务端限流间隔 + 建项目 + 发消息 + 等结算，最坏几分钟；
+ *   · 登录的 `callback()` 一卡，magpie 那边就是「点了登录没反应」，用户以为死了。
+ *   失败也不许冒泡 —— 登录已经成功，补任务只是副作用，下一次签到会接着做。
+ *
+ * @param {object} c   站点闭包（要 `c.id` / `c.host`）
+ * @param {string} jwt
+ * @param {string} org
+ * @param {{runCheckin?:Function}} [deps] 只给测试注入用；不传就懒加载 `../tasks.mjs`
+ * @returns {Promise<void>} 生产路径**不要**等它；测试里可以 await 看结果
  */
-function kickoffFirstTask(c, jwt, org) {
-  import("../tasks.mjs")
-    .then((m) => m.ensureFirstTaskOnce({ jwt, org, host: c.host }))
-    .catch(() => {})
+export function kickoffOnboarding(c, jwt, org, deps = {}) {
+  const run =
+    typeof deps.runCheckin === "function"
+      ? () => deps.runCheckin({ jwt, org, host: c.host })
+      : // 懒加载：tasks.mjs 会拖进 chat-task / WebSocket 那一套，登录链路不需要它们
+        () => import("../tasks.mjs").then((m) => m.runCheckin({ jwt, org, host: c.host }))
+
+  return Promise.resolve()
+    .then(run)
+    .catch((e) => {
+      // 只写日志：补任务失败不能反过来把登录搞坏（下一次签到会接着做）
+      console.error(`[magicrew] 登录后补新人任务失败（${c.id}/${org}）：${e?.message ?? e}`)
+    })
 }
 
 /**
@@ -89,7 +113,7 @@ async function afterSignIn(c, jwt, org) {
  * 登录拿到 jwt + org 之后的统一收尾。
  *
  * 无头登录和浏览器登录最后都落到这里，保证「验证一次 / 建 key / 落 session /
- * 记组织 / 滚邀请码 / 补首任务 / 取昵称」这一串只有一份实现。
+ * 记组织 / 滚邀请码 / 补新人任务 / 取昵称」这一串只有一份实现。
  *
  * `orgs` 是候选组织列表（无头那条路拿不到「用户当前选中的组织」，只能猜）。
  * 按顺序用 `fetchPoints` 真验一遍，第一个验得过才算。
@@ -163,7 +187,7 @@ async function completeSignIn(c, jwt, org, orgs = [], preferredAccountId = null,
   noteOrg(c.id, picked)
   // 滚邀请码：把这个账号自己的码存成下一次用的；顺手看上级满没满
   await afterSignIn(c, jwt, picked)
-  kickoffFirstTask(c, jwt, picked)
+  kickoffOnboarding(c, jwt, picked)
   const who = await fetchWho(jwt, picked, c.host).catch(() => null)
 
   // ⚠ `accountId` 决定 magpie 是「替换」还是「新增」—— 同一个账号在两条登录路上
@@ -521,7 +545,7 @@ export function makeMethods(c) {
               // 等它落盘再返回：这条以前是 .catch(()=>{}) 发射后不管，
               // 一旦 host 进程在 callback 之后被回收，滚动就永远不生效
               await afterSignIn(c, local.jwt, local.org)
-              kickoffFirstTask(c, local.jwt, local.org)
+              kickoffOnboarding(c, local.jwt, local.org)
               const who = await fetchWho(local.jwt, local.org, c.host).catch(() => null)
               return {
                 type: "success",
@@ -604,7 +628,7 @@ export function makeMethods(c) {
               noteOrg(c.id, got.org)
               // 滚邀请码：把这个账号自己的码存成下一次用的（等落盘再返回）
               await afterSignIn(c, got.jwt, got.org)
-              kickoffFirstTask(c, got.jwt, got.org)
+              kickoffOnboarding(c, got.jwt, got.org)
               return {
                 type: "success",
                 access: key.apiKey,
@@ -681,7 +705,7 @@ export function makeMethods(c) {
             writeSession(c.id, jwt, org)
             noteOrg(c.id, org)
             await afterSignIn(c, jwt, org)
-            kickoffFirstTask(c, jwt, org)
+            kickoffOnboarding(c, jwt, org)
             // 卡片上显示手机号/邮箱/昵称，取不到就退回组织码
             const who = await fetchWho(jwt, org, c.host).catch(() => null)
             captureCredential({ address: who?.name || org, jwt, org, source: "state-import" })
