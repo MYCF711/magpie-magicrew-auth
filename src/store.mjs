@@ -127,7 +127,47 @@ function writeInvite(siteId, code) {
   return c
 }
 
-/** 这次登录该带的邀请码：开关 → 策略 → 记录 → 作者码 */
+/**
+ * 「最近一个注册成功的号」自己的邀请码 —— 自动模式唯一认的那个。
+ *
+ * 和滚动码（`magicrew-invite-<site>.json`，登录 / 签到都会刷）**分开存**：
+ * 滚动码只做兜底，永远不许覆盖这个文件。为什么（主人 2026-10-30 的要求）：
+ * 原来自动模式跟「最后一个登录 / 签到的号」，于是重登一个旧号、或者签到轮到一个
+ * 旧号，下一次注册就挂到旧号名下了 —— 那个号可能早就满额，新号白送。
+ * 要的是「每新注册一个号，下一个号就挂它」，所以只有注册成功那一刻才写这里。
+ */
+function registeredInvitePath(siteId) {
+  return join(cacheDir(), `magicrew-invite-registered-${siteId}.json`)
+}
+
+/** @returns {null | {code:string, org:string, at:string}} */
+export function readRegisteredInvite(siteId) {
+  try {
+    const v = JSON.parse(readFileSync(registeredInvitePath(siteId), "utf8"))
+    const code = typeof v?.code === "string" ? v.code.trim() : ""
+    if (!code) return null
+    return { code, org: String(v?.org || "").trim(), at: String(v?.at || "") }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 只在「注册成功」那一刻调用（`src/hooks/methods.mjs` 的 `afterSignIn`）。
+ * 普通登录 / 签到只更新滚动码，**不许调这个**。
+ */
+export function noteRegisteredInvite(siteId, { code, org } = {}) {
+  const c = String(code || "").trim()
+  if (!c) return null
+  const entry = { code: c, org: String(org || "").trim(), at: new Date().toISOString() }
+  try {
+    mkdirSync(dirname(registeredInvitePath(siteId)), { recursive: true })
+    writeFileSync(registeredInvitePath(siteId), JSON.stringify(entry))
+  } catch {}
+  return entry
+}
+
+/** 这次登录该带的邀请码：开关 → 策略 → 最后注册的新号 → 滚动码 → 作者码 */
 function inviteToUse(siteId) {
   const live = liveOrgs(siteId)
   // 账号文件读不到 / 一个号都没有时按「不校验」处理，行为与以前一致
@@ -143,6 +183,14 @@ function inviteToUse(siteId) {
     // ② 首选账号自己的码（每次现算：用户可能在 magpie 账号页换过首选）
     const pick = preferredInviteOf(siteId)
     if (pick && !(known && pick.org && !live.has(pick.org))) return pick.code
+  }
+
+  // 自动模式：先认「最后一个注册成功的新号」。它比滚动码优先 —— 滚动码每次登录 /
+  // 签到都会刷新，拿它当第一个判据就退回「跟随最后一个登录 / 签到」的老行为了。
+  const registered = readRegisteredInvite(siteId)
+  if (registered?.code) {
+    // 那个号被删了（不在 plugin-auth）→ 这个记录作废，往下回落
+    if (!known || !registered.org || live.has(registered.org)) return registered.code
   }
 
   const rolling = readInvite(siteId)
@@ -210,8 +258,17 @@ export function authorInvite(siteId) {
 //
 // 只有两种模式（**没有第三种**）：
 //
-//   开关关（默认）  自动 —— 跟随「最后一个登录 / 签到的号」的滚动码
+//   开关关（默认）  自动 —— 跟随「最后一个注册成功的新号」自己的码
+//                            （2026-10-30 起；之前是「最后一个登录 / 签到的号」——
+//                             重登旧号 / 签到旧号会把码换回去，不对）
 //   开关开          首选 —— 挂到 magpie 账号页「首选」那个账号
+//
+// ⚠ 「列一个账号下拉框让人选」在当前 magpie 上**做不到**：
+//   magpie 的插件选项值只存布尔（`settings.PluginOptions map[string]map[string]bool`，
+//   internal_settings_settings.go:276-279；设置接口 POST /api/settings/plugin-option
+//   的入参也只有 `{Provider, Key, On bool}`，internal_gui_api.go:1945-1962）。
+//   想按账号选，要么给每个账号生成一个开关（账号一变就得重载插件，且一排开关比下拉框更难用），
+//   要么等 magpie 本体给 options 加枚举类型。详见 README「邀请码」一节。
 //
 // 开关本身不是这个文件画的：它是 magpie 的 `auth.options`（供应商编辑器里的
 // 那个 Off/On 开关，和 workbuddy 的「Free models only」同一套机制）。插件通过

@@ -33,9 +33,13 @@ const {
   authorInvite,
   inviteFirstOn,
   preferredInviteOf,
+  readInvite,
   readInvitePolicy,
+  readRegisteredInvite,
   writeInvitePolicy,
   clearInvitePolicy,
+  noteRegisteredInvite,
+  rollInvite,
   inviteToUse,
   preferredOrg,
   setInviteOptionReader,
@@ -244,6 +248,82 @@ check("没有滚动文件 + 开关关 → 回落到作者码", () => {
   rmSync(join(CACHE, `magicrew-invite-${SITE}.json`), { force: true })
   assert.equal(inviteToUse(SITE), AUTHOR)
   seedRolling()
+})
+
+// ═══ ③b 自动模式跟谁：最后注册成功的新号（2026-10-30 主人要求）══════════
+console.log("\n自动模式的落点 —— 跟「最后注册成功的新号」，不跟「最后登录 / 签到的号」")
+
+const REG_FILE = join(CACHE, `magicrew-invite-registered-${SITE}.json`)
+const REGISTERED = "IVREGISTER01"
+const clearRegistered = () => rmSync(REG_FILE, { force: true })
+
+check("没有注册记录 → 行为与以前一样（用滚动码）", () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  clearRegistered()
+  assert.equal(readRegisteredInvite(SITE), null)
+  assert.equal(inviteToUse(SITE), ROLLING)
+})
+
+check("有注册记录 → 优先于滚动码", () => {
+  setSwitch(false)
+  noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgA" })
+  assert.equal(readRegisteredInvite(SITE).code, REGISTERED)
+  assert.equal(readRegisteredInvite(SITE).org, "orgA")
+  assert.equal(inviteToUse(SITE), REGISTERED, "滚动码还是 ROLLING，但不该被用")
+})
+
+await checkAsync("签到 / 普通登录的滚动（rollInvite）只刷新滚动码，覆盖不了注册号", async () => {
+  const orig = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/v1/invitations/info")) {
+      return new Response(JSON.stringify({ code: 1000, data: { invite_code: "IVROLLNEW01", invite_count: 0, invited_users: [] } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }
+    throw new Error(`unexpected fetch ${url}`)
+  }
+  try {
+    await rollInvite(SITE, "jwt-orgC", "orgC", SITES.cn.host)
+  } finally {
+    globalThis.fetch = orig
+  }
+  assert.equal(readInvite(SITE), "IVROLLNEW01", "滚动码该被刷成新的")
+  assert.equal(inviteToUse(SITE), REGISTERED, "自动模式仍认注册号")
+  // rollInvite 顺手把「这个账号的码」也记进了 codes 表，这里恢复原样
+  seedCodes()
+  seedRolling()
+})
+
+check("注册号被删（不在 plugin-auth）→ 记录作废，回落滚动码", () => {
+  noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgDEAD" })
+  assert.equal(inviteToUse(SITE), ROLLING)
+})
+
+check("开关开时，首选仍然优先于注册记录", () => {
+  noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgA" })
+  setSwitch(true)
+  clearInvitePolicy(SITE)
+  seedLogins("orgC")
+  const used = inviteToUse(SITE)
+  seedLogins("orgA")
+  setSwitch(false)
+  assert.equal(used, OTHER_CODE, "首选 orgC 的码优先")
+})
+
+check("空码不写（拿不到码时别留一条空记录把滚动码顶掉）", () => {
+  setSwitch(false)
+  clearRegistered()
+  noteRegisteredInvite(SITE, { code: "   ", org: "orgA" })
+  assert.equal(readRegisteredInvite(SITE), null)
+  assert.equal(inviteToUse(SITE), ROLLING)
+})
+
+check("删掉注册记录 → 回到滚动码（老用户升级上来的状态）", () => {
+  setSwitch(false)
+  clearRegistered()
+  assert.equal(inviteToUse(SITE), ROLLING)
 })
 
 // ═══ ④ 存储层 ═════════════════════════════════════════════════════════
