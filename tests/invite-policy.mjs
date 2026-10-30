@@ -36,6 +36,7 @@ const {
   readInvite,
   readInvitePolicy,
   readRegisteredInvite,
+  resolveInvite,
   writeInvitePolicy,
   clearInvitePolicy,
   noteRegisteredInvite,
@@ -45,7 +46,7 @@ const {
   setInviteOptionReader,
   backfillInviteCodes,
 } = await import("../src/store.mjs")
-const { makeMethods, inviteNote } = await import("../src/hooks/methods.mjs")
+const { makeMethods, inviteNote, maskName } = await import("../src/hooks/methods.mjs")
 const { siteCtx, SITES } = await import("../src/context.mjs")
 
 const c = siteCtx(SITES.cn)
@@ -430,12 +431,73 @@ check("国内站 3 条、国际站 4 条，且都不含「邀请码」", () => {
 })
 
 // ═══ ⑦ inviteNote ═════════════════════════════════════════════════════
-console.log("\ninstructions 里的「本次邀请上级」—— 每次点登录现算")
+//
+// 0.3.68 起**开关关着也写这一行**：主人要「看得见这次挂在哪个账号名下」。
+// 选不了（magpie 的插件选项只存布尔），但至少看得见，而且账号名一律打码。
 
-await checkAsync("开关关 → 不写上级（自动模式没什么可说的）", async () => {
+console.log("\ninstructions 里的「本次邀请上级」—— 每次点登录现算，开关关也要说清是谁")
+
+await checkAsync("打码：手机号 / 邮箱 / 随机串 / 已打码的原样", async () => {
+  assert.equal(maskName("18970098051"), "189****8051")
+  assert.equal(maskName("+8618970098051"), "189****8051")
+  assert.equal(maskName("189****8051"), "189****8051", "已经打码的原样返回")
+  assert.equal(maskName("m18970098051_1@163.com"), "m1****@163.com")
+  assert.equal(maskName("1451895195@qq.com"), "14****@qq.com")
+  assert.equal(maskName("nmosvnfujqe7"), "nmos…jqe7")
+  assert.equal(maskName(""), "")
+  // 整串手机号 / 邮箱不许出现在文案里
+  assert.ok(!inviteNote(c).includes("18970098051"))
+})
+
+await checkAsync("开关关 + 有注册记录 → 写「最后注册的新号」的账号名", async () => {
   setSwitch(false)
   clearInvitePolicy(SITE)
-  assert.doesNotMatch(inviteNote(c), /本次邀请上级/)
+  noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgA" })
+  const note = inviteNote(c)
+  assert.match(note, /本次邀请上级：181\*\*\*\*632（最后注册的新号）/, `实际：${note}`)
+  // 文案说的那个号，必须就是实际会用的那个码（两边同源，不许各判各的）
+  assert.equal(inviteToUse(SITE), REGISTERED, "文案里那个号的码就是这次要用的码")
+  assert.equal(resolveInvite(SITE).org, "orgA", "resolveInvite 要给出 org，文案才有名字可写")
+  clearRegistered()
+})
+
+await checkAsync("开关关 + 没有注册记录 → 写滚动码那个账号", async () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  clearRegistered()
+  // 把滚动码换成 orgA 自己的码，这样认得出归属
+  writeFileSync(join(CACHE, `magicrew-invite-${SITE}.json`), JSON.stringify({ code: ACCOUNT_CODE, at: "x" }))
+  const note = inviteNote(c)
+  assert.match(note, /本次邀请上级：181\*\*\*\*632（最后一次登录 \/ 签到的号）/, `实际：${note}`)
+  seedRolling()
+})
+
+await checkAsync("开关关 + 什么都没有 → 说清是作者的码", async () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  clearRegistered()
+  rmSync(join(CACHE, `magicrew-invite-${SITE}.json`), { force: true })
+  const note = inviteNote(c)
+  assert.match(note, /本次邀请上级：作者的码/, `实际：${note}`)
+  seedRolling()
+})
+
+await checkAsync("邮箱账号（国际站那种）→ 文案里是打码形态，不露整条邮箱", async () => {
+  setSwitch(false)
+  clearInvitePolicy(SITE)
+  writeFileSync(
+    join(CONFIG, "plugin-auth.json"),
+    JSON.stringify({
+      [`${SITE}#abc123`]: { org: "orgA", accountId: "181****632", type: "oauth", jwt: "jwt-orgA" },
+      [`${SITE}#mail1`]: { org: "orgMail", accountId: "m18970098051_1@163.com", type: "oauth", jwt: "jwt-mail" },
+    }),
+  )
+  noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgMail" })
+  const note = inviteNote(c)
+  assert.match(note, /m1\*\*\*\*@163\.com/, `实际：${note}`)
+  assert.ok(!note.includes("m18970098051_1@163.com"), "不许露完整邮箱")
+  clearRegistered()
+  seedAuth()
 })
 
 await checkAsync("开关开 + 首选 → 写「magpie 账号页的首选」", async () => {
@@ -456,14 +518,17 @@ await checkAsync("开关开 + 满额换过 → 写「首选已满，自动换的
   clearInvitePolicy(SITE)
 })
 
-await checkAsync("开关开但还没有首选 → 明说「自动」，不留空", async () => {
+await checkAsync("开关开但还没有首选 → 说清是「按自动的来」，并带上实际的号", async () => {
   setSwitch(true)
   clearInvitePolicy(SITE)
   seedLogins("none")
   // seedLogins("none") 时 preferredOrg 会退回 order/第一行 —— 要真没有首选就得拿掉 logins.json
   rmSync(join(CONFIG, "logins.json"), { force: true })
-  assert.match(inviteNote(c), /自动/, `实际：${inviteNote(c)}`)
+  const note = inviteNote(c)
+  assert.match(note, /自动/, `实际：${note}`)
+  assert.match(note, /本次邀请上级：.+/, `实际：${note}`)
   seedLogins("orgA")
+  setSwitch(false)
 })
 
 // ═══ ⑧ backfill ═══════════════════════════════════════════════════════
