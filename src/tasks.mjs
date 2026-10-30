@@ -158,7 +158,14 @@ export async function runCheckin(auth) {
   } catch {}
 
   const gained = after - before
-  const head = gained > 0 ? `积分 +${gained}（${before} → ${after}）` : `积分 ${after}（本次无变动）`
+  // 余额可能是负数（上游欠费，见 CHANGELOG 0.3.65）：签到报告也别把 `-32` 甩给用户。
+  // 增量那一句保留 before → after 的对照（那是事实），欠的那一头写成「已欠费 32」。
+  const pointsText = (n) => (n < 0 ? `已欠费 ${-n}` : `${n}`)
+  const head = gained > 0
+    ? `积分 +${gained}（${pointsText(before)} → ${pointsText(after)}）`
+    : after < 0
+      ? `${pointsText(after)} 积分（本次无变动）`
+      : `积分 ${after}（本次无变动）`
   const msg = [head, ...parts].join("。")
 
   return {
