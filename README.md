@@ -1,12 +1,16 @@
-# 超级麦吉 / MagiCrew for magpie
+# 超级麦吉 Magicrew for magpie
 
 **一个包，两个供应商：国内的 GLM / DeepSeek / Qwen / Kimi，国际再加 Claude / GPT / Gemini —— 原样走它的 OpenAI 兼容网关。**
 
-超级麦吉（`letsmagic.cn`）和 MagiCrew（`magicrew.ai`）是同一产品的两套云。这个插件把它们各接成一个独立供应商 —— 在 magpie 的供应商列表、用量概览、模型目录里各占一行，不聚合、不互相覆盖登录态。
+超级麦吉（`letsmagic.cn`，官网英文名 **Super Magic**）和 MagiCrew（`magicrew.ai`）是同一产品的两套云。这个插件把它们各接成一个独立供应商 —— 在 magpie 的供应商列表、用量概览、模型目录里各占一行，不聚合、不互相覆盖登录态。
+
+> 显示名按「中文 + English」，英文照抄官网：插件卡片是 **超级麦吉 Magicrew**，
+> 两个供应商分别是 **超级麦吉 Super Magic** 与 **麦吉 MagiCrew**（`Super Magic` 是两个词；
+> MagiCrew 官网没有中文名，「麦吉」取自官网正文里对自家产品的简称）。
 
 ```
-国内   超级麦吉   www.letsmagic.cn     GLM / DeepSeek / Qwen / Kimi / MiniMax / MiMo / 豆包
-国际   MagiCrew   www.magicrew.ai      上面全部，再加 Claude / GPT / Gemini
+国内   超级麦吉 Super Magic   www.letsmagic.cn     GLM / DeepSeek / Qwen / Kimi / MiniMax / MiMo / 豆包
+国际   麦吉 MagiCrew          www.magicrew.ai      上面全部，再加 Claude / GPT / Gemini
 协议   OpenAI Chat Completions —— 原生，不是翻译出来的
 计费   积分（预充值，不是月度配额）
 凭证   登录一次 30 天全自动：api_key 两小时自续，refresh_token 自滚
