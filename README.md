@@ -4,9 +4,14 @@
 
 超级麦吉（`letsmagic.cn`，官网英文名 **Super Magic**）和 MagiCrew（`magicrew.ai`）是同一产品的两套云。这个插件把它们各接成一个独立供应商 —— 在 magpie 的供应商列表、用量概览、模型目录里各占一行，不聚合、不互相覆盖登录态。
 
-> 显示名按「中文 + English」，英文照抄官网：插件卡片是 **超级麦吉 Magicrew**，
+> 显示名按「中文 + English」，英文照抄官网：插件卡片是 **超级麦吉 Magicrew**
+> （写在 `package.json` 的 `magpie.name`，`name` 只做 ASCII 依赖键 —— 见下），
 > 两个供应商分别是 **超级麦吉 Super Magic** 与 **麦吉 MagiCrew**（`Super Magic` 是两个词；
 > MagiCrew 官网没有中文名，「麦吉」取自官网正文里对自家产品的简称）。
+>
+> ⚠ **装过 0.3.69 的话要重装一次**：那一版的包名带中文，`magpie plugin update` 会报
+> `unrecognised dependency format`。`magpie plugin rm github:MYCF711/magpie-magicrew-auth`
+> 再 `plugin add` 同一个地址即可（登录态不丢）。
 
 ```
 国内   超级麦吉 Super Magic   www.letsmagic.cn     GLM / DeepSeek / Qwen / Kimi / MiniMax / MiMo / 豆包

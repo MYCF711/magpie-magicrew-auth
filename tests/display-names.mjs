@@ -64,16 +64,27 @@ const shape = (label, v) => {
 }
 
 // ═══ ① 卡片标题 ═══════════════════════════════════════════════════════
-console.log("① 插件卡片标题 —— package.json 的 name")
+//
+// 0.3.70 起按脚手架新约定（2026-10-31）分两处：
+//   package.json.name        = bun 依赖键 / npm 名 —— **必须是 ASCII slug**
+//                              （有空格或中文会让 magpie plugin update 报
+//                               `unrecognised dependency format`)
+//   package.json.magpie.name = 卡片标题（<中文> <English>，可带空格）
+console.log("① 卡片标题 —— magpie.name 放显示名，name 只做 slug")
 
-check("就是「超级麦吉 Magicrew」", () => {
-  assert.equal(pkg.name, "超级麦吉 Magicrew", `实际：${pkg.name}`)
+check("包名是 ASCII slug（bun 依赖键 / npm 名）", () => {
+  assert.equal(pkg.name, "magpie-magicrew-auth", `实际：${pkg.name}`)
+  assert.match(pkg.name, /^[a-z0-9][a-z0-9._-]*$/, "只能小写 ASCII，不能有空格 / 中文 / 大写")
 })
 
-check("形状是 <中文> <English>，不是 npm 包名", () => {
-  shape("package.json.name", pkg.name)
-  assert.notEqual(pkg.name, registry.package, "显示名不许等于 npm 包名")
-  assert.ok(!/^[a-z0-9-]+$/.test(pkg.name), "不许是 npm 风格的小写包名")
+check("magpie.name 就是「超级麦吉 Magicrew」", () => {
+  assert.equal(pkg.magpie?.name, "超级麦吉 Magicrew", `实际：${pkg.magpie?.name}`)
+})
+
+check("magpie.name 形状是 <中文> <English>，不是 npm 包名、不是 slug", () => {
+  shape("package.json.magpie.name", pkg.magpie?.name)
+  assert.notEqual(pkg.magpie?.name, registry.package, "显示名不许等于 npm 包名")
+  assert.notEqual(pkg.magpie?.name, pkg.name, "显示名不许等于依赖键（那样卡片上就是一串 slug）")
 })
 
 check("npm 包名仍是 magicrew-auth（发布时注入，不受显示名影响）", () => {
@@ -83,6 +94,11 @@ check("npm 包名仍是 magicrew-auth（发布时注入，不受显示名影响�
   const m = pub.match(/const NPM_NAME = "([^"]+)"/)
   assert.ok(m, "publish-npm.mjs 里要有 NPM_NAME")
   assert.equal(m[1], registry.package)
+  assert.notEqual(pkg.name, m[1], "依赖键与 npm 名不同，publish:npm 才有得换（相同会被脚本拒绝）")
+})
+
+check("registry 条目的显示名与 magpie.name 一致", () => {
+  assert.equal(registry.name, pkg.magpie.name, `registry=${registry.name} / magpie.name=${pkg.magpie.name}`)
 })
 
 // ═══ ② 两个供应商的 name ═════════════════════════════════════════════

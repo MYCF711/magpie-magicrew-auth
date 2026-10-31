@@ -101,8 +101,29 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "没配 NPM_TOKEN —— 跳过 npm 发布（git 源与 Release 不受影响）"
+          VERSION=$(node -p "require('./package.json').version")
+          NPM_NAME=$(node -p "require('./registry-entry.json').package")
+          # 同版本已经在 npm 上 = 发布已完成（比如本地 npm run publish:npm 先发过），
+          # tag 推上来后 CI 再发会 E409；这里跳过并保持绿。
+          if npm view "$NPM_NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::warning title=npm 版本已存在::$NPM_NAME@$VERSION 已在 npm；skip publish（不发第二次）"
             exit 0
           fi
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error title=NPM_TOKEN 未配置::没有它 npm 发不出去 —— 要么配 secret，要么本地 npm run publish:npm"
+            exit 1
+          fi
+          set +e
           npm run publish:npm
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ]; then
+            # 发布刚完成时 npm view 可能还没刷新（staged），publish 会 E409；
+            # 等 5 秒再确认，同版本已在 npm 就当成功，不把 workflow 弄红。
+            sleep 5
+            if npm view "$NPM_NAME@$VERSION" version >/dev/null 2>&1; then
+              echo "::warning title=npm 版本已存在::$NPM_NAME@$VERSION already published；按成功处理"
+              exit 0
+            fi
+            exit "$code"
+          fi

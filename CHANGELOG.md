@@ -1,3 +1,67 @@
+## 0.3.70 — 2026-10-31
+
+**国际站图标不再是「一小坨」；包名回到 ASCII slug，显示名搬到 `magpie.name`**
+
+### 一、图标（主人截图：`● 麦吉 MagiCrew` 那个图标比旁边小一圈）
+
+量出来的原因很简单 —— **不是图错，是留白太多**：
+
+| 图 | 原始尺寸 | 内容 alpha bbox | 内容占画布 |
+|---|---|---|---|
+| 国际 `ICON_INTL` | 200×200（官网 favicon 原图） | `(27,27,173,173)` = 146×146 | **73%** |
+| └ 之前缩到 128×128 | 128×128 | `(15,15,113,113)` = 98×98 | **77%** |
+| 国内 `ICON_CN` | 512×512 | 裁完就是 `(0,3,128,125)` | 95%（满格，正常） |
+
+四周那圈是**透明**的（不是黑底），所以在卡片上就是「图标比邻居小一圈」。
+
+**改法**：**从原始 200×200 重新裁，不是把旧 98px 放大**（放大只会糊）：
+
+```
+200×200 原图  →  裁到内容 bbox (27,27,173,173)  →  LANCZOS 等比到 128×128  →  alpha<8 归 0
+```
+
+原图 URL 留在 `src/icons.mjs` 的头注释里（`teamshareos-app-…/DagiiMmeda4gAxmHsJbZM.png`），
+以后换尺寸直接重裁。
+
+**验证**（`node tests/icon-size.mjs`，8 条全过；判据是解码 data URI 逐像素量）：
+
+```
+ICON_INTL  128×128  alpha bbox = (0,0,128,128)   内容占比 100%
+           四角（左下/右下/右上/左上）= (0,0,0,0) (0,0,0,0) (0,0,0,0) (0,0,0,0)
+ICON_CN    128×128  alpha bbox = (0,3,128,125)   四角同样全 0（没动它）
+```
+
+四角透明是必须的：实心方块的四角在卡片上会顶出黑边。测试自己用 `node:zlib`
+解 PNG（IHDR/IDAT + 五种 filter），零依赖，CI 上也能跑。
+
+### 二、包名回到 slug，显示名搬到 `magpie.name`（脚手架 0.3.6 的新规矩）
+
+0.3.69 把显示名直接写进了 `package.json.name`，**那是个坑**：`name` 同时是 bun 的依赖键，
+带空格 / 中文会让（脚手架实测记录，bun 1.4.4）：
+
+```
+magpie plugin update  →  unrecognised dependency format: 超级麦吉 Magicrew
+```
+
+| 位置 | 值 | 作用 |
+|---|---|---|
+| `package.json.name` | `magpie-magicrew-auth` | bun 依赖键 / npm 名（ASCII slug） |
+| `package.json.magpie.name` | `超级麦吉 Magicrew` | 卡片标题（`<中文> <English>`） |
+| `package.json.version` | `0.3.70` | — |
+
+**升级须知**：0.3.69 装出来的依赖键是中文，`plugin update` 会失败 ——
+`magpie plugin rm github:MYCF711/magpie-magicrew-auth` + `magpie plugin add` 同一个地址即可
+（`Remove()` 只动 `plugins.json` 与 bun 依赖，**不动 `plugin-auth.json`，登录态不丢**）。
+
+### 三、`release.yml` 顺手补上 npm 守卫
+
+之前 CI 的 npm 步骤在缺 `NPM_TOKEN` 时静默 `exit 0`（假绿），而且本地已经发过同一版时
+CI 再发会 E409。现在：
+
+1. 先 `npm view <包名>@<版本>` —— **已在 npm 上就 `::warning` + 跳过**（本地发过不会再红）；
+2. 没发过又缺 `NPM_TOKEN` → `::error` + **失败**（不再假装成功）；
+3. 发布失败后再查一次，staged 窗口里的 E409 按成功处理。
+
 ## 0.3.69 — 2026-10-31
 
 **卡片标题与两个供应商都改成「中文 + English」，英文照抄官网写法**
