@@ -1,3 +1,61 @@
+## 0.3.69 — 2026-10-31
+
+**卡片标题与两个供应商都改成「中文 + English」，英文照抄官网写法**
+
+### 主人原话
+
+> 显示名 = `<中文> <English>`，英文部分照抄厂商官方写法的大小写；不许直接显示 npm 包名。
+
+### 一、改名前后的名字
+
+| 位置 | 原来 | 现在 |
+|---|---|---|
+| 插件卡片标题（`package.json` 的 `name`） | `Magicrew` | **`超级麦吉 Magicrew`** |
+| 供应商 `magicrew`（国内） | `超级麦吉` | **`超级麦吉 Super Magic`** |
+| 供应商 `magicrew-intl`（国际） | `MagiCrew` | **`麦吉 MagiCrew`** |
+| npm 包名（`publish:npm` 注入，没变） | `magicrew-auth` | `magicrew-auth` |
+
+### 二、官方写法是怎么查的（贴原文）
+
+| 站点 | 中文 | English | 出处 |
+|---|---|---|---|
+| letsmagic.cn | 超级麦吉 | **Super Magic**（两个词） | `/login`、`/en`、`/workspace` 三页 `<title>` 原文都是 `Super Magic - Lighthouse Engine Next-Gen Enterprise AI Application Engine`；`/login` 的 meta description：`Super Magic is the next-generation enterprise AI application innovation engine launched by Lighthouse Engine.` |
+| magicrew.ai | 无官方中文名 | **MagiCrew** | 首页 `og:site_name` = `MagiCrew`；连它自己的中文版 `/zh` 标题也照写 `MagiCrew - 一个平台，替代你现在为 AI 工具支付的所有费用`，正文里没有「麦吉」字样 |
+| 品牌英文 | — | **Magicrew** | letsmagic.cn 首页英文 eyebrow 原文 `"eyebrow":"WHY MAGICREW"`（同一区块的列头写的是「超级麦吉」）|
+
+**两处按证据修了主人的示例**：
+
+- `SuperMagic` → **`Super Magic`**：官网三处 `<title>` 都是分开的两个词。
+- 国际站补上中文「麦吉」：`check.mjs` 硬性要求「必须含中文 + 必须含 English + 必须有空格」，
+  而 MagiCrew 上游没给过官方中文名。取「麦吉」的依据是**官网自己就这么简称**
+  （letsmagic.cn 首页正文 16 处「麦吉帮我通读…」「让麦吉直接…」「麦吉按能力…」），
+  且 `超级麦吉 = 超级 + 麦吉`，麦吉 就是 Magi 的音译。上游哪天给出 MagiCrew 的官方
+  中文名，改 `src/context.mjs` 那一行即可（有测试钉着，改完必须同步改 `tests/display-names.mjs`）。
+
+### 三、机制：卡片标题不是 displayName，是 bun 的依赖键
+
+```
+bun 按包内 name 写依赖键   plugins/package.json:  "超级麦吉 Magicrew": "github:MYCF711/magpie-magicrew-auth"
+        ↓
+magpie 反查键名当标题      gitName(spec) → Name()
+```
+
+⇒ **已装用户要重装（`magpie plugin rm` + `plugin add`）才会看到新标题**，
+`plugin update` 只换内容、不改依赖键。npm 那边包名没变（`magicrew-auth`），
+已装用户照旧收更新。
+
+### 四、验证
+
+- 新增 `node tests/display-names.mjs`：**8 条全过** —— 卡片标题就是 `超级麦吉 Magicrew`
+  且形状合规 / 两个供应商名各自钉死 / **`config()` 真的把名字写进 `cfg.provider[*].name`**
+  （不是只改了常量）/ 英文大小写（`Super Magic` 两词、`MagiCrew` 大写 C，反向断言
+  `SuperMagic` 与 `Magicrew` 都不许出现在供应商名里）/ 显示名不许等于 npm 包名或 provider id /
+  `publish-npm.mjs` 的 `NPM_NAME` 与 `registry-entry.json` 的 `package` 一致。
+- 全量离线测试 16 个文件（CI 同款循环）全过，`TOTAL_FAIL=0`；
+  `check.mjs` 通过 42 · 警告 4 · 失败 0；`npm pack --dry-run` → `Magicrew-0.3.69.tgz`。
+- 真机：`magpie plugin rm` + `plugin add github:MYCF711/magpie-magicrew-auth` 后
+  `magpie plugin list` 的显示见下（本机实测）。
+
 ## 0.3.68 — 2026-10-31
 
 **登录页写明「这次邀请码挂在哪个账号名下」，开关关着也写；账号名一律打码**
