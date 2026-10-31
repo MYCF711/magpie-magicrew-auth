@@ -58,7 +58,7 @@ async function checkAsync(name, fn) {
 }
 
 const json = (body) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } })
-const site = { id: SITES.cn.id, host: SITES.cn.host, web: SITES.cn.web, SHORT: "超级麦吉" }
+const site = { id: SITES.cn.id, host: SITES.cn.host, web: SITES.cn.web, SHORT: "超级麦吉 Super Magic" }
 const authOf = (org) => ({ jwt: "jwt-test", org, host: SITES.cn.host })
 
 const { kickoffOnboarding, makeMethods } = await import("../src/hooks/methods.mjs")

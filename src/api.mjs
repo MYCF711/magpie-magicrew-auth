@@ -1,9 +1,9 @@
-// Magicrew / 超级麦吉 的 HTTP 层
+// Magicrew / 超级麦吉 Super Magic 的 HTTP 层
 //
 // 一个产品两个站，后端不同、模型也不同：
 //
-//   国内  超级麦吉   www.letsmagic.cn        i-magic-service.letsmagic.cn
-//   国际  MagiCrew   www.magicrew.ai         待定（客户端是同一个包，API host 还没摸到）
+//   国内  超级麦吉 Super Magic   www.letsmagic.cn   i-magic-service.letsmagic.cn
+//   国际  MagiCrew              www.magicrew.ai    待定（客户端是同一个包，API host 还没摸到）
 //
 // 每个站点两个 base：
 //   业务 API   <host>/api/v1/...      要网页 JWT
@@ -32,7 +32,7 @@ const UA =
 export const SITES = {
   cn: {
     id: "magicrew",
-    label: "国内 · 超级麦吉",
+    label: "国内 · 超级麦吉 Super Magic",
     web: "https://www.letsmagic.cn",
     host: "https://i-magic-service.letsmagic.cn",
   },
