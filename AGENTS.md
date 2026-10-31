@@ -89,7 +89,8 @@ PR 的 `rules` 检查全绿并合并后，才从与 `origin/main` 一致的提�
 | 35 | 额度卡片上显示 `-1` / `-31` / `-153 积分`，用户以为「邀请注册的号积分被清空 / 变成负数了」 | **上游真的给负数**（2026-10-30 逐字段核对）：`GET /api/v1/quota/points/total` 原样回 `"total_points":-31`（number，不是字符串、没有单位），与 `quotas.json` 里存的一致 —— 既不是把「已用」读成「剩余」，也不是解析错；流水接口仍 `500`，逐笔扣费拿不到。**与邀请注册无关**：国内 0 邀请的号也负、国际 54 邀请的号是 +107。0.3.65 起窗口 `balance` 钳到 0、文案写「已欠费 N 积分」（0 写「已耗尽」）、顶层 `balance` 不再吐负数；读不到（缺字段 / `null`）返回 `error` 而不是 0。判据：`node tests/negative-balance.mjs`；真机复核 `node _probe/points-ledger.mjs` 看不到流水（500）就说明只能靠余额变化 | CHANGELOG 0.3.65 · `src/api.mjs` 的 `parsePointsValue` · `src/hooks/usage.mjs` 头 |
 | 36 | 新号注册完，八个新人任务当天没补上，要等第二天签到；或者反过来——登录后补任务把登录卡住几十秒 | 0.3.66 起四条登录路成功那一刻都会 `kickoffOnboarding()` → 后台触发 `runCheckin`（pending 过滤 + `first_ai_work` 走消息通道 + 其余 7 项 PUT 全在它里面，不要另写一份）。**绝不能 await**：8 项 × 400ms + 建项目 + 等结算最坏几分钟，await 就是「点登录没反应」。登录补任务会和每日签到抢同一个账号 ⇒ `runCheckin` 有进程内锁（键是 `host|org`，不是 `org`——宿主一个进程跑所有账号，只用 org 会两站串号），撞上直接返回 `done`。判据：`node tests/onboarding-kickoff.mjs`（fire-and-forget、callback < 1s、连跑两轮 0 次重复 PUT、并发两轮只跑一轮） | CHANGELOG 0.3.66 · `src/hooks/methods.mjs` 的 `kickoffOnboarding` · `src/tasks.mjs` 的 `runCheckin` |
 | 37 | 登录页不写「这次邀请码挂在哪个账号名下」；或者写了却把整条手机号 / 邮箱露出去 | 0.3.68 起 `inviteNote()` **开关关着也写**这一行（原来只在开关开时写）。两件事必须同时做到：① **文案与实际用的码同源** —— `store.resolveInvite(siteId)` 一次算出 `{code, source, org}`，`inviteToUse()` 就是它的 `.code`，文案用同一份结果（各判各的早晚「文案说 A、实际用 B」）；② **账号名一律过 `maskName()`** —— 手机 `189****8051`、邮箱 `m1****@163.com`、org 那种串 `nmos…jqe7`，已经是打码形态的原样返回。名字取 `store.accountNameOf(siteId, org)`（只读 plugin-auth 的 accountId）。⚠ 用户**自己刚敲进去**的那个标识照旧原样回显（那是他输入的内容，不是别人的号）。位置必须是 `authorize()` 的 `instructions`，**不能放 `label`**（坑 31：label 被 magpie 缓存，不会刷新）。判据：`node tests/invite-policy.mjs`（39 条）；看真实文案 `node _probe/invite-note-instructions.mjs` | CHANGELOG 0.3.68 · `src/hooks/methods.mjs` 的 inviteNote / maskName · `src/store.mjs` 的 resolveInvite |
-| 38 | 卡片标题 / 供应商名显示成纯英文，或者直接把 npm 包名（`magicrew-auth`）当标题 | 显示名约定（2026-10-31，脚手架 UPDATING 第三节）：`<中文> <English>`，英文**照抄官网大小写**，**不许显示 npm 包名**；卡片标题同样适用。本仓库：卡片 = `超级麦吉 Magicrew`（`package.json.name`）；供应商 = `超级麦吉 Super Magic`（英文是**两个词** —— letsmagic.cn 的 `/login`、`/en`、`/workspace` 三页 `<title>` 原文都是 `Super Magic - Lighthouse Engine Next-Gen Enterprise AI Application Engine`）与 `麦吉 MagiCrew`（官网 `og:site_name` = `MagiCrew`，大写 C；官网没给过 MagiCrew 的中文名，而 `check.mjs` 硬性要求中英并列 ⇒ 取官网正文里对自家产品的简称「麦吉」；上游哪天给官方中文名，改 `src/context.mjs` 那行 + 同步测试）。⚠ **卡片标题是 bun 的依赖键**：改 `package.json.name` 之后已装用户必须 `magpie plugin rm` + `plugin add` 重装才看得见，`plugin update` 只换内容不改键。判据：`node tests/display-names.mjs`（8 条，含「config() 真的把名字写进 cfg.provider[*].name」、大小写反向断言、显示名≠npm 包名）；真机 `magpie plugin list` | CHANGELOG 0.3.69 · `package.json` 的 name · `src/context.mjs` 的 SHORT · `registry-entry.json` |
+| 38 | 卡片标题显示成纯英文 / 一串 slug；或者改完显示名，`magpie plugin update` 报 `unrecognised dependency format` | **显示名与包名是两个字段**（脚手架 0.3.6 起，2026-10-31）：`package.json.name` 只做 **ASCII slug**（bun 依赖键 + npm 名；空格/中文/大写都会让 `plugin update` 挂），显示名写 **`package.json.magpie.name`**（`<中文> <English>`，英文照抄官网大小写，不许等于 npm 包名）。本仓库：`name = "magpie-magicrew-auth"`、`magpie.name = "超级麦吉 Magicrew"`。供应商名同规矩：`超级麦吉 Super Magic`（英文两个词 —— letsmagic.cn 的 `/login`、`/en`、`/workspace` 三页 `<title>` 原文都是 `Super Magic - Lighthouse Engine Next-Gen Enterprise AI Application Engine`）与 `麦吉 MagiCrew`（官网 `og:site_name` = `MagiCrew`；官网没给过中文名，`check.mjs` 又要求中英并列 ⇒ 取官网正文里对自家产品的简称「麦吉」）。⚠ 改 `name` 会换 bun 依赖键 ⇒ 已装用户要 `rm` + `add` 重装（登录态不丢）。判据：`node tests/display-names.mjs`（10 条：slug 形状、`magpie.name` 形状、`config()` 真把供应商名写进 `cfg.provider[*].name`、大小写反向断言、显示名≠包名≠依赖键）；`node ../magpie-plugin-scaffold/scripts/check.mjs .` 必须 0 失败 | CHANGELOG 0.3.69 / 0.3.70 · `package.json` 的 name + magpie.name · `src/context.mjs` 的 SHORT · `registry-entry.json` |
+| 39 | 某个供应商的图标在卡片上「很小很小」，或者四角顶出一圈黑边 | **先量，别猜**：把 data URI 解码，算 alpha 的 bbox 和四角像素 —— 卡片是按 128×128 整框画的，**内容只占 73% 就会看着比邻居小一圈**（0.3.70 的国际站就是这样，四周是透明留白，不是黑底）。修法是**从原始大图重裁到 bbox 再降到 128**，不要把已经缩小的 128 往上放（会糊）；`src/icons.mjs` 头注释里必须留原图 URL 就是为了这个。四角 alpha 必须是 0：实心方块的四角在卡片上是黑边（码道图标踩过）。判据：`node tests/icon-size.mjs`（自己用 `node:zlib` 解 PNG，零依赖；钉 intl 的 bbox = `(0,0,128,128)`、两图四角 alpha=0、内容占比） | CHANGELOG 0.3.70 · `src/icons.mjs` · `tests/icon-size.mjs` |
 
 **坑 14 的两个附带判据**（都实测过）：
 
@@ -123,14 +124,14 @@ node ../magpie-plugin-scaffold/scripts/check.mjs .
 # 打包面预演
 npm pack --dry-run
 
-# 发布（包内 name 是显示名「超级麦吉 Magicrew」，npm 包名是 magicrew-auth）
+# 发布（包内 name 是 slug「magpie-magicrew-auth」，npm 包名 magicrew-auth，显示名在 magpie.name）
 # 别裸跑 npm publish —— 用这个脚本，它临时换成 magicrew-auth、发完还原
 npm run publish:npm
 
 # Release + npm：推 tag 就够，.github/workflows/release.yml 会接手
 #   verify：tag 必须等于 v<package.json.version>、HEAD 必须是 origin 默认分支的祖先、跑离线测试
 #   release：从 CHANGELOG 抽正文建 Release   npm：用 secrets.NPM_TOKEN 跑 publish:npm
-git tag v0.3.69 && git push origin v0.3.69
+git tag "v$(node -p "require('./package.json').version")" && git push origin "v$(node -p "require('./package.json').version")"
 ```
 
 ---
