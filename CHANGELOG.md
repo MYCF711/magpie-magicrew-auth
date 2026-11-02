@@ -149,8 +149,8 @@ magpie 反查键名当标题      gitName(spec) → Name()
   两边各写一份判断，早晚会出现「文案说 A、实际用 B」。
 - **账号名取值**：新增 `store.accountNameOf(siteId, org)`（只读 `plugin-auth.json` 的 `accountId`，
   取不到退回 codes 缓存的，再退回 org 本身）。
-- **打码**：新增 `maskName()`（`src/hooks/methods.mjs`）——手机号 `13800138000 → 138****8000`、
-  邮箱 `user@example.com → m1****@163.com`、org 那种随机串 `nmosvnfujqe7 → nmos…jqe7`、
+- **打码**：新增 `maskName()`（`src/hooks/methods.mjs`）——手机号 `<PHONE> → 138****8000`、
+  邮箱 `<EMAIL> → m1****@163.com`、org 那种随机串 `nmosvnfujqe7 → nmos…jqe7`、
   已经打码的原样返回。**上游自己回手机号就是打码的**，文案里出现的是「别人的号」，不该整串贴出去。
   ⚠ 用户**自己刚敲进去**的那个手机号 / 邮箱仍按原样回显（`验证码已发送到 …`）——
   那是他自己输入的内容，不是别人的账号。
@@ -281,7 +281,7 @@ README 的「邀请码」一节与 AGENTS 坑 26 已写明这条限制。
 流水接口 `POST /api/v1/quota/points/records/queries` 仍是 `HTTP 500 Internal Server Error.`
 （GET 回 `405 Allow: POST`），所以**每一笔扣了多少分拿不到**。
 
-**与「邀请注册」无关**：国内 `138****000` 邀请 **0 人**、余额 `-1`；国际 `user@example.com`
+**与「邀请注册」无关**：国内 `138****000` 邀请 **0 人**、余额 `-1`；国际 `<EMAIL>`
 邀请 **54 人**、余额 `+107`。`~/.config/magpie/usage.jsonl` 里国内四个号合计 **2,639 次**请求、
 **2,914 万**输入 token，国际单号也有 **1,147 次 / 1,280 万**，所以「国内号被用得多」不等于「国内号一定欠费」——
 真正的差额在**站点计价口径**（每 1,000 token 扣多少分），那层拿不到逐笔，**未验证**。
@@ -343,12 +343,12 @@ Unicode 减号。原来 `Number(d.total_points ?? 0)` 遇到 `"-31 积分"`、`"
   老文件里的 `mode:"custom"` / 乱写的值一律读成 `auto`，不会留一个无效状态。
 - **作者码重推两个**（换到两个 0 邀请的全新号）：
   国内 `IVC8BAWYXRY1`（189****051，23 人）→ **`IV18D8KHVZ7T`**（181****632，0 人）；
-  国际 `IV75F0ZKVKXG`（user@example.com，54 人）→ **`IV486F5O59SC`**
-  （user@example.com，0 人）。两个新码都当场用 `/api/v1/invitations/info` 核对过。
+  国际 `IV75F0ZKVKXG`（<EMAIL>，54 人）→ **`IV486F5O59SC`**
+  （<EMAIL>，0 人）。两个新码都当场用 `/api/v1/invitations/info` 核对过。
 - **纠正「人数到顶就满」这个错误模型**（此前拿它判断「那个号满了、别人用了没送分」）：
   上游 `/api/v1/invitations/info` **没有 limit 字段**、也没有「名额已满」的错误码；
   官方文案讲的封顶是**积分**（国际 10,000 / 国内 60,000），不是人。
-  实测反例：国际 `user@example.com` 已邀 **54 人**（超过按 10,000÷200 折算的 50），
+  实测反例：国际 `<EMAIL>` 已邀 **54 人**（超过按 10,000÷200 折算的 50），
   10-29 批次仍照常结算奖励。⇒ 判满改成 `earned >= capPoints`；
   要按人数判得显式配 `{"countLimit":50}`（保守选择，不是事实）。
   代价说清楚：旧模型会把「只花掉 2,000 / 10,000 分、还能发 40 笔」的好号误判成已满并换掉。
@@ -369,10 +369,10 @@ Unicode 减号。原来 `Number(d.total_points ?? 0)` 遇到 `"-31 积分"`、`"
 
 - 0.3.62 把「上级账号 + 邀请 45/50」塞进了登录页「邀请码」的灰色提示，两个问题：
   ① 额度卡片上已经有「邀请次数 45 / 50 次」，框里再写一遍是重复；
-  ② `当前模式：首选 · user@example.com · 邀请 45/50，输入 0 切换：自动` 放不进那个
+  ② `当前模式：首选 · <EMAIL> · 邀请 45/50，输入 0 切换：自动` 放不进那个
   输入框，被截成「…· 邀请 45/50，输入」—— 关键的操作提示（输入 0 切自动）反而看不见了
 - 现在回到 `当前模式：首选，输入 0 切换：自动` / `当前模式：自动，输入 1 切换：首选`
-- 上级是谁仍在 `authorize` 的 instructions 里（「本次邀请上级：user@example.com」），
+- 上级是谁仍在 `authorize` 的 instructions 里（「本次邀请上级：<EMAIL>」），
   那里空间够，每次点登录现算
 - **邀请次数与自动切换行为不变**：次数照旧只显示在额度卡片那一行
   `邀请次数 45 / 50 次`（`text` 行，不参与路由占比）；首选模式满额仍会自动换真实邮箱上级
@@ -551,7 +551,7 @@ Unicode 减号。原来 `Number(d.total_points ?? 0)` 遇到 `"-31 积分"`、`"
 - 领取邮箱优先走 `magpie-tempmail`；它没在跑就**直连 temp-mail.io** 现建一个
 - 收验证码同样先直连 temp-mail.io，失败再问临时邮箱插件
 - 结果：在供应商页点「邮箱自动捕获验证码」即可，用户不需要切到临时邮箱面板
-- 真机验证：`user@example.com` 一键登录成功（CLI 方法 2，无任何输入）
+- 真机验证：`<EMAIL>` 一键登录成功（CLI 方法 2，无任何输入）
 
 ## 0.3.52 — 2026-10-29
 
@@ -628,8 +628,8 @@ Unicode 减号。原来 `Number(d.total_points ?? 0)` 遇到 `"-31 积分"`、`"
   的地址在 `/captcha/verify` 全部被拒；`qq.com` / `163.com` / `gmail.com` / `yzcalo.com` 直接过。
   这是域名黑名单，不是识图问题
 - `tests/browser-login.mjs` 的顺序断言改成 6 条（邮箱 → 临时邮箱 → 手机号 → 浏览器 → 登录态 → 邀请码）
-- 真机验证：`user@example.com` 完整登录成功（JWT 354 字节、org `njekbb588hnn`）；
-  CLI 再登一次新地址 `user@example.com` 也成功，落库 key 后 `/v1/chat/completions` 回 200
+- 真机验证：`<EMAIL>` 完整登录成功（JWT 354 字节、org `njekbb588hnn`）；
+  CLI 再登一次新地址 `<EMAIL>` 也成功，落库 key 后 `/v1/chat/completions` 回 200
 
 ## 0.3.46 — 2026-10-29
 
