@@ -72,7 +72,7 @@ console.log("\n═══ ② callback 从剪贴板认凭证 ═══")
 try {
   if (!jwt || !org) {
     // 假凭证：认得出形状，但换不出 key —— 应该报「验证不过」，不是「读不到」
-    await setClipboard(JSON.stringify({ jwt: "eyJhbGciOiJIUzI1NiJ9.eyJmYWtlIjoxfQ.deadbeef", org: "fakeorg12345" }))
+    await setClipboard(JSON.stringify({ jwt: "<JWT>", org: "fakeorg12345" }))
     console.log("  （没给真凭据，放了一份假的下剪贴板）")
   } else {
     await setClipboard(JSON.stringify({ jwt, org }))

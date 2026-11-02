@@ -333,7 +333,7 @@ Electron 的 `Cache/Cache_Data/data_*` 里留着客户端访问过的全部 URL 
 `plugin-auth.json` 里的 `accountId` 有两种形态（实测）：
 
 ```
-真实邮箱账号     1451895195@qq.com / 1470292681@qq.com
+真实邮箱账号     <EMAIL> / <EMAIL>
 临时邮箱或抓不到  dkroe85ii62n / 7fli52t2tc2b / 189****051
 ```
 

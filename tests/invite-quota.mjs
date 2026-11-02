@@ -177,7 +177,7 @@ check("已邀 20 人、赚 4,000 / 10,000 → 没满，还能发 30 笔", () => 
 })
 
 check("人数到顶（54 > 折算 50）但积分没封顶 → **不满**", () => {
-  // 实测反例：1451895195@qq.com 已邀 54 人，仍在正常结算奖励。
+  // 实测反例：user@example.com 已邀 54 人，仍在正常结算奖励。
   // 按人数判满会把一个只花掉 2,000 / 10,000 分的好号换掉。
   reset()
   const q = quotaOf("magicrew-intl", { count: 54, earned: 2000 })
@@ -216,13 +216,13 @@ console.log("\n真实邮箱 —— 只认白名单后缀（临时邮箱域名是
 check("常见邮箱服务商 → 真", () => {
   reset()
   for (const a of [
-    "1451895195@qq.com",
-    "1470292681@qq.com",
+    "user@example.com",
+    "user@example.com",
     "someone@163.com",
     "a.b@gmail.com",
     "x@outlook.com",
     "y@icloud.com",
-    "m18970098051_1@163.com",
+    "user@example.com",
   ]) {
     assert.equal(isRealMailbox("magicrew-intl", a), true, a)
   }
@@ -230,7 +230,7 @@ check("常见邮箱服务商 → 真", () => {
 
 check("temp-mail.io 的域名 → 假（实测 jbsze.net / yzcalo.com）", () => {
   reset()
-  assert.equal(isRealMailbox("magicrew-intl", "vtnbieqimcguyjrnun@jbsze.net"), false)
+  assert.equal(isRealMailbox("magicrew-intl", "user@example.com"), false)
   assert.equal(isRealMailbox("magicrew-intl", "abc@yzcalo.com"), false)
 })
 

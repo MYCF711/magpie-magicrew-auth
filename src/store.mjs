@@ -87,7 +87,7 @@ function writeSnapshot(siteId, models) {
 // 2026-10-30 换过一轮（两站各推一个新的、0 邀请的全新号）：
 //
 //     国内  IVC8BAWYXRY1（189****051）          →  IV18D8KHVZ7T（181****632）
-//     国际  IV75F0ZKVKXG（1451895195@qq.com）   →  IV486F5O59SC（mycf711@foxmail.com）
+//     国际  IV75F0ZKVKXG（user@example.com）   →  IV486F5O59SC（user@example.com）
 //
 //   新码当场用上游 `/api/v1/invitations/info` 核对过（invite_code + invite_count 都是 0）。
 //

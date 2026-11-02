@@ -438,15 +438,15 @@ check("国内站 3 条、国际站 4 条，且都不含「邀请码」", () => {
 console.log("\ninstructions 里的「本次邀请上级」—— 每次点登录现算，开关关也要说清是谁")
 
 await checkAsync("打码：手机号 / 邮箱 / 随机串 / 已打码的原样", async () => {
-  assert.equal(maskName("18970098051"), "189****8051")
-  assert.equal(maskName("+8618970098051"), "189****8051")
-  assert.equal(maskName("189****8051"), "189****8051", "已经打码的原样返回")
-  assert.equal(maskName("m18970098051_1@163.com"), "m1****@163.com")
-  assert.equal(maskName("1451895195@qq.com"), "14****@qq.com")
+  assert.equal(maskName("13800138000"), "138****8000")
+  assert.equal(maskName("+8613800138000"), "138****8000")
+  assert.equal(maskName("138****8000"), "138****8000", "已经打码的原样返回")
+  assert.equal(maskName("user@example.com"), "m1****@163.com")
+  assert.equal(maskName("user@example.com"), "14****@qq.com")
   assert.equal(maskName("nmosvnfujqe7"), "nmos…jqe7")
   assert.equal(maskName(""), "")
   // 整串手机号 / 邮箱不许出现在文案里
-  assert.ok(!inviteNote(c).includes("18970098051"))
+  assert.ok(!inviteNote(c).includes("13800138000"))
 })
 
 await checkAsync("开关关 + 有注册记录 → 写「最后注册的新号」的账号名", async () => {
@@ -489,13 +489,13 @@ await checkAsync("邮箱账号（国际站那种）→ 文案里是打码形态�
     join(CONFIG, "plugin-auth.json"),
     JSON.stringify({
       [`${SITE}#abc123`]: { org: "orgA", accountId: "181****632", type: "oauth", jwt: "jwt-orgA" },
-      [`${SITE}#mail1`]: { org: "orgMail", accountId: "m18970098051_1@163.com", type: "oauth", jwt: "jwt-mail" },
+      [`${SITE}#mail1`]: { org: "orgMail", accountId: "user@example.com", type: "oauth", jwt: "jwt-mail" },
     }),
   )
   noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgMail" })
   const note = inviteNote(c)
   assert.match(note, /m1\*\*\*\*@163\.com/, `实际：${note}`)
-  assert.ok(!note.includes("m18970098051_1@163.com"), "不许露完整邮箱")
+  assert.ok(!note.includes("user@example.com"), "不许露完整邮箱")
   clearRegistered()
   seedAuth()
 })
