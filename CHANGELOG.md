@@ -263,7 +263,7 @@ README 的「邀请码」一节与 AGENTS 坑 26 已写明这条限制。
 
 | 账号 | `~/.config/magpie/quotas.json` 里存的 | 直打上游 `GET /api/v1/quota/points/total` |
 |---|---|---|
-| `magicrew/180****361` | `-1 积分` | `"total_points":-1` |
+| `magicrew/138****000` | `-1 积分` | `"total_points":-1` |
 | `magicrew/181****632` | `-31 积分` | `"total_points":-31` |
 | `magicrew/181****710` | `-1 积分` | `"total_points":-1` |
 | `magicrew/189****051` | `-32 积分` | `"total_points":-32` |
@@ -281,7 +281,7 @@ README 的「邀请码」一节与 AGENTS 坑 26 已写明这条限制。
 流水接口 `POST /api/v1/quota/points/records/queries` 仍是 `HTTP 500 Internal Server Error.`
 （GET 回 `405 Allow: POST`），所以**每一笔扣了多少分拿不到**。
 
-**与「邀请注册」无关**：国内 `180****361` 邀请 **0 人**、余额 `-1`；国际 `<EMAIL>`
+**与「邀请注册」无关**：国内 `138****000` 邀请 **0 人**、余额 `-1`；国际 `<EMAIL>`
 邀请 **54 人**、余额 `+107`。`~/.config/magpie/usage.jsonl` 里国内四个号合计 **2,639 次**请求、
 **2,914 万**输入 token，国际单号也有 **1,147 次 / 1,280 万**，所以「国内号被用得多」不等于「国内号一定欠费」——
 真正的差额在**站点计价口径**（每 1,000 token 扣多少分），那层拿不到逐笔，**未验证**。
