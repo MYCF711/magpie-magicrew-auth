@@ -216,13 +216,13 @@ console.log("\n真实邮箱 —— 只认白名单后缀（临时邮箱域名是
 check("常见邮箱服务商 → 真", () => {
   reset()
   for (const a of [
-    "user@example.com",
-    "user@example.com",
+    "u1@163.com",
+    "u2@qq.com",
     "someone@163.com",
     "a.b@gmail.com",
     "x@outlook.com",
     "y@icloud.com",
-    "user@example.com",
+    "u3@foxmail.com",
   ]) {
     assert.equal(isRealMailbox("magicrew-intl", a), true, a)
   }
@@ -230,7 +230,7 @@ check("常见邮箱服务商 → 真", () => {
 
 check("temp-mail.io 的域名 → 假（实测 jbsze.net / yzcalo.com）", () => {
   reset()
-  assert.equal(isRealMailbox("magicrew-intl", "user@example.com"), false)
+  assert.equal(isRealMailbox("magicrew-intl", "x1@jbsze.net"), false)
   assert.equal(isRealMailbox("magicrew-intl", "abc@yzcalo.com"), false)
 })
 
