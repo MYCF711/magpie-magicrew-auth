@@ -115,10 +115,26 @@ function buildPlugin(c) {
         // **不注册 = magpie 不给这个 provider 排签到**，也就没有那把锁。
         // 积分不够就走别的路（充值 / 邀请 / 手工），不要恢复这一行。
         //
-        // 想恢复的话，前提是先把 src/browser-channel.mjs 的 send() 和
-        // browserFetch() 都加上**硬 deadline**（现在 send() 无超时，CDP 不回应
-        // 就永久挂起），并且签到链路上每一跳都能证明不会拖过 magpie 的预算。
-        // 在那之前，这一行必须是注释。
+        // ═══ 恢复这一行的前提（2026-11-04 用户明令：「先等 magpie 这边修好了
+        //     再开签到测试，不然又要卡死网关」）═══════════════════════════════
+        //
+        // 插件侧该做的 0.3.75 已经全做完了 —— **别以为做完这些就能解开**：
+        //   ✅ src/browser-channel.mjs 的 send() 有 15s 硬超时（SEND_TIMEOUT_MS）
+        //   ✅ browserFetch / browserStreamFetch 外面套 20s withDeadline
+        //   ✅ curlFetch 用异步 spawn，不再同步阻塞宿主
+        //   ✅ fetchWithFallback 用**总预算 deadline**，三层不再各自超时
+        //   ✅ 模型目录/额度 skipCurl，直接快失败
+        //
+        // **还差的是 magpie 侧，两件都还没修完**（插件改不到）：
+        //   ① yetone/magpie#5112 的同类问题：Bun 里 `spawn("curl.exe")` **前两次
+        //      各阻塞事件循环约 3 秒**（`curl --version` 这种不联网的也一样）。
+        //      插件侧的 workaround 只是「提前付掉」（warmUpDns 里 spawn 一次），
+        //      但任何一次新的 curl 子进程仍可能撞上。已报给上游，未修。
+        //   ② yetone/magpie#5104 的 Go 侧启动锁车队：`logins.json` / `plugin-auth.json`
+        //      的锁在路由前被持有，一堆积整个网关就不出字。issue 仍 open。
+        //
+        // 判据：等这两个 issue 都有修复版本落地、并且在真机上**开着签到**跑够
+        // 一整轮 08:00 窗口不卡，才允许解开这一行。在此之前它是注释。
         //
         // checkin: makeCheckin(c),
       },
