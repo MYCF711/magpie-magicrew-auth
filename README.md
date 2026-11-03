@@ -336,7 +336,7 @@ magpie plugin list
 
 **国际站 `/v1/chat/completions` 报 500，22 字节的纯文本？** 那是缺 `organization-code` 请求头。国内站不需要，国际站强制。插件按站点自动带。
 
-**国际站额度卡片上写着「暂时无法获取额度：`<!doctype html><html lang="zh-cn">…`」，国内站却好着？** 0.3.70 及更早会这样，两件事叠在一起：① 插件原来伪装成 Chrome 的 User-Agent，而国际站的 API 域名 2026-11-03 起挂在阿里云 ESA 边缘后面，**带浏览器 UA 的请求一律被 405 掉**（回一整页 HTML，请求根本到不了服务）；② 那页 HTML 被原样塞进了错误文案。0.3.71 起插件只报自己是 `magpie-magicrew-auth`，HTML 错误页也只归一成一句 `上游返回 HTML 错误页（HTTP 405），不是接口响应`。
+**国际站额度卡片上写着「暂时无法获取额度：`<!doctype html><html lang="zh-cn">…`」，国内站却好着？** 0.3.70 及更早会这样，两件事叠在一起：① 插件原来伪装成 Chrome 的 User-Agent，而国际站的 API 域名 2026-11-03 起挂在阿里云 ESA 边缘后面，**带浏览器 UA 的请求一律被 405 掉**（回一整页 HTML，请求根本到不了服务）；② 那页 HTML 被原样塞进了错误文案。0.3.71 起插件只报自己是 `magpie-magicrew-auth`，HTML 错误页也只归一成一句 `上游返回 HTML 错误页（HTTP 405），不是接口响应`。⚠ 额度恢复了、**对话仍然 405** 的，是漏了第三处：聊天走 `auth.loader` 返回的 `fetch` 包装，它自己拼 header，也要带同一个 UA —— 0.3.71 起与 `api.mjs` 共用 `src/api.mjs` 导出的 `UA`。
 
 **`glm-5.3-flash` 回复是空的？** 推理 token 吃满了 `max_tokens`。插件已经把低于 512 的抬到 512；还是空就把 `max_tokens` 再调大。
 

@@ -28,7 +28,7 @@ magpie 日志同一时刻在刷 `auth.refresh: <!doctypehtml>…<title>405</titl
 请求根本没到服务，所以这不是 token 的问题、更不是登录失效 —— 但错误文案里那张 HTML
 被 `read()` 原样塞进 `message`，用户只能看到一坨标签。
 
-**改法两件：**
+**改法三件：**
 
 1. `src/api.mjs` 的 `UA` 不再抄 Chrome，只报自己是谁：`magpie-magicrew-auth`
    （与 `src/headless.mjs` 对 keewood 用户中心用的一致）。要真浏览器的地方
@@ -36,6 +36,13 @@ magpie 日志同一时刻在刷 `auth.refresh: <!doctypehtml>…<title>405</titl
 2. `read()` 新增 `upstreamText()`：响应体是 HTML 时只归一成
    `上游返回 HTML 错误页（HTTP 405），不是接口响应`；纯文本错误（`Allow: POST, PUT`）
    与 magic 业务码（`33002 账号不存在`）的文案一个字符都不动。
+3. **聊天那一路（`src/hooks/loader.mjs` 的 `fetch` 包装）也漏了 UA**：它自己重新构造
+   `headers`，再把宿主传来的头逐条 pass-through，而 `user-agent` 在跳过名单里 ——
+   于是真正发出去的是**运行时默认 UA**（bun 的 `Bun/1.4.4`），ESA 一样回 405。
+   issue #30 的 nginx 日志就是这条：同一出站，`magpie-magicrew-auth/0.3.70` 的请求
+   全 200、`Bun/1.4.4` 的 chat 请求全 405。现在 `UA` 从 `src/api.mjs` **导出**，
+   api.mjs 的各路、loader 的 `fetch` 包装、loader 顶层 `headers` 三处共用同一个常量。
+   ⚠ 只改前两条会出现「额度好了、对话还是挂」—— 三处必须同源。
 
 ### 三、顺手：`thinking_unsupported` → `invalid_request`
 
@@ -48,8 +55,9 @@ magpie 日志同一时刻在刷 `auth.refresh: <!doctypehtml>…<title>405</titl
 ### 四、验证
 
 ```
-node tests/upstream-ua.mjs          → 7 通过 · 0 失败   （新增：钉住「不许出现 Mozilla/*」+ HTML 归一）
-全部离线测试                        → 19 个文件全过（smoke / browser-login 按 CI 规矩跳过）
+node tests/upstream-ua.mjs          → 11 通过 · 0 失败   （7 条钉 api.mjs；后 4 条钉聊天路径：
+                                      loader 共用 UA 常量、fetch 包装自带 user-agent、不留 MagicrewClient/1.0）
+全部离线测试                        → 21 个文件全过（smoke / browser-login 按 CI 规矩跳过）
 node ../magpie-plugin-scaffold/scripts/check.mjs . → 通过 46 · 警告 0 · 失败 0
 真机（国际站）：refreshGatewayKey(intl, 假 token) → 200 {"code":33011,"message":"Refresh token not found in database"}
 ```

@@ -11,6 +11,7 @@
 //   两件事都要锁：① UA 形态不许回退成 Mozilla/*；② HTML 错误页只归一成一句人话。
 
 import assert from "node:assert/strict"
+import { readFileSync } from "node:fs"
 import {
   login,
   issueGatewayKey,
@@ -171,6 +172,41 @@ await checkAsync("空 body + 500 → 退回 HTTP 状态码", async () => {
       return true
     },
   )
+})
+
+// ── 聊天路径（auth.loader 的 fetch 包装）也不许漏 UA ────────────────────────
+//
+// 上面钉的是 api.mjs 自己发的那几路：登录 / 刷新 / 额度 / 模型目录。
+// 真正跑对话的是 auth.loader 返回的 fetch —— 它**重新构造** headers，再把宿主
+// 传来的头逐条 pass-through（`user-agent` 被跳过）。漏了那一行，请求就带着
+// bun 的默认 UA `Bun/1.4.4` 出去：同一台机器、同一个 token，额度读得到、
+// 聊天 405。这是 #30 报的第二处，只修 api.mjs 会「额度好了、对话还是挂」。
+const loaderSrc = readFileSync(new URL("../src/hooks/loader.mjs", import.meta.url), "utf8")
+const apiSrc = readFileSync(new URL("../src/api.mjs", import.meta.url), "utf8")
+
+check("api.mjs 导出的 UA 只报自己是谁（不许回退成浏览器 UA）", () => {
+  const m = apiSrc.match(/export const UA = "([^"]+)"/)
+  assert.ok(m, "api.mjs 没有导出 UA 常量")
+  assert.ok(!/^Mozilla\//.test(m[1]), `UA 又变回浏览器：${m[1]}`)
+})
+
+check("loader 从 api.mjs 取 UA，不另写一份", () => {
+  assert.match(loaderSrc, /import\s*\{[^}]*\bUA\b[^}]*\}\s*from\s*"\.\.\/api\.mjs"/)
+})
+
+check("loader 的 fetch 包装显式带 user-agent", () => {
+  const i = loaderSrc.indexOf("async fetch(input, init)")
+  assert.ok(i > 0, "找不到 loader 的 fetch 包装")
+  const block = loaderSrc.slice(i, i + 2000)
+  assert.ok(block.includes('"user-agent": UA'), "fetch 包装的 headers 里没有 user-agent")
+  assert.ok(
+    block.includes('"authorization", "host", "content-length", "user-agent"'),
+    "pass-through 的跳过名单变了：客户端 UA 可能盖掉我们的",
+  )
+})
+
+check("loader 里不再留旧的 MagicrewClient/1.0", () => {
+  assert.ok(!loaderSrc.includes("MagicrewClient/1.0"), "loader 顶层 headers 还写着 MagicrewClient/1.0")
 })
 
 globalThis.fetch = ORIG_FETCH

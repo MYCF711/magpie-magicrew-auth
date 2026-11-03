@@ -29,7 +29,7 @@
 //
 // 结论：这里只报「我是谁」，别再抄浏览器的 UA。需要真浏览器的地方在
 // src/headless.mjs（keewood 用户中心）与 src/browser-login.mjs，它们各自带 UA。
-const UA = "magpie-magicrew-auth"
+export const UA = "magpie-magicrew-auth"
 
 // 一个包 = 两个 provider。
 //
