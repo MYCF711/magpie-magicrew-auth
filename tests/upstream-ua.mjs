@@ -11,7 +11,9 @@
 //   两件事都要锁：① UA 形态不许回退成 Mozilla/*；② HTML 错误页只归一成一句人话。
 
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   login,
   issueGatewayKey,
@@ -20,7 +22,11 @@ import {
   fetchAllModels,
   fetchModelPoints,
   SITES,
+  UA,
+  originFor,
 } from "../src/api.mjs"
+import { findProjectId } from "../src/chat-task.mjs"
+import { bindOrganization, fetchOrgs } from "../src/headless.mjs"
 
 let pass = 0
 let fail = 0
@@ -70,8 +76,9 @@ const ESA_405 =
   "<style>a,body,div,h2,html,p{margin:0}</style></head><body>405</body></html>"
 
 const uaOf = (call) => call.headers["user-agent"] ?? call.headers["User-Agent"] ?? ""
+const originOf = (call) => call.headers.origin ?? call.headers.Origin ?? ""
 
-console.log("UA —— 只报「我是谁」，不抄浏览器")
+console.log("UA / Origin —— 两站 WAF 的已验证通行组合")
 
 await checkAsync("登录 / 签 key / 续期 / 模型目录都带同一个非浏览器 UA", async () => {
   // 每个请求一份新 Response —— 同一个 Response 的 body 只能读一次
@@ -96,7 +103,8 @@ await checkAsync("登录 / 签 key / 续期 / 模型目录都带同一个非浏�
     const ua = uaOf(c)
     assert.ok(ua, `${c.url} 没带 user-agent`)
     assert.doesNotMatch(ua, /^Mozilla\//i, `${c.url} 又在伪装浏览器：${ua}`)
-    assert.equal(ua, "magpie-magicrew-auth")
+    assert.equal(ua, "curl/8.0")
+    assert.equal(originOf(c), SITES.cn.web, `${c.url} 国内 Origin 必须是官网`)
   }
 })
 
@@ -105,7 +113,54 @@ await checkAsync("国际站的续期也带这个 UA（405 就出在那一站）"
   await refreshGatewayKey("rf", SITES.intl.host)
   assert.equal(calls.length, 1)
   assert.ok(calls[0].url.startsWith(SITES.intl.host))
-  assert.equal(uaOf(calls[0]), "magpie-magicrew-auth")
+  assert.equal(uaOf(calls[0]), "curl/8.0")
+  assert.equal(originOf(calls[0]), "", "国际站带任何 Origin 都会被 ESA 405")
+})
+
+await checkAsync("Origin 映射：国内官网、国际省略，绝不取 API host", async () => {
+  assert.equal(originFor(SITES.cn.host), SITES.cn.web)
+  assert.equal(originFor(SITES.intl.host), "")
+  stub((url) =>
+    url.includes("/v1/models")
+      ? json({ data: [{ id: "m1" }] })
+      : json({ code: 1000, data: { token: "jwt", organization_code: "org" } }),
+  )
+  await login({ phone: "13800000000", password: "x", host: SITES.intl.host })
+  await fetchAllModels("mgw_x", SITES.intl.host)
+  assert.equal(calls.length, 2)
+  for (const c of calls) {
+    assert.equal(uaOf(c), UA)
+    assert.equal(originOf(c), "", `${c.url} 国际站不应带 Origin`)
+  }
+})
+
+await checkAsync("首任务与组织探测也按站点带 UA / Origin", async () => {
+  for (const site of [SITES.cn, SITES.intl]) {
+    stub((url) => {
+      if (String(url).includes("/projects/participated")) return json({ code: 1000, data: { list: [] } })
+      return json({ code: 1000, data: [{ magic_organization_code: "abc123" }] })
+    })
+    // fetchOrgs 的 login-data 要把组织列表包在 auth_status 里；bindOrganization 直接吃数组。
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async (url, init = {}) => {
+      calls.push({ url: String(url), method: init.method || "GET", headers: init.headers ?? {} })
+      if (String(url).includes("/projects/participated")) return json({ code: 1000, data: { list: [] } })
+      if (String(url).includes("/aggregation/login-data")) {
+        return json({ code: 1000, data: { auth_status: [{ magic_organization_code: "abc123" }] } })
+      }
+      return json({ code: 1000, data: [{ magic_organization_code: "abc123" }] })
+    }
+    await findProjectId("jwt", "org", site.host, "workspace")
+    await fetchOrgs(site, "jwt")
+    await bindOrganization(site, "jwt", "abc123")
+    assert.equal(calls.length, 3)
+    for (const c of calls) {
+      assert.equal(uaOf(c), UA, `${c.url} 漏了共享 UA`)
+      assert.equal(originOf(c), originFor(site.host), `${c.url} Origin 不符合站点规则`)
+      assert.notEqual(originOf(c), site.host, `${c.url} 还在用 API host 当 Origin`)
+    }
+    globalThis.fetch = originalFetch
+  }
 })
 
 console.log("\n上游回 HTML —— 只归一成一句人话，不外泄整页")
@@ -163,6 +218,18 @@ await checkAsync("magic 业务码的错误文案一个字符都不动（33002 �
   )
 })
 
+await checkAsync("国内 WAF 的空 body + 403 → 保留状态码，不伪造成业务错误", async () => {
+  stub(new Response("", { status: 403 }))
+  await assert.rejects(
+    () => refreshGatewayKey("rf", SITES.cn.host),
+    (e) => {
+      assert.equal(e.message, "HTTP 403")
+      assert.equal(e.status, 403)
+      return true
+    },
+  )
+})
+
 await checkAsync("空 body + 500 → 退回 HTTP 状态码", async () => {
   stub(new Response("", { status: 500 }))
   await assert.rejects(
@@ -184,10 +251,11 @@ await checkAsync("空 body + 500 → 退回 HTTP 状态码", async () => {
 const loaderSrc = readFileSync(new URL("../src/hooks/loader.mjs", import.meta.url), "utf8")
 const apiSrc = readFileSync(new URL("../src/api.mjs", import.meta.url), "utf8")
 
-check("api.mjs 导出的 UA 只报自己是谁（不许回退成浏览器 UA）", () => {
+check("api.mjs 导出的 UA 是两站实测共同可通行值", () => {
   const m = apiSrc.match(/export const UA = "([^"]+)"/)
   assert.ok(m, "api.mjs 没有导出 UA 常量")
-  assert.ok(!/^Mozilla\//.test(m[1]), `UA 又变回浏览器：${m[1]}`)
+  assert.equal(m[1], "curl/8.0")
+  assert.doesNotMatch(m[1], /^Mozilla\/|^Bun\/|magpie-magicrew-auth/)
 })
 
 check("loader 从 api.mjs 取 UA，不另写一份", () => {
@@ -200,14 +268,70 @@ check("loader 的 fetch 包装显式带 user-agent", () => {
   const block = loaderSrc.slice(i, i + 2000)
   assert.ok(block.includes('"user-agent": UA'), "fetch 包装的 headers 里没有 user-agent")
   assert.ok(
-    block.includes('"authorization", "host", "content-length", "user-agent"'),
-    "pass-through 的跳过名单变了：客户端 UA 可能盖掉我们的",
+    block.includes('"authorization", "host", "content-length", "user-agent", "origin"'),
+    "pass-through 的跳过名单变了：客户端 UA / Origin 可能盖掉我们的",
   )
 })
 
 check("loader 里不再留旧的 MagicrewClient/1.0", () => {
   assert.ok(!loaderSrc.includes("MagicrewClient/1.0"), "loader 顶层 headers 还写着 MagicrewClient/1.0")
 })
+
+check("WebSocket 首任务握手也显式带共享 UA", () => {
+  const src = readFileSync(new URL("../src/chat-task.mjs", import.meta.url), "utf8")
+  const i = src.indexOf("async function openSocket")
+  assert.ok(i > 0)
+  assert.ok(src.slice(i, i + 700).includes('"User-Agent": UA'))
+})
+
+// 动态拦最终出站 headers：错误 UA / Origin / authorization 都不许从客户端漏进去。
+const ORIG_HOME = process.env.HOME
+const ORIG_USERPROFILE = process.env.USERPROFILE
+const FAKE_HOME = mkdtempSync(join(tmpdir(), "magicrew-ua-"))
+process.env.HOME = FAKE_HOME
+process.env.USERPROFILE = FAKE_HOME
+mkdirSync(join(FAKE_HOME, ".cache", "magpie"), { recursive: true })
+const { makeLoader } = await import("../src/hooks/loader.mjs")
+const { siteCtx } = await import("../src/context.mjs")
+
+await checkAsync("loader 两站最终出站头：UA 固定、Origin 按站点、鉴权不被覆盖", async () => {
+  for (const site of [SITES.cn, SITES.intl]) {
+    const key = `mgw_${"x".repeat(30)}`
+    stub(() => json({ choices: [{ message: { content: "ok" } }] }))
+    const loader = await makeLoader(siteCtx(site))(async () => ({
+      org: "acc1",
+      access: key,
+      refresh: "",
+      expires: Date.now() + 3_600_000,
+      jwt: "x".repeat(350),
+    }))
+    assert.equal(loader.headers["user-agent"], UA)
+    assert.equal(loader.headers.origin ?? "", originFor(site.host))
+    const res = await loader.fetch(`${loader.baseURL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "user-agent": "Bun/1.4.4",
+        origin: site.host,
+        authorization: "Bearer client-must-not-win",
+      },
+      body: JSON.stringify({ model: "m1" }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(calls.length, 1)
+    const h = calls[0].headers
+    assert.equal(uaOf(calls[0]), UA)
+    assert.equal(originOf(calls[0]), originFor(site.host))
+    assert.equal(h.authorization, `Bearer ${key}`)
+    assert.equal(h["organization-code"] ?? "", site.id === SITES.intl.id ? "acc1" : "")
+    await res.text()
+  }
+})
+
+if (ORIG_HOME === undefined) delete process.env.HOME
+else process.env.HOME = ORIG_HOME
+if (ORIG_USERPROFILE === undefined) delete process.env.USERPROFILE
+else process.env.USERPROFILE = ORIG_USERPROFILE
+rmSync(FAKE_HOME, { recursive: true, force: true })
 
 globalThis.fetch = ORIG_FETCH
 

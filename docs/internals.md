@@ -53,29 +53,29 @@ curl -s https://www.magicrew.ai/workspace | grep -o '"MAGIC_[A-Z_]*":"[^"]*"'
 
 国内站同位置是 `i-magic-service.letsmagic.cn`，`MAGIC_GATEWAY_ADDRESS: https://api.teamshare.cn`。
 
-### ⚠ 国际站的边缘会把「浏览器 UA」405 掉（2026-11-03）
+### ⚠ 两站边缘的 UA / Origin 规则（2026-11-03 二次复核）
 
-`magic-service.magicrew.ai` 现在挂在**阿里云 ESA** 后面（CNAME 指向
-`magic-service.magicrew.ai.a1.initpp.com`，响应头 `server: ESA`）。ESA 对
-**带浏览器 User-Agent 的请求一律回 `405` + 一整页 HTML**，请求根本到不了后面的 Go 服务：
+两站后端虽然同构，前置 WAF 的放行规则不同，而且会变。0.3.71 只处理了国际 ESA 的
+浏览器 UA；当天晚些时候国内火山 WAF 又开始拒 `magpie-magicrew-auth` 与 Bun 默认 UA，
+表现成五个账号同时「已退出登录」。这不是封号：同一批 JWT / key 换对请求头后，
+五个号 `/v1/models` 全部 200，积分接口也全部返回真实余额。
 
-```bash
-# 同一时刻、同一个 URL，只差一个 UA
-curl -s -o /dev/null -w '%{http_code}\n' https://magic-service.magicrew.ai/            # 200（curl 的 UA）
-curl -s -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
-(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36' -o /dev/null -w '%{http_code}\n' \
-  https://magic-service.magicrew.ai/                                                   # 405（HTML）
-```
+Bun 运行时逐项实测的稳定组合：
 
-被拦时 `GET /` 也不是 `hello, magic-service!`，而是那页
-`<!doctypehtml><html lang="zh-cn">…<title>405</title>…`（`data-spm` 是阿里云的错误页模板）。
-国内站（火山 WAF，CNAME 到 `volcwaf.com`）两种 UA 都通 ⇒ 症状表现为「国内全好、国际全挂」。
+| 站点 | User-Agent | Origin | 结果 |
+|---|---|---|---|
+| 国内 | `curl/8.0` | `https://www.letsmagic.cn` | 200 |
+| 国内 | `magpie-magicrew-auth` / `Bun/1.4.4` / 浏览器 UA | 任意 | 空 403 |
+| 国内 | `curl/8.0` | API 域名 `https://i-magic-service.letsmagic.cn` | 空 403 |
+| 国际 | `curl/8.0` | **整头省略** | 200 |
+| 国际 | `curl/8.0` | 官网或 API 域名 | 405 HTML |
+| 国际 | 浏览器 UA / `Bun/1.4.4` | 任意 | 405 HTML |
 
-⇒ **插件的 UA 不许伪装浏览器**（`src/api.mjs` 的 `UA = "magpie-magicrew-auth"`，
-与 `src/headless.mjs` 对 keewood 用户中心用的一致）。要真浏览器的地方
-（`src/browser-login.mjs`、`src/headless.mjs` 里的浏览器拉起）各自带 UA，不受此限。
+⇒ `src/api.mjs` 导出唯一的 `UA = "curl/8.0"` 与 `originFor(host)`；api、loader、
+首任务、magic-service 组织探测全部共用。loader 还必须丢弃客户端传入的 `origin`，
+否则国际站会被带入一个必然 405 的头。keewood 用户中心是另一套服务，不套用这张表。
 
-判据：`node tests/upstream-ua.mjs`（钉住「不许出现 `Mozilla/*`」与「HTML 错误页只归一成一句人话」）。
+判据：`node tests/upstream-ua.mjs`（同时钉最终出站 headers，而不只查源码字符串）。
 
 ---
 

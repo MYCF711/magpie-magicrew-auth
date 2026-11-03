@@ -16,20 +16,19 @@
 //
 // ⇒ 插件只需要 ① 在登录时拿一次，之后 30 天全靠 ③ 自动滚。
 
-// User-Agent —— **不许伪装浏览器**（2026-11-03 实测）。
+// User-Agent —— 两站 WAF 的共同可通行值（2026-11-03 真机复核）。
 //
-// 国际站 magic-service.magicrew.ai 现在挂在阿里云 ESA 边缘后面（CNAME 指向
-// `magic-service.magicrew.ai.a1.initpp.com`，响应头 `server: ESA`）。ESA 对**带浏览器
-// UA 的请求一律回 405 + 一整页 HTML**，连 `GET /` 都不是 "hello, magic-service!"；
-// 换成非浏览器 UA 才原样透到后面的 Go 服务。同一时刻国内站两种 UA 都通，所以现象是
-// 「国内好好的、国际全挂」：
+// 国内 i-magic-service.letsmagic.cn（火山 WAF）现在对
+// `magpie-magicrew-auth`、`Bun/1.4.4`、浏览器 UA 都回空 403；国际
+// magic-service.magicrew.ai（阿里云 ESA）对浏览器 / Bun UA 回 405 HTML。
+// Bun 运行时里逐组实测后，`curl/8.0` 配上正确的 Origin 是两站都稳定的组合：
 //
-//   Chrome/141 UA → 405 HTML      （额度卡片："暂时无法获取额度：<!doctype html>…"）
-//   node / curl / 这个名字 → 200 JSON（和国内站逐字节同构）
+//   国内  UA=curl/8.0 + Origin=https://www.letsmagic.cn  → 200
+//   国际  UA=curl/8.0 + 不带 Origin                     → 200
 //
-// 结论：这里只报「我是谁」，别再抄浏览器的 UA。需要真浏览器的地方在
-// src/headless.mjs（keewood 用户中心）与 src/browser-login.mjs，它们各自带 UA。
-export const UA = "magpie-magicrew-auth"
+// 别再改成插件名、运行时默认值或浏览器 UA；任何一处走默认 Bun UA 都会整站掉线。
+// keewood 用户中心是另一套服务，src/headless.mjs 在那儿仍用自己的 UA。
+export const UA = "curl/8.0"
 
 // 一个包 = 两个 provider。
 //
@@ -87,15 +86,26 @@ class MagicrewError extends Error {
   }
 }
 
+/**
+ * magic-service 的 Origin 不能从 API host 直接取：
+ *   · 国内 WAF 拒 API 域名 Origin（空 403），要官网 www.letsmagic.cn；
+ *   · 国际 ESA 连官网 / API 域名 Origin 都拒（405 HTML），必须整头省略。
+ * 返回空串 = 调用方不要发送 Origin。
+ */
+export function originFor(host) {
+  const s = Object.values(SITES).find((v) => v.host === host) ?? SITES.cn
+  return s.id === SITES.intl.id ? "" : s.web
+}
+
 function headersFor(token, org, host) {
   const h = {
     authorization: `Bearer ${token}`,
     "content-type": "application/json",
     "user-agent": UA,
     accept: "application/json",
-    // 网关会看 Origin，缺了偶发 403
-    origin: host ? new URL(host).origin : "https://www.letsmagic.cn",
   }
+  const origin = originFor(host)
+  if (origin) h.origin = origin
   if (org) h["organization-code"] = org
   return h
 }
@@ -222,7 +232,12 @@ export async function issueGatewayKey(token, org, host = SITES.cn.host) {
 export async function refreshGatewayKey(refreshToken, host = SITES.cn.host) {
   const res = await fetch(`${host}/api/v1/model-gateway/tokens`, {
     method: "PUT",
-    headers: { "content-type": "application/json", "user-agent": UA },
+    headers: {
+      "content-type": "application/json",
+      "user-agent": UA,
+      accept: "application/json",
+      ...(originFor(host) ? { origin: originFor(host) } : {}),
+    },
     body: JSON.stringify({ refresh_token: refreshToken }),
   })
   const body = await read(res)
@@ -260,7 +275,12 @@ export async function fetchModels(token, org, host = SITES.cn.host) {
 /** 网关上的全量模型 id（含生图/视频/embedding），用来做分类。 */
 export async function fetchAllModels(apiKey, host = SITES.cn.host) {
   const res = await fetch(`${host}/v1/models`, {
-    headers: { authorization: `Bearer ${apiKey}`, "user-agent": UA },
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "user-agent": UA,
+      accept: "application/json",
+      ...(originFor(host) ? { origin: originFor(host) } : {}),
+    },
   })
   const body = await read(res)
   return (body?.data ?? []).map((m) => m.id)
