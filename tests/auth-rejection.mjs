@@ -38,6 +38,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { isAuthRejection, fetchPoints, SITES } from "../src/api.mjs"
 import { makeRefresh } from "../src/hooks/refresh.mjs"
+import { neutralLapse } from "../src/hooks/usage.mjs"
 import { siteCtx } from "../src/context.mjs"
 
 let pass = 0
@@ -213,6 +214,28 @@ await checkAsync("真 token 无效 → signIn:\"expired\"（这条必须留着�
   assert.ok(e, "本该抛错")
   assert.equal(e.signIn, "expired", "上游说 token 无效时必须让用户重新登录")
   assert.match(String(e.message), /登录已失效/)
+})
+
+// ══ 四、usage 的 error 文案：不许成为「登录失效」的旁门 ═══════════════
+//
+// magpie 读 usage 结果时还有一条**只看文案**的口子（plugin_usage.go 的
+// signInGone 正则 `(?i)sign-in has (expired|lapsed)|sign in again`）：
+// error 里出现这几个词就照样写 lapsed。而这句 error 的来源是上游响应，
+// 边缘层渲染页里带这种英文完全可能 —— 网络层的一句话不该变成账号状态。
+
+console.log('usage 的 error 文案：把「登录失效」的中英文说法中性化')
+
+check("上游文案里的 sign-in has expired / sign in again 被抹掉", () => {
+  const src = "Your Super Magic sign-in has expired — sign in again"
+  const out = neutralLapse(src)
+  assert.ok(!/sign[\s-]*in/i.test(out), `不该留下 sign-in：${out}`)
+  assert.ok(!/again/i.test(out), `不该留下 again：${out}`)
+})
+
+check("正常文案原样透传（不误伤）", () => {
+  const src = "上游返回 HTML 错误页（HTTP 405），不是接口响应"
+  assert.equal(neutralLapse(src), src)
+  assert.equal(neutralLapse("HTTP 403"), "HTTP 403")
 })
 
 await checkAsync("refresh_token 被吊销（code 2179）→ signIn:\"expired\"", async () => {

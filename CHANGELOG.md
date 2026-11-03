@@ -72,14 +72,55 @@ curl 打同一个地址回真实业务响应（`400 可用积分已不足`）。
 - `fetchWithFallback`（非流式，`spawnSync`）—— `api.mjs` 的 18 处请求全走它，是唯一出口；
 - `fetchStreamWithFallback`（**流式**，`Bun.spawn` + `ReadableStream`）—— `loader.mjs` 的模型请求走它。
   用 `-D -` 把头混在 stdout 最前面，读到空行止、剩下的原样流给调用方，**SSE 不缓冲**；
+- **请求体必须走 stdin（`--data-binary @-`），不能塞进 argv** —— Windows 单条命令行上限
+  32767 字符，实测 40KB body 直接 `ENAMETOOLONG: name too long, uv_spawn`。异常被 catch
+  吞掉后表现成「退回原来那条 403 空 body」：额度 / 模型目录全好，**长上下文的对话全挂**，
+  而且看着像 WAF，其实是请求根本没发出去。这条是这一版埋过又挖出来的坑。
 - 兜底是「失败即退回原响应」：curl 不存在 / 超时 / 还被拦 —— 调用方看到的行为与没有这层完全一致；
 - 测试安全：`globalThis.fetch` 被换成桩时**不 spawn curl**（否则测试桩形同虚设，还会把真实凭据打出去）。
 
+**为什么必须是真 curl，而不是「换个 Windows 原生栈」**（同夜实测，防后人走弯路）：
+
+| 客户端 | TLS 后端 | 结果 |
+|---|---|---|
+| `curl.exe` 8.18 / Git 的 curl 8.21 | libcurl + Schannel | **200** |
+| PowerShell / .NET `Invoke-WebRequest` | Schannel | **403** |
+| WinHTTP (COM) | Schannel | **403** |
+| Go `net/http` | crypto/tls | **403** |
+| Bun / Node | BoringSSL / OpenSSL | **403** |
+
+⇒ 放行的是 **libcurl 那一份具体的 ClientHello**，不是「Windows 原生栈」。
+抓 ClientHello 原始字节比对：Bun 17 个 cipher、首 `0x1301`、带 `0x11ec(MLKEM768)`；
+curl 20 个 cipher、首 `0x1302`、带传统 CBC 组。Bun 的 `tls.ciphers` 确实能生效（17→4→6 都试出来），
+但 TLS1.3 cipher 恒定前置、扩展顺序与曲线改不动 ⇒ **JA3 永远对不上**。
+所以「写个 Go / Rust 小代理」不是捷径，是另一个坑。
+
+### 三·补、`lapsed` 到底什么时候写、什么时候清（magpie 源码核对，2026-11-03）
+
+顺手把宿主那侧也读清楚了（`yetone/magpie` @ `50265256`，并与本机 `magpie.exe` 内嵌字面量交叉验证）：
+
+- **写入**：只有三条路 ① `signIn === "expired"`（`internal/plugin/host.js:2610`）；
+  ② 插件请求收到 **HTTP 401**；③ usage 结果的 `signIn === "expired"`，**或 error 文案命中正则**
+  `(?i)sign-in has (expired|lapsed)|sign in again`（`internal/gui/plugin_usage.go:81`）。
+  **403 / 500 一律不标记** —— 所以坑 42 那一批「已退出登录」自始至终都是我们插件自己判出来的，
+  不是 magpie 干的。
+- **清除**：任一插件请求 2xx / usage 读取成功 / refresh 成功 / 用户重新登录成功，**任一即清**
+  （`internal/gui/plugin_accounts.go:492-500`）。⇒ 通道修好后，下一次额度读取成功就会把
+  那四条陈年 `lapsed` 抹掉，不需要用户去点「重新登录」。
+- **普通错误（不带 signIn）不禁用、不标记、不影响路由**，只压 30 秒重试并照常用旧 token 发请求
+  （`internal/plugin/host.js:2423` / `plugin_keepalive.go:26-30` 的头注释就是这条设计）。
+- ⚠ 第 ③ 条那个「只看文案」的口子是唯一不用 `signIn` 也能标记的通道 —— 所以 `usage.mjs` 的
+  catch 里加了 `neutralLapse()`，把 error 文案里的 `sign-in has expired` / `sign in again`
+  中性化掉。网络层的一句英文不该变成账号状态。
+
 ### 四、验证
 
-- `node tests/auth-rejection.mjs` 新增 16 条：空 body 403 / HTML 405 / 裸 `HTTP 403` / 超时 / 5xx
-  全部**不**判登录失效；只有上游 JSON 401/403 与明确文案才判，且 `refresh` 钩子会把 `signIn` 交出去。
+- `node tests/auth-rejection.mjs` 新增 18 条：空 body 403 / HTML 405 / 裸 `HTTP 403` / 超时 / 5xx
+  全部**不**判登录失效；只有上游 JSON 401/403 与明确文案才判，且 `refresh` 钩子会把 `signIn` 交出去；
+  另锁 `neutralLapse()` 会把 `sign-in has expired` / `sign in again` 抹掉、且不误伤正常文案。
 - 全部 22 个离线测试文件通过（`key-failover` 26、`upstream-ua` 16、`negative-balance` 25 …）。
+- 长 body：`curlStreamFetch` 走 stdin 后，1KB / 40KB / **400KB** 请求体全部 200 且服务端收到的
+  字节数一致（`got=1055 / 40055 / 400055`），不再有 `ENAMETOOLONG`。
 - Bun 真机（走 Schannel）：国内站 `usage` 读到 `已欠费 5 积分`、`fetchModels` 15 个模型、
   `fetchModelPoints` 15 条价格、`fetchInviteStatus` 邀请码正常；
   本地 SSE 服务验证 `curlStreamFetch` 分块到达（40ms 一帧）且内容完整；

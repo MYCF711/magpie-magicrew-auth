@@ -92,7 +92,11 @@ function toCurlArgs(url, opts = {}) {
   if (opts.body != null) {
     // 显式给 GET 时 --data-binary 会把方法改成 POST，所以非 GET 才补 -X
     if (method !== "GET") args.push("-X", method)
-    args.push("--data-binary", typeof opts.body === "string" ? opts.body : String(opts.body))
+    // ⚠ body **必须走 stdin**，不能塞进 argv —— Windows 单条命令行上限 32767
+    //   字符，实测 40KB 的请求体直接 `ENAMETOOLONG: name too long, uv_spawn`。
+    //   异常被 catch 吞掉后表现为「退回原来那条 403 空 body」，看着像 WAF、
+    //   其实是请求根本没发出去：额度/模型目录全好，长上下文的对话全挂。
+    args.push("--data-binary", "@-")
   } else if (method !== "GET") {
     args.push("-X", method)
   }
@@ -100,6 +104,15 @@ function toCurlArgs(url, opts = {}) {
   args.push("-w", "\n__MAGICREW_STATUS__%{http_code}")
   args.push(url)
   return args
+}
+
+/** body → 能喂给子进程 stdin 的字节。 */
+function bodyBytes(body) {
+  if (body == null) return undefined
+  if (typeof body === "string") return body
+  if (body instanceof Uint8Array) return body
+  if (body instanceof ArrayBuffer) return new Uint8Array(body)
+  return String(body)
 }
 
 const STATUS_MARK = "__MAGICREW_STATUS__"
@@ -118,6 +131,7 @@ export function curlFetch(url, opts = {}) {
       timeout: 120_000,
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
+      input: bodyBytes(opts.body),
     })
   } catch {
     return null
@@ -218,7 +232,8 @@ function toCurlStreamArgs(url, opts = {}) {
   }
   if (opts.body != null) {
     if (method !== "GET") args.push("-X", method)
-    args.push("--data-binary", typeof opts.body === "string" ? opts.body : String(opts.body))
+    // 同上：body 走 stdin。对话请求的 body 动辄几十上百 KB，塞 argv 必挂。
+    args.push("--data-binary", "@-")
   } else if (method !== "GET") {
     args.push("-X", method)
   }
@@ -236,12 +251,15 @@ export function curlStreamFetch(url, opts = {}) {
   if (!curl) return null
   if (typeof Bun === "undefined" || typeof Bun.spawn !== "function") return null
 
+  const bytes = bodyBytes(opts.body)
   let proc
   try {
     proc = Bun.spawn([curl, ...toCurlStreamArgs(url, opts)], {
       stdout: "pipe",
       stderr: "ignore",
-      stdin: "ignore",
+      // 有 body 就用管道喂 `--data-binary @-`；没有 body 必须显式 ignore，
+      // 否则 curl 会等在 stdin 上，请求永远发不出去。
+      stdin: bytes == null ? "ignore" : new Response(bytes).body,
     })
   } catch {
     return null

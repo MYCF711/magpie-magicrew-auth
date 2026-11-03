@@ -158,9 +158,29 @@ export function makeUsage(c) {
         windows,
       }
     } catch (e) {
-      return { error: String(e?.message ?? e), windows: [] }
+      return { error: neutralLapse(String(e?.message ?? e)), windows: [] }
     }
   }
+}
+
+/**
+ * 把「登录失效」这类词从中性化掉 —— 额度读取失败**不许**升级成账号状态。
+ *
+ * 为什么（magpie 源码 plugin_usage.go 的 `signInGone` 正则，2026-11-03 核对）：
+ *   宿主读 usage 结果时，除了 `signIn === "expired"`，还有一条**只看文案**的口子：
+ *
+ *     (?i)sign-in has (expired|lapsed)|sign in again
+ *
+ *   命中就把这个账号写进 `logins.json` 的 `lapsed`（界面变成「需要重新登录」）。
+ *   而这句 error 的来源是上游响应 —— WAF 的错误页 / 边缘渲染页里出现
+ *   `sign in again` 这种文案是完全可能的。网络层的一句英文，不该变成
+ *   「你的账号掉登录了」。
+ *
+ * 我们的 error 本身从来不含这些词（`read()` 对 HTML 只留「上游返回 HTML 错误页
+ * （HTTP n）」），这里再兜一层，防止将来有人把原始响应体塞进文案。
+ */
+export function neutralLapse(msg) {
+  return String(msg).replace(/sign[\s-]*in\s+(has\s+)?(expired|lapsed)|sign\s+in\s+again/gi, "登录状态未知")
 }
 
 /**
