@@ -1,3 +1,137 @@
+## 0.3.73 — 2026-11-03
+
+**欠费的号不该被要求重新登录：WAF 的 403 不再是「登录失效」的证据；请求通道换成 Schannel**
+
+### 一、症状（主人截图：五个号全部「需要重新登录」）
+
+```
+189****051  已欠费 · 开发 4        [需要重新登录] [重新登录] [移除]
+            已退出登录 —— 请在「供应商」中此账号上选择「重新登录」
+… 同形 ×5（180****361 / 181****632 / 181****710 / bdqo2hnd3ndn）
+```
+
+主人问的是那句：**「欠费就行了，为什么要重新登录？」**——问得对。这五个号一个都没掉：
+
+```
+curl -A "curl/8.0" -H "authorization: Bearer <该号 JWT>" -H "organization-code: <org>" \
+     https://i-magic-service.letsmagic.cn/api/v1/quota/points/total
+→ 200 {"code":1000,"message":"ok","data":{"total_points":-5,…}}
+```
+
+JWT 还有二十多天，余额 -5 是真的欠费。**重新登录解决不了任何事**，点完过一会儿又被标回来。
+
+### 二、根因一：把「被边缘层拦」当成了「上游说凭证不行」
+
+`src/hooks/refresh.mjs` 与 `src/hooks/models.mjs` 各有一处判据：
+
+```js
+if (/invalid|expired|401|403|token/i.test(String(e?.message))) {
+  throw Object.assign(new Error("登录已失效，请重新登录"), { signIn: "expired" })
+}
+```
+
+WAF 拦下来时 `api.mjs` 的 `read()` 抛出的是 `message = "HTTP 403"` —— **`403` 这三个字符直接命中**，
+于是：
+
+```
+WAF 空 403 → signIn:"expired" → magpie 往 logins.json 该账号写 lapsed
+           → GUI「已退出登录 · 需要重新登录」
+```
+
+`logins.json` 里确实躺着四条 `lapsed`（`"180****361's 超级麦吉 Super Magic sign-in has expired — sign in again"`），
+时间戳停在 10-27 / 10-30 —— 是陈年误判，之后因为一直 403 就没再被清掉。
+
+**改法**：`src/api.mjs` 新增并导出 `isAuthRejection(err)`，判据分两层：
+
+1. 先排除**不是上游答的**：`MagicrewError.edge = true`（空 body 或 HTML 页）→ 一律不算登录失效。
+   上游那个 Go 服务回错误**永远**是 `{"code":…,"message":…}` JSON，空 body / HTML 只能是边缘层。
+2. 剩下的只看上游**自己的话**：业务码 401/403，或明确指向凭证的文案（`token无效` / `invalid refresh_token` /
+   `auth_token 不存在` / `未登录` / `登录已失效` …）。
+
+⚠ 别再退回「消息里含 403 就算」。`HTTP 403` 这两个字既可能是 token 无效，也可能是 WAF 封了这个 IP。
+
+### 三、根因二：WAF 从「看 UA」升级成「看 TLS 指纹」，0.3.72 的改法已失效
+
+同一时刻、同一份 headers，只有 **TLS 实现**不同的两条请求拿到了相反的答案：
+
+| 通道 | 结果 |
+|---|---|
+| `C:\Windows\System32\curl.exe`（libcurl 8.18，**Schannel**，Windows 原生栈） | **200** `{"total_points":-5,…}`，连打 8 次全 200 |
+| Bun 1.4.4 的 `fetch`（BoringSSL） | **403**，body 空串，连打 6 次全 403 |
+| Node 24 的 `fetch`（undici/OpenSSL） | **403**，body 空串 |
+
+换过 UA（`curl/8.0` / Bun 默认 / 浏览器 / 插件名）、换过 Origin（带 / 不带 / 换域名）、
+换过方法（GET/POST/PUT）、换过路径（**连 `GET /` 根路径**）—— 全是 403。
+⇒ UA、Origin、方法、路径、频率都不是变量，**只有 ClientHello 的指纹是**。
+
+而且**模型端点一样被拦**：Bun 打 `/v1/chat/completions` 回 403 空 body，
+curl 打同一个地址回真实业务响应（`400 可用积分已不足`）。也就是说这一版不修，聊天也是全挂的。
+
+**改法**：新增 `src/schannel.mjs`，请求通道改成「先运行时 fetch，被边缘层拦了换系统 curl 重发」：
+
+- `fetchWithFallback`（非流式，`spawnSync`）—— `api.mjs` 的 18 处请求全走它，是唯一出口；
+- `fetchStreamWithFallback`（**流式**，`Bun.spawn` + `ReadableStream`）—— `loader.mjs` 的模型请求走它。
+  用 `-D -` 把头混在 stdout 最前面，读到空行止、剩下的原样流给调用方，**SSE 不缓冲**；
+- **请求体必须走 stdin（`--data-binary @-`），不能塞进 argv** —— Windows 单条命令行上限
+  32767 字符，实测 40KB body 直接 `ENAMETOOLONG: name too long, uv_spawn`。异常被 catch
+  吞掉后表现成「退回原来那条 403 空 body」：额度 / 模型目录全好，**长上下文的对话全挂**，
+  而且看着像 WAF，其实是请求根本没发出去。这条是这一版埋过又挖出来的坑。
+- 兜底是「失败即退回原响应」：curl 不存在 / 超时 / 还被拦 —— 调用方看到的行为与没有这层完全一致；
+- 测试安全：`globalThis.fetch` 被换成桩时**不 spawn curl**（否则测试桩形同虚设，还会把真实凭据打出去）。
+
+**为什么必须是真 curl，而不是「换个 Windows 原生栈」**（同夜实测，防后人走弯路）：
+
+| 客户端 | TLS 后端 | 结果 |
+|---|---|---|
+| `curl.exe` 8.18 / Git 的 curl 8.21 | libcurl + Schannel | **200** |
+| PowerShell / .NET `Invoke-WebRequest` | Schannel | **403** |
+| WinHTTP (COM) | Schannel | **403** |
+| Go `net/http` | crypto/tls | **403** |
+| Bun / Node | BoringSSL / OpenSSL | **403** |
+
+⇒ 放行的是 **libcurl 那一份具体的 ClientHello**，不是「Windows 原生栈」。
+抓 ClientHello 原始字节比对：Bun 17 个 cipher、首 `0x1301`、带 `0x11ec(MLKEM768)`；
+curl 20 个 cipher、首 `0x1302`、带传统 CBC 组。Bun 的 `tls.ciphers` 确实能生效（17→4→6 都试出来），
+但 TLS1.3 cipher 恒定前置、扩展顺序与曲线改不动 ⇒ **JA3 永远对不上**。
+所以「写个 Go / Rust 小代理」不是捷径，是另一个坑。
+
+### 三·补、`lapsed` 到底什么时候写、什么时候清（magpie 源码核对，2026-11-03）
+
+顺手把宿主那侧也读清楚了（`yetone/magpie` @ `50265256`，并与本机 `magpie.exe` 内嵌字面量交叉验证）：
+
+- **写入**：只有三条路 ① `signIn === "expired"`（`internal/plugin/host.js:2610`）；
+  ② 插件请求收到 **HTTP 401**；③ usage 结果的 `signIn === "expired"`，**或 error 文案命中正则**
+  `(?i)sign-in has (expired|lapsed)|sign in again`（`internal/gui/plugin_usage.go:81`）。
+  **403 / 500 一律不标记** —— 所以坑 42 那一批「已退出登录」自始至终都是我们插件自己判出来的，
+  不是 magpie 干的。
+- **清除**：任一插件请求 2xx / usage 读取成功 / refresh 成功 / 用户重新登录成功，**任一即清**
+  （`internal/gui/plugin_accounts.go:492-500`）。⇒ 通道修好后，下一次额度读取成功就会把
+  那四条陈年 `lapsed` 抹掉，不需要用户去点「重新登录」。
+- **普通错误（不带 signIn）不禁用、不标记、不影响路由**，只压 30 秒重试并照常用旧 token 发请求
+  （`internal/plugin/host.js:2423` / `plugin_keepalive.go:26-30` 的头注释就是这条设计）。
+- ⚠ 第 ③ 条那个「只看文案」的口子是唯一不用 `signIn` 也能标记的通道 —— 所以 `usage.mjs` 的
+  catch 里加了 `neutralLapse()`，把 error 文案里的 `sign-in has expired` / `sign in again`
+  中性化掉。网络层的一句英文不该变成账号状态。
+
+### 四、验证
+
+- `node tests/auth-rejection.mjs` 新增 18 条：空 body 403 / HTML 405 / 裸 `HTTP 403` / 超时 / 5xx
+  全部**不**判登录失效；只有上游 JSON 401/403 与明确文案才判，且 `refresh` 钩子会把 `signIn` 交出去；
+  另锁 `neutralLapse()` 会把 `sign-in has expired` / `sign in again` 抹掉、且不误伤正常文案。
+- 全部 22 个离线测试文件通过（`key-failover` 26、`upstream-ua` 16、`negative-balance` 25 …）。
+- 长 body：`curlStreamFetch` 走 stdin 后，1KB / 40KB / **400KB** 请求体全部 200 且服务端收到的
+  字节数一致（`got=1055 / 40055 / 400055`），不再有 `ENAMETOOLONG`。
+- Bun 真机（走 Schannel）：国内站 `usage` 读到 `已欠费 5 积分`、`fetchModels` 15 个模型、
+  `fetchModelPoints` 15 条价格、`fetchInviteStatus` 邀请码正常；
+  本地 SSE 服务验证 `curlStreamFetch` 分块到达（40ms 一帧）且内容完整；
+  真实 `/v1/chat/completions` 从「403 空 body」变成真实业务响应（欠费 400）。
+
+### 五、已知未解
+
+- **国际站仍然全站 405**（`magic-service.magicrew.ai`，阿里云 ESA）：连 `GET /` 都是 405 HTML，
+  换 UA / Referer / HTTP1.1 / 不带任何头都一样 ⇒ 不是请求指纹问题，是边缘规则（IP / 地域），
+  这一版没动它。国内站（火山 WAF）已恢复。
+
 ## 0.3.72 — 2026-11-03
 
 **国内站所有账号突然「已退出登录」不是封号：修复两站 WAF 的 UA / Origin 组合**

@@ -8,6 +8,7 @@
 //   服务端每次换完会轮换，必须用返回的新值。
 
 import { renewViaStore } from "../keys.mjs"
+import { isAuthRejection } from "../api.mjs"
 
 export function makeRefresh(c) {
   return async (auth) => {
@@ -27,9 +28,16 @@ export function makeRefresh(c) {
         expires: k.expiresAt || Date.now() + 2 * 3600_000,
       }
     } catch (e) {
-      if (/invalid|expired|401|403|token/i.test(String(e?.message))) {
+      // ⚠ 这里只许用 isAuthRejection 那个窄判据。
+      //   旧代码是 `/invalid|expired|401|403|token/.test(message)`：WAF 拦出来的
+      //   `HTTP 403` 直接命中，于是「被边缘层拦」被写成「登录过期」→
+      //   magpie 记 lapsed → 界面上五个号齐刷刷「需要重新登录」，
+      //   而它们的 JWT 全都还在有效期内（2026-11-03 实测）。
+      if (isAuthRejection(e)) {
         throw Object.assign(new Error("登录已失效，请重新登录"), { signIn: "expired" })
       }
+      // 其余（WAF 403 空 body、HTML 405、超时、5xx）一律原样抛：
+      // magpie 会当成「这次没续上」，保留现有登录态，下一轮再试。
       throw e
     }
   }

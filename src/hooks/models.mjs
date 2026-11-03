@@ -9,7 +9,7 @@
 //
 // 登录态失效 → 抛带 signIn: "expired" 的错误。
 
-import { fetchModels, fetchModelPoints } from "../api.mjs"
+import { fetchModels, fetchModelPoints, isAuthRejection } from "../api.mjs"
 import { modelEntry } from "../context.mjs"
 import { readSnapshot, writeSnapshot } from "../store.mjs"
 
@@ -69,7 +69,8 @@ export function makeModels(c) {
       writeSnapshot(c.id, out)
       return out
     } catch (e) {
-      if (/401|403|unauthorized|expired|用户不存在|登录失败/i.test(String(e?.message ?? e))) {
+      // 判据见 api.mjs 的 isAuthRejection：WAF 的空 403 / HTML 405 **不算**登录失效。
+      if (isAuthRejection(e)) {
         throw Object.assign(new Error("登录已失效"), { signIn: "expired" })
       }
       // 网络抖动：退回上次的快照，别让整个供应商从列表里消失
