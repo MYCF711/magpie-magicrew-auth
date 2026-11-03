@@ -617,6 +617,11 @@ export function stripReasoning(raw) {
  * 原来上游给的是 `{"code":null,…,"type":"invalid_request_error"}` —— 码是
  * null，客户端只能当普通失败。这里补一个稳定码，让调用方（以及看日志的人）
  * 一眼认出「这一轮是被 thinking 参数挡的，模型本身没问题」。
+ *
+ * ⚠ code 只能取 ERROR-CODES §3 的冻结词表（脚手架 0.3.7 起静态扫，自造词
+ *   `thinking_unsupported` 会让 `node scripts/check.mjs` 直接红）。这里用
+ *   `invalid_request`：上游拒的就是请求参数（status 也是 400），换号没救、
+ *   不重试。区分「是 thinking 这一项」靠 message 与响应头 `x-magicrew-thinking`。
  */
 function thinkingSkippedBody(original) {
   const detail = (() => {
@@ -633,7 +638,7 @@ function thinkingSkippedBody(original) {
         `MagiCrew：本模型不吃 thinking 参数（换形状、剥参数两次重发均被拒），` +
         `本轮已跳过思考降级发送。上游原文：${detail || original.slice(0, 400)}`,
       type: "invalid_request_error",
-      code: "thinking_unsupported",
+      code: "invalid_request",
     },
   })
 }
