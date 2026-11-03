@@ -3,7 +3,9 @@
 //   node tests/auto-maintenance.mjs
 //
 // 钉住：
-//   ① ensureCheckinDefault：只在「用户从未设置过」时补 true，显式 false 绝不覆盖
+//   ① ensureCheckinDefault：只在「用户从未设置过」时补 **false**（0.3.75 起签到被禁止，
+//      插件不再注册 checkin 钩子，补 true 只会让 magpie 去调度一个不存在的钩子）；
+//      用户显式设过的值绝不覆盖
 //   ② pickSelfUpdate / noteUpdated：从 magpie 的 plugin-updates.json 认出自己，
 //      并在真正更新成功后补「已自动更新」记录（徽章读的就是它）
 //   ③ kick：节流、无 exe 降级、干跑、成功/失败状态
@@ -66,14 +68,15 @@ const read = (p) => JSON.parse(readFileSync(p, "utf8"))
 const settingsPath = join(CONFIG, "settings.json")
 
 // ═══ ① ensureCheckinDefault ═══════════════════════════════════════════
-console.log("ensureCheckinDefault —— 只补「从未设置过」的默认值")
+console.log("ensureCheckinDefault —— 只补「从未设置过」的默认值（且默认是 false）")
 
-check("没有 settings.json → 创建并写 pluginCheckins[provider]=true", () => {
+check("没有 settings.json → 创建并写 pluginCheckins[provider]=false", () => {
   rmSync(settingsPath, { force: true })
   const r = ensureCheckinDefault("magicrew")
   assert.equal(r.changed, true)
+  assert.equal(r.on, false)
   const s = read(settingsPath)
-  assert.equal(s.pluginCheckins.magicrew, true)
+  assert.equal(s.pluginCheckins.magicrew, false)
 })
 
 check("已有 magicrew=true → 不改", () => {
@@ -85,7 +88,7 @@ check("已有 magicrew=true → 不改", () => {
   assert.equal(readFileSync(settingsPath, "utf8"), before)
 })
 
-check("已有 magicrew=false（用户显式关掉）→ 绝不改回 true", () => {
+check("已有 magicrew=false（用户显式关掉）→ 不动", () => {
   writeFileSync(settingsPath, JSON.stringify({ pluginCheckins: { magicrew: false } }))
   const r = ensureCheckinDefault("magicrew")
   assert.equal(r.changed, false)
@@ -100,7 +103,7 @@ check("有其它 provider 的开关 → 原样保留", () => {
   const s = read(settingsPath)
   assert.equal(s.theme, "dark")
   assert.equal(s.pluginCheckins.other, true)
-  assert.equal(s.pluginCheckins.magicrew, true)
+  assert.equal(s.pluginCheckins.magicrew, false)
 })
 
 check("settings.json 坏了 → 不覆盖（宁可没功能，也不毁用户配置）", () => {
@@ -263,10 +266,10 @@ await checkAsync("spawn 成功退出 0 → 写 updated[] 与 done 状态，并�
 // ═══ ⑤ initAutoMaintenance ════════════════════════════════════════════
 console.log("\ninitAutoMaintenance —— config 时补默认签到")
 
-await checkAsync("设置里没有该 provider → 补 true", async () => {
+await checkAsync("设置里没有该 provider → 补 false（签到已禁止）", async () => {
   rmSync(settingsPath, { force: true })
   initAutoMaintenance({ PROVIDER: "magicrew-intl", id: "magicrew-intl" })
-  assert.equal(read(settingsPath).pluginCheckins["magicrew-intl"], true)
+  assert.equal(read(settingsPath).pluginCheckins["magicrew-intl"], false)
 })
 
 // ── 收尾 ───────────────────────────────────────────────────────────────

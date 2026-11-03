@@ -202,6 +202,11 @@ export async function renewViaStore(c, auth) {
           return { ...next, refreshToken: nextRefresh }
         } catch (e) {
           lastErr = e
+          // ⚠ 边缘层拦（WAF 的空 403 / HTML 405）跟用哪把 token **无关** ——
+          // 再试第二把只是白等一个同样长的超时。实测（2026-11-04）：
+          // 两把串起来能把 auth.refresh 从 8 秒拖到 22 秒，而 magpie 是同步等着的。
+          // 这种错直接抛，让 magpie 一分钟后再来。
+          if (e?.edge) break
         }
       }
       throw lastErr ?? new Error("续期失败")
