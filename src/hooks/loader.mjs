@@ -15,6 +15,8 @@
 //   流由 magpie 处理，头由 SDK 包自动加。见 README「最小交付面」。
 
 import { ensureKey, accountOf, keyCandidates, adoptKey, renewViaStore } from "../keys.mjs"
+// UA 只有一个出口（src/api.mjs 的 UA）—— 这里曾被漏掉过，见下面 fetch 包装的注释。
+import { UA } from "../api.mjs"
 
 /**
  * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
@@ -873,7 +875,7 @@ export function makeLoader(c) {
     return {
       baseURL: c.BASE,
       apiKey: auth.access,
-      headers: { "user-agent": "MagicrewClient/1.0" },
+      headers: { "user-agent": UA },
       async fetch(input, init) {
         const fresh = await getAuth()
         if (!fresh) throw new Error(`${c.SHORT} 未登录`)
@@ -892,9 +894,15 @@ export function makeLoader(c) {
               : (req?.url ?? "")
 
         const incoming = new Headers(init?.headers ?? req?.headers ?? {})
+        // ⚠ UA 必须在这里显式给。宿主传进来的那只 UA 在下面的 pass-through 里被
+        //   跳过（和 authorization 一样不许客户端覆盖），不给就等于把请求交给
+        //   **运行时默认 UA**（bun 的 `Bun/1.4.4`、node 的 `node`）。
+        //   2026-11-03 实测：国际站 ESA 边缘对 Chrome UA 与 `Bun/1.4.4` 一样回 405
+        //   HTML，中性 UA 才放行 —— 所以这里跟 api.mjs 共用同一个 UA 常量。
         const headers = {
           authorization: `Bearer ${key.apiKey}`,
           "content-type": "application/json",
+          "user-agent": UA,
         }
         if (c.needsOrgOnGateway && fresh.org) headers["organization-code"] = fresh.org
 
