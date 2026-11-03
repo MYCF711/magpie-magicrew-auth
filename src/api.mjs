@@ -16,8 +16,20 @@
 //
 // ⇒ 插件只需要 ① 在登录时拿一次，之后 30 天全靠 ③ 自动滚。
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+// User-Agent —— **不许伪装浏览器**（2026-11-03 实测）。
+//
+// 国际站 magic-service.magicrew.ai 现在挂在阿里云 ESA 边缘后面（CNAME 指向
+// `magic-service.magicrew.ai.a1.initpp.com`，响应头 `server: ESA`）。ESA 对**带浏览器
+// UA 的请求一律回 405 + 一整页 HTML**，连 `GET /` 都不是 "hello, magic-service!"；
+// 换成非浏览器 UA 才原样透到后面的 Go 服务。同一时刻国内站两种 UA 都通，所以现象是
+// 「国内好好的、国际全挂」：
+//
+//   Chrome/141 UA → 405 HTML      （额度卡片："暂时无法获取额度：<!doctype html>…"）
+//   node / curl / 这个名字 → 200 JSON（和国内站逐字节同构）
+//
+// 结论：这里只报「我是谁」，别再抄浏览器的 UA。需要真浏览器的地方在
+// src/headless.mjs（keewood 用户中心）与 src/browser-login.mjs，它们各自带 UA。
+const UA = "magpie-magicrew-auth"
 
 // 一个包 = 两个 provider。
 //
@@ -88,13 +100,34 @@ function headersFor(token, org, host) {
   return h
 }
 
+/**
+ * 哄不进 JSON 的响应体 → 一句人能看的话。
+ *
+ * 上游被边缘 / WAF 拦下时回的是**一整页 HTML**（阿里云 ESA 的 405 错误页约 2.5 KB）。
+ * 原来把这页原样塞进 `message`，用户看到的就是额度卡片上那句
+ * `暂时无法获取额度：<!doctype html><html lang="zh-cn">…`：200 字全被吞掉，
+ * 还看不出是「被拦了」还是「接口答错了」。这里只留「哪来的、几号」。
+ *
+ * 正常接口的纯文本错误（`Allow: POST, PUT` 这种）照旧原样透出前 200 字。
+ */
+function upstreamText(text, status) {
+  const t = String(text ?? "").trim()
+  if (!t) return ""
+  if (t.startsWith("<")) {
+    const title = (t.match(/<title[^>]*>([^<]{0,80})<\/title>/i)?.[1] || "").trim()
+    const shown = title && title !== String(status) ? `（${title}）` : ""
+    return `上游返回 HTML 错误页${shown}，不是接口响应（HTTP ${status}）`
+  }
+  return t.slice(0, 200)
+}
+
 async function read(res) {
   const text = await res.text()
   let body
   try {
     body = text ? JSON.parse(text) : {}
   } catch {
-    body = { message: text.slice(0, 200) }
+    body = { message: upstreamText(text, res.status) }
   }
   if (!res.ok) {
     throw new MagicrewError(body?.message || `HTTP ${res.status}`, { status: res.status, code: body?.code })

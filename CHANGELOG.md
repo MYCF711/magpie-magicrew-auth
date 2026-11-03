@@ -1,3 +1,59 @@
+## 0.3.71 — 2026-11-03
+
+**国际站不再「暂时无法获取额度：`<!doctype html>…`」—— 别再伪装浏览器 UA；错误码归位到 §3 词表**
+
+### 一、症状（主人截图：额度卡片连着三行 HTML）
+
+```
+暂时无法获取额度：<!doctype html><html lang="zh-cn"><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1"><meta name="data-spm"
+content="a3c0e"><title…
+```
+
+magpie 日志同一时刻在刷 `auth.refresh: <!doctypehtml>…<title>405</title>…`，而**国内站一切正常**。
+
+### 二、根因：国际站的边缘把「浏览器 UA」405 掉了
+
+`magic-service.magicrew.ai` 现在 CNAME 到 `magic-service.magicrew.ai.a1.initpp.com`，
+响应头 `server: ESA` —— 阿里云边缘安全加速。它**只拦 User-Agent**：
+
+| 请求 | 结果 |
+|---|---|
+| `PUT /api/v1/model-gateway/tokens`，UA = `Chrome/141` | `405` + 2,569 字节 HTML（`<title>405</title>`） |
+| 同上，UA = `magpie-magicrew-auth` | `200` `{"code":33011,…}`（真到了 Go 服务） |
+| `GET /`，UA = `Chrome/141` | `405` HTML（**连 `hello, magic-service!` 都拿不到**） |
+| 同上，UA = `magpie-magicrew-auth` / `curl/…` / 不带 UA | `200` `hello, magic-service!` |
+
+国内站（火山 WAF）两种 UA 都通 ⇒ 现象就是「国内全好、国际全挂」。
+请求根本没到服务，所以这不是 token 的问题、更不是登录失效 —— 但错误文案里那张 HTML
+被 `read()` 原样塞进 `message`，用户只能看到一坨标签。
+
+**改法两件：**
+
+1. `src/api.mjs` 的 `UA` 不再抄 Chrome，只报自己是谁：`magpie-magicrew-auth`
+   （与 `src/headless.mjs` 对 keewood 用户中心用的一致）。要真浏览器的地方
+   （`browser-login.mjs`、拉起浏览器的代码）各自带 UA，不受影响。
+2. `read()` 新增 `upstreamText()`：响应体是 HTML 时只归一成
+   `上游返回 HTML 错误页（HTTP 405），不是接口响应`；纯文本错误（`Allow: POST, PUT`）
+   与 magic 业务码（`33002 账号不存在`）的文案一个字符都不动。
+
+### 三、顺手：`thinking_unsupported` → `invalid_request`
+
+脚手架 0.3.7（2026-11-02）新增的 ERROR-CODES 检查让 `node ../magpie-plugin-scaffold/scripts/check.mjs .`
+在 main 上一直是红的：§3 词表冻结 12 个 code，`thinking_unsupported` 是自造词。
+本轮把 `thinkingSkippedBody()` 的 code 换成词表内的 `invalid_request`（本来就是 400、
+上游拒的是请求参数、换号没救）。要认「是 thinking 这一项」看 message 与响应头
+`x-magicrew-thinking`，不再靠自造 code。
+
+### 四、验证
+
+```
+node tests/upstream-ua.mjs          → 7 通过 · 0 失败   （新增：钉住「不许出现 Mozilla/*」+ HTML 归一）
+全部离线测试                        → 19 个文件全过（smoke / browser-login 按 CI 规矩跳过）
+node ../magpie-plugin-scaffold/scripts/check.mjs . → 通过 46 · 警告 0 · 失败 0
+真机（国际站）：refreshGatewayKey(intl, 假 token) → 200 {"code":33011,"message":"Refresh token not found in database"}
+```
+
 ## 0.3.70 — 2026-10-31
 
 **国际站图标不再是「一小坨」；包名回到 ASCII slug，显示名搬到 `magpie.name`**

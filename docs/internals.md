@@ -53,6 +53,30 @@ curl -s https://www.magicrew.ai/workspace | grep -o '"MAGIC_[A-Z_]*":"[^"]*"'
 
 国内站同位置是 `i-magic-service.letsmagic.cn`，`MAGIC_GATEWAY_ADDRESS: https://api.teamshare.cn`。
 
+### ⚠ 国际站的边缘会把「浏览器 UA」405 掉（2026-11-03）
+
+`magic-service.magicrew.ai` 现在挂在**阿里云 ESA** 后面（CNAME 指向
+`magic-service.magicrew.ai.a1.initpp.com`，响应头 `server: ESA`）。ESA 对
+**带浏览器 User-Agent 的请求一律回 `405` + 一整页 HTML**，请求根本到不了后面的 Go 服务：
+
+```bash
+# 同一时刻、同一个 URL，只差一个 UA
+curl -s -o /dev/null -w '%{http_code}\n' https://magic-service.magicrew.ai/            # 200（curl 的 UA）
+curl -s -H 'user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36' -o /dev/null -w '%{http_code}\n' \
+  https://magic-service.magicrew.ai/                                                   # 405（HTML）
+```
+
+被拦时 `GET /` 也不是 `hello, magic-service!`，而是那页
+`<!doctypehtml><html lang="zh-cn">…<title>405</title>…`（`data-spm` 是阿里云的错误页模板）。
+国内站（火山 WAF，CNAME 到 `volcwaf.com`）两种 UA 都通 ⇒ 症状表现为「国内全好、国际全挂」。
+
+⇒ **插件的 UA 不许伪装浏览器**（`src/api.mjs` 的 `UA = "magpie-magicrew-auth"`，
+与 `src/headless.mjs` 对 keewood 用户中心用的一致）。要真浏览器的地方
+（`src/browser-login.mjs`、`src/headless.mjs` 里的浏览器拉起）各自带 UA，不受此限。
+
+判据：`node tests/upstream-ua.mjs`（钉住「不许出现 `Mozilla/*`」与「HTML 错误页只归一成一句人话」）。
+
 ---
 
 ## 二、三层凭证

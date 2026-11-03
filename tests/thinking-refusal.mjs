@@ -283,7 +283,7 @@ await checkAsync("三次都被拒 → 交回带 code 的错误（不再是无码
   assert.equal(res.status, 400)
   assert.equal(seen.length, 3)
   const body = JSON.parse(await res.text())
-  assert.equal(body.error.code, "thinking_unsupported")
+  assert.equal(body.error.code, "invalid_request", "code 只取 ERROR-CODES §3 词表，不许自造")
   assert.ok(body.error.message.includes("Thinking budget must be below"), "上游原文要带出来")
 })
 
