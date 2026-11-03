@@ -16,19 +16,27 @@
 //
 // ⇒ 插件只需要 ① 在登录时拿一次，之后 30 天全靠 ③ 自动滚。
 
-// User-Agent —— 两站 WAF 的共同可通行值（2026-11-03 真机复核）。
+// User-Agent —— 两站 WAF 的共同可通行值。
 //
-// 国内 i-magic-service.letsmagic.cn（火山 WAF）现在对
-// `magpie-magicrew-auth`、`Bun/1.4.4`、浏览器 UA 都回空 403；国际
-// magic-service.magicrew.ai（阿里云 ESA）对浏览器 / Bun UA 回 405 HTML。
-// Bun 运行时里逐组实测后，`curl/8.0` 配上正确的 Origin 是两站都稳定的组合：
+// 国内 i-magic-service.letsmagic.cn（火山 WAF）对 `magpie-magicrew-auth`、
+// `Bun/1.4.4`、浏览器 UA 都回空 403；国际 magic-service.magicrew.ai（阿里云 ESA）
+// 对浏览器 / Bun UA 回 405 HTML。`curl/8.0` 是当时逐组实测下来两站都稳的组合。
 //
-//   国内  UA=curl/8.0 + Origin=https://www.letsmagic.cn  → 200
-//   国际  UA=curl/8.0 + 不带 Origin                     → 200
+// ⚠ **UA 只解决了一半，别再把它当整修**（2026-11-03 晚真机）：
+//   同一时刻、同一份 headers，只有 TLS 实现不同的两条请求拿到了相反的答案 ——
+//   系统 curl.exe（**Schannel**，Windows 原生栈）连打 8 次全 200；
+//   Bun 的 fetch（BoringSSL）/ Node 的 fetch（OpenSSL）连打 6 次全 403 空 body。
+//   换 UA、换 Origin、换方法、换路径（连 `GET /`）全都还是 403 ⇒ WAF 现在按
+//   **ClientHello 指纹**放行，只认 Windows 原生栈。
+//   ⇒ 真正的通道兜底在 src/schannel.mjs（被拦时用 curl.exe 重发），
+//     本文件所有请求都走 `request()` 那个唯一出口，不要直接调 fetch。
 //
-// 别再改成插件名、运行时默认值或浏览器 UA；任何一处走默认 Bun UA 都会整站掉线。
 // keewood 用户中心是另一套服务，src/headless.mjs 在那儿仍用自己的 UA。
 export const UA = "curl/8.0"
+
+// 发请求的**唯一出口**。别在别处直接 fetch：那一路会悄悄绕开 Schannel 兜底
+// （0.3.72 的 UA 就在 loader 里漏过一次）。见 src/schannel.mjs 头。
+import { fetchWithFallback as request } from "./schannel.mjs"
 
 // 一个包 = 两个 provider。
 //
@@ -77,12 +85,15 @@ export function site(id) {
 }
 
 class MagicrewError extends Error {
-  constructor(message, { status, code, site: s } = {}) {
+  constructor(message, { status, code, site: s, edge = false } = {}) {
     super(message)
     this.name = "MagicrewError"
     this.status = status
     this.code = code
     this.site = s
+    // edge = 这次响应**根本不是上游业务服务答的**（WAF / CDN 拦下来的空 body 或 HTML 页）。
+    // 它和「上游说这个凭证不认」是两件事，判登录失效时必须先把它排掉 —— 见 isAuthRejection。
+    this.edge = !!edge
   }
 }
 
@@ -133,6 +144,11 @@ function upstreamText(text, status) {
 
 async function read(res) {
   const text = await res.text()
+  // 边缘层拦下来的响应一定**没有 JSON 业务体**：要么空 body（火山 WAF 的空 403），
+  // 要么一整页 HTML（阿里云 ESA 的 405 页）。上游那个 Go 服务回错误永远是
+  // `{"code":…,"message":…}`。这条差别是「登录失效」判据的地基 —— 见 isAuthRejection。
+  const trimmed = String(text ?? "").trim()
+  const edge = !trimmed || trimmed.startsWith("<")
   let body
   try {
     body = text ? JSON.parse(text) : {}
@@ -140,13 +156,40 @@ async function read(res) {
     body = { message: upstreamText(text, res.status) }
   }
   if (!res.ok) {
-    throw new MagicrewError(body?.message || `HTTP ${res.status}`, { status: res.status, code: body?.code })
+    throw new MagicrewError(body?.message || `HTTP ${res.status}`, { status: res.status, code: body?.code, edge })
   }
   // magic 的业务错误码：1000 = ok，其它都是错
   if (typeof body?.code === "number" && body.code !== 1000) {
     throw new MagicrewError(body.message || `code ${body.code}`, { status: res.status, code: body.code })
   }
   return body
+}
+
+/**
+ * 这个错误算不算「上游真的不认这份凭证」—— 只有为真才允许叫用户重新登录。
+ *
+ * 为什么必须收窄（2026-11-03 真机事故）：
+ *   火山 WAF / 阿里云 ESA 把插件整段拦下时回的是**空 body 的 403** /
+ *   一整页 HTML 的 405。旧判据是消息里出现 `403` 就算登录失效
+ *   （`hooks/refresh.mjs` 与 `hooks/models.mjs` 各一处），于是：
+ *   被边缘层拦 → 抛 `signIn:"expired"` → magpie 往 `logins.json` 该账号写
+ *   `lapsed` → 界面上齐刷刷「已退出登录 · 需要重新登录」。
+ *   那几个号的 JWT 实测还有二十多天、余额只是 -5：点了重新登录也什么都变不了。
+ *
+ * 判据分两层：
+ *   ① `err.edge`（空 body / HTML）→ 一定是网络层，直接排除，**不赖账号**；
+ *   ② 只看上游**自己的话**：业务码 401/403，或明确指向凭证的文案。
+ *
+ * ⚠ 千万别再退回「消息里含 403 就算」。`HTTP 403` 这两个字符什么都说明不了 ——
+ *   它既可能是 token 无效，也可能是 WAF 把这个 IP 拦了。
+ */
+export function isAuthRejection(err) {
+  if (!err) return false
+  if (err.edge) return false
+  const code = Number(err?.code ?? NaN)
+  if (code === 401 || code === 403) return true
+  const msg = String(err?.message ?? err)
+  return /token\s*无效|invalid[\s_-]*(refresh[\s_-]*)?token|auth_token\s*不存在|unauthorized|未登录|请先登录|登录已失效|用户不存在|登录失败|凭证.{0,6}(失效|过期|无效)/i.test(msg)
 }
 
 // ── ① 登录 ───────────────────────────────────────────────────────────
@@ -167,7 +210,7 @@ export async function login({
   host = SITES.cn.host,
   inviteCode = "",
 }) {
-  const res = await fetch(`${host}/api/v1/sessions`, {
+  const res = await request(`${host}/api/v1/sessions`, {
     method: "POST",
     headers: headersFor("", organizationCode, host),
     body: JSON.stringify({
@@ -209,7 +252,7 @@ export async function login({
 
 /** 用登录 JWT 签发一把 mgw_ key（2 小时）。 */
 export async function issueGatewayKey(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/model-gateway/tokens`, {
+  const res = await request(`${host}/api/v1/model-gateway/tokens`, {
     method: "POST",
     headers: headersFor(token, org, host),
     body: "{}",
@@ -230,7 +273,7 @@ export async function issueGatewayKey(token, org, host = SITES.cn.host) {
  * 不需要登录态；refresh_token 会**轮换**（一次性的），必须串行调用。
  */
 export async function refreshGatewayKey(refreshToken, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/model-gateway/tokens`, {
+  const res = await request(`${host}/api/v1/model-gateway/tokens`, {
     method: "PUT",
     headers: {
       "content-type": "application/json",
@@ -262,7 +305,7 @@ export async function refreshGatewayKey(refreshToken, host = SITES.cn.host) {
  * 实测返回字段：value / label / icon / tags / configs / vision
  */
 export async function fetchModels(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/flows/models`, { headers: headersFor(token, org, host) })
+  const res = await request(`${host}/api/v1/flows/models`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const list = body?.data?.models ?? []
   return list.map((m) => ({
@@ -274,7 +317,7 @@ export async function fetchModels(token, org, host = SITES.cn.host) {
 
 /** 网关上的全量模型 id（含生图/视频/embedding），用来做分类。 */
 export async function fetchAllModels(apiKey, host = SITES.cn.host) {
-  const res = await fetch(`${host}/v1/models`, {
+  const res = await request(`${host}/v1/models`, {
     headers: {
       authorization: `Bearer ${apiKey}`,
       "user-agent": UA,
@@ -294,7 +337,7 @@ export async function fetchAllModels(apiKey, host = SITES.cn.host) {
  * input_points / output_points 是**每百万 token 的积分**。
  */
 export async function fetchModelPoints(token, org, modelIds, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/products/model-points`, {
+  const res = await request(`${host}/api/v1/products/model-points`, {
     method: "POST",
     headers: headersFor(token, org, host),
     body: JSON.stringify({ model_ids: modelIds }),
@@ -333,7 +376,7 @@ function classify(billingType, modelId) {
 // 返回 9303「该新人引导任务不支持手动完成」—— 那项是真的要跑一次 AI 任务。
 
 export async function fetchOnboardingTasks(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/onboarding/tasks`, { headers: headersFor(token, org, host) })
+  const res = await request(`${host}/api/v1/onboarding/tasks`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   return (body?.data?.tasks ?? []).map((t) => ({
     code: t.code,
@@ -350,7 +393,7 @@ export async function fetchOnboardingTasks(token, org, host = SITES.cn.host) {
  * 已知失败码：9303 = 该任务不支持手动完成。
  */
 export async function completeOnboardingTask(token, org, code, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/onboarding/tasks/${encodeURIComponent(code)}/completion`, {
+  const res = await request(`${host}/api/v1/onboarding/tasks/${encodeURIComponent(code)}/completion`, {
     method: "PUT",
     headers: headersFor(token, org, host),
     body: "{}",
@@ -384,7 +427,7 @@ export async function completeOnboardingTask(token, org, code, host = SITES.cn.h
  * @returns {{granted:boolean, points:number, message:string}}
  */
 export async function claimLoginGift(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/login-gift`, {
+  const res = await request(`${host}/api/v1/login-gift`, {
     method: "POST",
     headers: headersFor(token, org, host),
     body: "",
@@ -449,7 +492,7 @@ export function parsePointsValue(v) {
  *   判断「到底读没读到」看 `totalKnown`，`totalRaw` 留着排错。
  */
 export async function fetchPoints(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/quota/points/total`, { headers: headersFor(token, org, host) })
+  const res = await request(`${host}/api/v1/quota/points/total`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const d = body?.data ?? {}
   const total = parsePointsValue(d.total_points)
@@ -468,7 +511,7 @@ export async function fetchPoints(token, org, host = SITES.cn.host) {
 /** 积分流水（倒序）。签到和任务做完后可以用来确认到账。 */
 export async function fetchPointRecords(token, org, { page = 1, pageSize = 20, host = SITES.cn.host } = {}) {
   // ⚠ 是 POST 不是 GET（GET 回 405 Allow: POST）
-  const res = await fetch(`${host}/api/v1/quota/points/records/queries`, {
+  const res = await request(`${host}/api/v1/quota/points/records/queries`, {
     method: "POST",
     headers: headersFor(token, org, host),
     body: JSON.stringify({ page: String(page), page_size: String(pageSize) }),
@@ -506,7 +549,7 @@ export const INVITE_CODE_PATH = "/api/v1/invitations/info"
 
 /** 拿不到就抛错 —— 调用方要的是「真实结果」，不是静默降级 */
 export async function fetchOwnInviteCode(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}${INVITE_CODE_PATH}`, { headers: headersFor(token, org, host) })
+  const res = await request(`${host}${INVITE_CODE_PATH}`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const d = body?.data ?? {}
   const code = d.invite_code || d.inviteCode || d.code || d.invitation_code || ""
@@ -564,8 +607,8 @@ export async function fetchInviteStatus(token, org, host = SITES.cn.host) {
   const h = headersFor(token, org, host)
   const signal = AbortSignal.timeout(INVITE_TIMEOUT_MS)
   const [infoRes, earnedRes] = await Promise.all([
-    fetch(`${host}${INVITE_CODE_PATH}`, { headers: h, signal }),
-    fetch(`${host}${INVITE_EARNED_PATH}`, { headers: h, signal }).catch(() => null),
+    request(`${host}${INVITE_CODE_PATH}`, { headers: h, signal }),
+    request(`${host}${INVITE_EARNED_PATH}`, { headers: h, signal }).catch(() => null),
   ])
   const body = await read(infoRes)
   const d = body?.data ?? {}
@@ -610,7 +653,7 @@ export async function fetchInviteStatus(token, org, host = SITES.cn.host) {
 //   通过 magpie / OpenAI 兼容网关调模型**不算**：实测同一个号用 magpie
 //   调了好几轮、真扣了积分，`first_ai_work` 仍然是 PENDING（见 CHANGELOG 0.3.9）。
 export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/invitations/rewards`, {
+  const res = await request(`${host}/api/v1/invitations/rewards`, {
     headers: headersFor(token, org, host),
   })
   const body = await read(res)
@@ -637,7 +680,7 @@ export async function fetchInviteRewards(token, org, host = SITES.cn.host) {
 // 自动完成首任务要打开 `/<站点>/global/super/workspace/<id>`，这个 id 只有接口给。
 // 每个账号注册时会自动建一个默认工作区，取第一个就够。
 export async function fetchFirstWorkspaceId(token, org, host = SITES.cn.host) {
-  const res = await fetch(
+  const res = await request(
     `${host}/api/v1/super-agent/workspaces/queries?page=1&page_size=1&pin_priority=true`,
     { headers: headersFor(token, org, host) },
   )
@@ -658,7 +701,7 @@ export async function fetchFirstWorkspaceId(token, org, host = SITES.cn.host) {
 // 实测（2026-10-28）：国内站 magicrew / 国际站 magicrew-intl 两站同构，
 // 同一个 workspace 下都返回 { code:1000, data:{ total, list } }。
 export async function fetchProjectTopics(token, org, projectId, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/super-agent/projects/${projectId}/topics`, {
+  const res = await request(`${host}/api/v1/super-agent/projects/${projectId}/topics`, {
     headers: headersFor(token, org, host),
   })
   const body = await read(res)
@@ -688,7 +731,7 @@ export async function fetchProjectTopics(token, org, projectId, host = SITES.cn.
 //
 // 接口来自客户端缓存里出现过的清单（docs/internals.md 第九节的办法找到的）。
 export async function fetchWho(token, org, host = SITES.cn.host) {
-  const res = await fetch(`${host}/api/v1/contact/accounts/me/users`, { headers: headersFor(token, org, host) })
+  const res = await request(`${host}/api/v1/contact/accounts/me/users`, { headers: headersFor(token, org, host) })
   const body = await read(res)
   const u = body?.data?.items?.[0] ?? body?.data ?? {}
   const name = String(u.phone || u.email || u.nickname || u.real_name || "").trim()

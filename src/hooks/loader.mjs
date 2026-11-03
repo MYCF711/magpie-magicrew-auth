@@ -17,6 +17,10 @@
 import { ensureKey, accountOf, keyCandidates, adoptKey, renewViaStore } from "../keys.mjs"
 // UA 只有一个出口（src/api.mjs 的 UA）—— 这里曾被漏掉过，见下面 fetch 包装的注释。
 import { UA, originFor } from "../api.mjs"
+// 模型请求同样会被 WAF 按 TLS 指纹拦（2026-11-03 实测：Bun 打
+// /v1/chat/completions 回 403 空 body，curl 打同一地址回真实业务响应）。
+// 这里必须用**流式**那条兜底 —— 用非流式的 curlFetch 会把整轮回答憋到最后一次性吐。
+import { fetchStreamWithFallback } from "../schannel.mjs"
 
 /**
  * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
@@ -922,7 +926,7 @@ export function makeLoader(c) {
 
         const signal = init?.signal ?? req?.signal ?? AbortSignal.timeout(300_000)
         const sendWith = (apiKey, payload = body) =>
-          fetch(url, {
+          fetchStreamWithFallback(url, {
             method: init?.method ?? "POST",
             headers: { ...headers, authorization: `Bearer ${apiKey}` },
             body: payload,
