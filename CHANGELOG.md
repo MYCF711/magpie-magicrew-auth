@@ -1,3 +1,32 @@
+## 0.3.76 — 2026-11-04
+
+**只改注释：把「恢复签到的前提」写对，别让后来人以为满足条件就能解开**
+
+0.3.75 那段注释写的是「先给 `send()` 和 `browserFetch()` 加硬 deadline，就能恢复签到」——
+但那件事 **0.3.75 已经做完了**。照那段话读，后来人（包括下一个 agent）会判断
+「条件已满足」然后把 `checkin: makeCheckin(c)` 解开，网关又卡死一次。
+
+用户今天明令：**「先等 magpie 这边修好了再开签到测试，不然又要卡死网关。」**
+
+所以把前提改成实际还差什么：
+
+- 插件侧（0.3.75 已全部完成，列出来是为了说明这些**不再是阻塞项**）：
+  `send()` 15s 硬超时、浏览器层 20s `withDeadline`、`curlFetch` 异步 spawn、
+  总预算 deadline、模型目录/额度 `skipCurl`。
+- **magpie 侧（两件都 open，插件改不到）**：
+  - [yetone/magpie#5112](https://github.com/yetone/magpie/issues/5112) 的同类问题：
+    Bun 里 `spawn("curl.exe")` 前两次各阻塞事件循环约 3 秒。插件侧只能「提前付掉」，
+    新的 curl 子进程仍可能撞上。
+  - [yetone/magpie#5104](https://github.com/yetone/magpie/issues/5104) 的 Go 侧启动锁车队：
+    `logins.json` / `plugin-auth.json` 的锁在路由前被持有，一堆积整个网关就不出字。
+
+判据写进注释了：等这两个 issue 有修复版本落地、且真机**开着签到**跑够一整轮
+08:00 窗口不卡，才允许解开那一行。
+
+无代码行为变化。
+
+---
+
 ## 0.3.75 — 2026-11-04
 
 **签到会卡死 magpie 的 Go 侧锁：彻底摘掉 `auth.checkin`，并给插件加三道「不会卡住」的死线**
