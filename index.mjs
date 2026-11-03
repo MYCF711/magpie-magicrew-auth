@@ -36,7 +36,6 @@ import { makeMethods } from "./src/hooks/methods.mjs"
 import { makeRefresh } from "./src/hooks/refresh.mjs"
 import { makeLoader } from "./src/hooks/loader.mjs"
 import { makeUsage } from "./src/hooks/usage.mjs"
-import { makeCheckin } from "./src/hooks/checkin.mjs"
 import { makeModels } from "./src/hooks/models.mjs"
 import { makeHeaders } from "./src/hooks/headers.mjs"
 
@@ -99,7 +98,29 @@ function buildPlugin(c) {
         refresh: makeRefresh(c),
         loader: makeLoader(c),
         usage: makeUsage(c),
-        checkin: makeCheckin(c),
+
+        // ═══ 签到：**故意不注册**（2026-11-04 用户明令「禁止签到」）═══════════
+        //
+        // magpie 调 auth.checkin 时会**持着 Go 侧的锁**等插件返回。签到这一跳
+        // 要连打十几个上游请求（每日登录积分 / 新手任务 / 首对话 / 邀请码滚动 /
+        // 上级切换），每一跳都是 `await`，而 0.3.74 的三层兜底最后一层是
+        // 起一个真 Chromium（冷启动 10 秒）——**只要有一跳不回来，那把锁就永远
+        // 拿着，整个网关当场僵住**，用户只能杀进程。
+        //
+        // 真机现象（2026-11-04 03:1x～03:3x，用户原话）：
+        //   「一签到就直接把GO侧锁堵死了」「它又卡住，我又要去杀进程」
+        //   打开 provider 后 magpie 立刻无响应，必须 taskkill。
+        //
+        // 取舍：签到每天最多给 +200/号（国内站），换不来「一开就卡死」这个代价。
+        // **不注册 = magpie 不给这个 provider 排签到**，也就没有那把锁。
+        // 积分不够就走别的路（充值 / 邀请 / 手工），不要恢复这一行。
+        //
+        // 想恢复的话，前提是先把 src/browser-channel.mjs 的 send() 和
+        // browserFetch() 都加上**硬 deadline**（现在 send() 无超时，CDP 不回应
+        // 就永久挂起），并且签到链路上每一跳都能证明不会拖过 magpie 的预算。
+        // 在那之前，这一行必须是注释。
+        //
+        // checkin: makeCheckin(c),
       },
 
       provider: {

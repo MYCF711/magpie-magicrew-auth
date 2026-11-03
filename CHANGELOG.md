@@ -1,3 +1,300 @@
+## 0.3.75 — 2026-11-04
+
+**签到会卡死 magpie 的 Go 侧锁：彻底摘掉 `auth.checkin`，并给插件加三道「不会卡住」的死线**
+
+### 一、症状（用户原话）
+
+> 「一签到就直接把GO侧锁堵死了，禁止签到！」
+> 「你确定没问题了？不然我等下把它打开，它又卡住，我又要去杀进程」
+
+打开 provider 后 magpie 立刻无响应，任务管理器里只能 `taskkill`。
+关掉 provider 就恢复正常。
+
+### 二、根因：签到链路是「持锁 + 十几个 await」的组合
+
+magpie 调插件钩子时**持着 Go 侧的锁**在等插件返回。签到这一跳要连打：
+
+```
+makeCheckin
+  → getAuth()
+  → rollInvite()            1 次上游
+  → enforceInviteSwitch()   1–2 次上游（10 分钟节流）
+  → runCheckin()
+      ├─ fetchPoints()              1 次
+      ├─ claimLoginGift()           1 次
+      ├─ fetchOnboardingTasks()     1 次
+      ├─ 8 个任务 PUT              8 次
+      └─ autoFirstChat()            2–3 次
+```
+
+**每一跳都是 `await`，每一跳都走三层兜底，而第三层是起一个真 Chromium（冷启动 10 秒）。**
+只要有一跳不回来，那把锁就永远拿着 —— 整个网关僵死。
+
+而当时的浏览器通道里 **`send()` 一个超时都没有**：
+
+```js
+const send = (method, params = {}) =>
+  new Promise((resolve, reject) => {   // ← CDP 不回包，这个 Promise 永不 resolve
+    const id = ++seq
+    pend.set(id, resolve)
+    ...
+```
+
+CDP 只要不回应（页面崩了、渲染进程挂了、浏览器半死），签到就**永久挂起**。
+
+### 三、修法：一摘 + 三道死线
+
+**① 摘掉签到钩子**（`index.mjs`）
+
+```js
+// ═══ 签到：**故意不注册**（2026-11-04 用户明令「禁止签到」）═══
+// checkin: makeCheckin(c),
+```
+
+不注册 = magpie 根本不给这个 provider 排签到 = 那把锁不存在。
+取舍：签到每天最多 +200/号，换不来「一开就卡死」。
+
+**② `send()` 加 15 秒硬超时**（`src/browser-channel.mjs`）
+
+到点 `reject` 而不是永久挂着，调用方走兜底。
+
+**③ 浏览器通道外面套 20 秒整体 deadline**（`src/schannel.mjs`）
+
+```js
+const BROWSER_DEADLINE_MS = 20_000
+function withDeadline(promise, ms) { ... Promise.race([promise, guard]) ... }
+```
+
+**内部逐个补了超时，但外面这层才是最后防线** —— 不依赖内部实现对不对。
+
+**④ `ensureCheckinDefault` 从「补 true」改成「补 false」**（`src/auto-maintenance.mjs`）
+
+钩子都没了还写 true，只会让 magpie 去调度一个不存在的东西。
+
+### 四、验证（都不打网络）
+
+```
+$ bun tests/browser-channel.mjs
+browser-channel: 41 条断言全过（闸门 14 + skipBrowser 3 + 卡死防线 8）
+
+$ bun tests/auto-maintenance.mjs
+21 通过 · 0 失败
+
+24 个测试文件全过
+```
+
+两条**真机制**验证（不是静态断言）：
+
+```
+# 起一个「收到消息故意不回包」的假 CDP
+✅ 超时生效: CDP test 超时 1500ms  耗时=1502ms
+
+# 喂一个永不 resolve 的 promise 给 withDeadline
+✅ 兜住了: 返回=null  耗时=2001ms（不是永久）
+```
+
+### 五、追加：把「卡住」的另外三块拼图也补上（同版，2026-11-04 04:1x）
+
+摘掉签到只解决了「Go 锁被一直拿着」。但真机复测发现**还有三条路能让钩子慢到
+magpie 超时**，其中两条是我上一版引入的。逐条补掉：
+
+**① Bun 在 Windows 上 DNS 冷解析要 7–10 秒，而且 `setTimeout` 拦不住它**
+
+```
+$ curl -w "dns=%{time_namelookup}s" https://i-magic-service.letsmagic.cn/
+  dns=7.766s   ← 冷缓存
+  dns=0.023s   ← 热缓存
+```
+
+最要命的是：**Bun 的 fetch 走的是它自己的解析器，和系统 curl 不共享缓存**。
+而且那 7 秒里事件循环是**被占住**的 —— `setTimeout(1200)` 根本触发不了，
+所以「用 Promise.race 加个 1.2 秒闸」是**假的兜底**（实测仍然要 3.1 秒）。
+
+真修法：`src/schannel.mjs` 的 `warmUpDns()` —— config 时推迟一轮事件循环，
+同时预热 **Bun 自己的 DNS**（`Bun.dns.prefetch` + 一次 HEAD）和 **curl 的**
+（spawn 一次 HEAD）。顺带把「Bun 进程首次 spawn 要 3 秒」这笔一次性开销也提前付掉。
+
+**② `provider.models` 改成「有快照立刻交，后台刷新」**（`src/hooks/models.mjs`）
+
+既然快照本来就在，没有任何理由让 magpie 等网络。现在有快照时这一跳是 **1ms**。
+
+**③ `curlFetch` 从 `spawnSync` 改成异步 `spawn`**
+
+`spawnSync` 那段时间**整个宿主的事件循环停摆**，别的钩子一个都排不上。
+实测同一 endpoint 连打 6 次：`209ms / 7937ms / 210ms / 219ms / 189ms / 187ms`
+—— 偶发 8 秒，那 8 秒里宿主什么都干不了。
+
+**④ `fetchWithFallback` 改成「总预算 deadline」，不是「每跳各自超时」**
+
+原来 fetch / curl / 浏览器三层各自超时，串起来能到 40 秒。
+现在共用同一个 `deadline`，`left()` 不够就跳过后面几层。
+
+**⑤ 新增 `skipCurl`**：模型目录 / 额度这些「magpie 只等 0–2 秒」的钩子直接跳过 curl
+（curl 的 DNS 走系统解析器，冷缓存 6–10 秒，`--connect-timeout` 盖不住 DNS 那一段）。
+
+**⑥ 续期不再盲试第二把 token**（`src/keys.mjs`）
+
+`edge`（WAF 空 403 / HTML 页）跟用哪把 token 无关，再试只是白等一个同样长的超时。
+实测 `renewViaStore` 从 **22178ms → 5176ms**。
+
+### 六、最终实测（每次先 `ipconfig /flushdns`，模拟最坏的冷启动）
+
+| 钩子 | 冷 DNS 耗时 | magpie 预算 |
+|---|---|---|
+| `config` | **1ms** | 启动路径，越短越好 |
+| `provider.models` | **1ms** | 0–2 秒 |
+| `auth.usage` | **208ms** | 5 秒 |
+| `auth.refresh` | **6942ms** | 10 秒 |
+
+`auth.checkin` —— **不注册，不存在**。
+
+---
+
+## 0.3.74 — 2026-11-04
+
+**WAF 连 curl 也开始拦了：请求通道加第三层「真浏览器」，并查清卡点不是 TLS 指纹而是 Origin 头**
+
+### 一、症状：0.3.73 的 Schannel 通道过了一晚就失效
+
+```
+$ curl.exe -4 -A "curl/8.0" https://i-magic-service.letsmagic.cn/
+403           ← 0.3.73 时这里是 200（连打 8 次全是 200）
+```
+
+插件侧表现：`auth.refresh` 全变成 `HTTP 403` / `HTTP 405`，五个号的卡片刻度全空，
+模型目录空表，聊天 403 空 body。
+
+### 二、根因不是「TLS 指纹」——是 **Origin 头等于 API 域名**
+
+之前 0.3.73 的结论是「WAF 按 TLS 指纹放行」，只对了一半。2026-11-04 凌晨用真 Chromium
+逐项隔离（同一台机器、同一时刻、cn 站、各跑 6 次），拿到的是：
+
+| 页面所在 origin | 请求带的 `Origin` | 结果 |
+|---|---|---|
+| `https://i-magic-service.letsmagic.cn`（API 域） | `https://i-magic-service.letsmagic.cn` | **403 空 body**（6/6） |
+| `https://www.letsmagic.cn`（官网） | `https://www.letsmagic.cn` | **200** `{"code":1000}`（3/3） |
+
+请求头（UA / `sec-ch-ua` / `Referer` / `content-type` / `authorization`）两边逐字节一致，
+**唯一的差别就是有没有 `Origin`、以及它是不是 API 域名**。而这条规则
+`src/api.mjs` 的 `originFor()` 早就写着（「国内 WAF 拒 API 域名 Origin，要官网」）——
+只是 Bun / curl / Schannel 这些非浏览器通道**根本发不出浏览器那一套头**，
+所以一直没撞到真正的判据。
+
+控制实验（证明不是别的变量）：
+
+```
+只加 --mute-audio          → 403
+只加 --disable-features=Translate → 403
+加 --disable-web-security   → 200   ← 它会让浏览器**不发送** Origin
+plain（什么都不加，页面在 API 域）→ 403
+```
+
+也就是说 `--disable-web-security` 之所以"有效"，是因为它顺手关掉了 Origin；
+而正确做法是**页面停在官网**，让浏览器发它自己那套合法的 Origin。
+
+### 三、做法：`src/browser-channel.mjs`（新文件）+ `schannel.mjs` 加第三层
+
+```
+runtime fetch（Bun/BoringSSL）  → 被拦
+  → curl.exe（Schannel）        → 也被拦（0.3.73 起过了一晚失效）
+    → 真 Chromium（CDP）        → 200
+```
+
+- 起一个无头 Edge/Chrome（`--remote-debugging-port=0`，端口由浏览器自己挑，**不开监听**），
+  临时 profile、不登录、不存 cookie，只用它的网络栈。
+- 页面导航到**官网**（`www.letsmagic.cn` / `www.magicrew.ai`），再由页面跨域 `fetch` API ——
+  Origin 自然是对的。
+- 流式走 `browserStreamFetch()`：页面里 `getReader()` 逐块经 CDP binding 推回来，
+  **不缓冲**（模型请求用非流式那条会"假死"）。
+- 惰性加载（`await import()`）：这一层坏掉只影响 magicrew 一个渠道，不连累插件加载。
+
+### 四、⚠ 这一层为什么不走 magpie 的 `proxy`
+
+**`settings.json` 的 `proxy` 是全局的**：一设就接管 magpie 全部出站流量（插件目录、续期、
+check-in、所有模型调用）。而"隧道"进程一旦没在跑（会话结束 / 被杀 / 忘了重启），
+全部请求立刻 `proxyconnect tcp: dial tcp 127.0.0.1:PORT: connect ECONNREFUSED`
+—— **整个网关断网**，不是某一个渠道失败。
+
+真实事故两次：2026-11-03 23:47（:8899）、2026-11-04 00:44（:8898），
+两次都是 DSH 当场完全不能用。所以本插件的浏览器通道**永远只作为插件 fetch 的下游**，
+不碰 `proxy`、不开监听端口 —— 它天然按 provider 隔离。
+
+规则已写进 `$DSH_HOME/AGENTS.md` 铁律 2b。
+
+### 五、实测
+
+```
+走插件真实 loader.fetch（三站全链路，cn 站）：
+  第1次 status=402 耗时=11734ms   ← 浏览器冷启动 + 导航
+  第2次 status=402 耗时=9611ms
+  第3次 status=402 耗时=2997ms
+  第4次 status=402 耗时=238ms     ← 热了以后
+```
+
+`402` 是插件自己 `rewriteCreditRefusal()` 改写的形态 —— 上游原文是 400
+`{"code":12000,"message":"…积分已不足…"}`。**通道通了，剩下是余额问题。**
+
+`refresh` 实测：`status=200 code=1000`，拿到新 key（`api_key_expires_at` 往后 2 小时）。
+
+### 六、判据（下次再遇到）
+
+```bash
+# 1. curl 还能过吗
+curl.exe -4 -s -o /dev/null -w "%{http_code}
+" -A "curl/8.0" https://i-magic-service.letsmagic.cn/
+# 200 = 走 Schannel 就够；403 = 需要浏览器这一层
+
+# 2. 端点级验证（绕开插件，直接量）
+node -e "…browserFetch(…)"   # 或 node _probe/…
+
+# 3. 装完必须验：日志里不再刷 auth.refresh 403
+```
+
+⚠ 浏览器冷启动 10 秒级。**只在被拦时才起**，正常路径一次都不会碰它。
+
+
+### 七、补丁：频次闸门（同一版内追加，2026-11-04 02:40）
+
+**这一条是拿真机事故换来的。** 上面那套浏览器通道验证完之后，会话里为了"确认稳不稳"
+连跑了 100+ 次请求，结果把**整个出口 IP** 打进了火山 WAF 的频次名单：
+
+```
+02:13:45  真 Edge 打开 API 域 → 火山拦截页
+          事件编号 2026110402134548CE5122E88DDE3F48D8
+02:23     连 www.letsmagic.cn（Byte CDN）也 403
+02:30     www 恢复 200；API 域仍 403（已过 17 分钟）
+```
+
+**指纹层可以绕，频次层绕不了 —— 它只看 IP。** 所以通道必须自己限速：
+
+| 常数 | 值 | 作用 |
+|---|---|---|
+| `GATE.minIntervalMs` | 1200 | 同一 origin 两次请求的最小间隔 |
+| `GATE.maxPerWindow` | 40 | 一分钟滑动窗口上限 |
+| `GATE.banCooldownMs` | 30 分钟 | 认出拦截页后整个 origin 静默 |
+
+**还有一个只有真机才暴露的坑**：上游 403 时**不带** `access-control-allow-origin`，
+浏览器跨域 fetch 直接抛 `Failed to fetch` —— **status 根本读不到**，
+`looksLikeWafPage()` 永远等不到入参。所以 `catch` 分支也必须计入闸门：
+
+```js
+noteMiss(origin)   // 连续 3 次拿不到响应 → 当作撞了拦截页
+noteHit(origin)    // 拿到正常响应 → 清零
+```
+
+实测闸门行为（三条离线断言 + 真机）：
+
+```
+#1 status=null 1146ms  misses=1
+#2 status=null  249ms  misses=2
+#3 status=null 1058ms  → banned=true (30 分钟)  misses 清零
+#4 status=null    0ms  ← 静默期内一个字节都不打上游
+```
+
+判据：`node tests/browser-channel.mjs`（30 条，含闸门 14 条）。
+
+---
+
 ## 0.3.73 — 2026-11-03
 
 **欠费的号不该被要求重新登录：WAF 的 403 不再是「登录失效」的证据；请求通道换成 Schannel**

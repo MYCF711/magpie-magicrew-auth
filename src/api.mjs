@@ -282,7 +282,12 @@ export async function refreshGatewayKey(refreshToken, host = SITES.cn.host) {
       ...(originFor(host) ? { origin: originFor(host) } : {}),
     },
     body: JSON.stringify({ refresh_token: refreshToken }),
-  })
+  },
+  // ⚠ 这条**不能** skipCurl：续期是真正需要打通上游的（curl 是能出 200 的那条）。
+  //    但也**必须有上限** —— 实测冷 DNS + 浏览器兜底能跑到 17.8 秒，
+  //    而 magpie 调 auth.refresh 时是同步等着的。8 秒封顶（续期是后台重试的，
+  //    这次失败 magpie 一分钟后再来，比让它一直挂着强）。
+  { maxTimeSec: 8 })
   const body = await read(res)
   const d = body?.data ?? {}
   if (!d.api_key) throw new MagicrewError("续期失败：没有 api_key")
@@ -305,7 +310,12 @@ export async function refreshGatewayKey(refreshToken, host = SITES.cn.host) {
  * 实测返回字段：value / label / icon / tags / configs / vision
  */
 export async function fetchModels(token, org, host = SITES.cn.host) {
-  const res = await request(`${host}/api/v1/flows/models`, { headers: headersFor(token, org, host) })
+  // ⚠ skipBrowser：magpie 给 provider.models 的预算是 0–2 秒，
+  //   浏览器通道冷启动 10 秒必超时（2026-11-04 实测 `didn't finish in 0s`）。
+  //   这条有 snapshot 兜底，宁可返回被拦的原响应快失败。
+  // connectTimeoutSec 3 秒：DNS 冷解析要 7–10 秒，不给上限就会吃满 13 秒，
+  // 而挂载这条的 magpie 钩子只有 0–2 秒预算。
+  const res = await request(`${host}/api/v1/flows/models`, { headers: headersFor(token, org, host) }, { skipBrowser: true, skipCurl: true, maxTimeSec: 2 })
   const body = await read(res)
   const list = body?.data?.models ?? []
   return list.map((m) => ({
@@ -317,6 +327,7 @@ export async function fetchModels(token, org, host = SITES.cn.host) {
 
 /** 网关上的全量模型 id（含生图/视频/embedding），用来做分类。 */
 export async function fetchAllModels(apiKey, host = SITES.cn.host) {
+  // 同上：这条也在 provider.models 的关键路径上，有 0–2 秒硬超时。
   const res = await request(`${host}/v1/models`, {
     headers: {
       authorization: `Bearer ${apiKey}`,
@@ -324,7 +335,7 @@ export async function fetchAllModels(apiKey, host = SITES.cn.host) {
       accept: "application/json",
       ...(originFor(host) ? { origin: originFor(host) } : {}),
     },
-  })
+  }, { skipBrowser: true, skipCurl: true, maxTimeSec: 2 })
   const body = await read(res)
   return (body?.data ?? []).map((m) => m.id)
 }
@@ -337,11 +348,13 @@ export async function fetchAllModels(apiKey, host = SITES.cn.host) {
  * input_points / output_points 是**每百万 token 的积分**。
  */
 export async function fetchModelPoints(token, org, modelIds, host = SITES.cn.host) {
+  // 与 fetchModels 同一个钩子（provider.models）里串行调用，
+  // 预算同样是 0–2 秒，所以同样要限时 + 跳过浏览器层。
   const res = await request(`${host}/api/v1/products/model-points`, {
     method: "POST",
     headers: headersFor(token, org, host),
     body: JSON.stringify({ model_ids: modelIds }),
-  })
+  }, { skipBrowser: true, skipCurl: true, maxTimeSec: 2 })
   const body = await read(res)
   const out = {}
   for (const m of body?.data ?? []) {
@@ -492,7 +505,8 @@ export function parsePointsValue(v) {
  *   判断「到底读没读到」看 `totalKnown`，`totalRaw` 留着排错。
  */
 export async function fetchPoints(token, org, host = SITES.cn.host) {
-  const res = await request(`${host}/api/v1/quota/points/total`, { headers: headersFor(token, org, host) })
+  // usage 钩子（额度卡片）也是 magpie 同步等待的，同样限时。
+  const res = await request(`${host}/api/v1/quota/points/total`, { headers: headersFor(token, org, host) }, { skipBrowser: true, skipCurl: true, maxTimeSec: 2 })
   const body = await read(res)
   const d = body?.data ?? {}
   const total = parsePointsValue(d.total_points)

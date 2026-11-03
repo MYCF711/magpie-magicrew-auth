@@ -60,7 +60,19 @@ function writeJsonAtomic(path, value, { backup = false } = {}) {
   renameSync(tmp, path)
 }
 
-/** 这个 provider 的签到是否从未被用户设置过；是就补 true（并返回 changed） */
+/**
+ * ⚠ 0.3.75 起这个函数**不再是「补 true」**，而是「补 false」——签到被明令禁止。
+ *
+ * 原因（2026-11-04，用户原话「一签到就直接把GO侧锁堵死了，禁止签到！」）：
+ * magpie 调 `auth.checkin` 时**持着 Go 侧的锁**，签到链要连打十几个上游请求，
+ * 只要有一跳不回来，那把锁就永远拿着 → 整个网关僵死，只能 taskkill。
+ *
+ * 而且 `index.mjs` 里已经**不再注册 checkin 钩子**了。这种情况下再把
+ * `pluginCheckins[provider]` 写成 true 只会让 magpie 去调度一个不存在的钩子，
+ * 徒增困惑。所以这里一并改成写 false：**看得见地关着**。
+ *
+ * 只在键不存在时写；用户显式设过的值照样不动。
+ */
 export function ensureCheckinDefault(provider, { dir = AUTO_DIR() } = {}) {
   const file = join(dir, "settings.json")
   let s
@@ -75,9 +87,10 @@ export function ensureCheckinDefault(provider, { dir = AUTO_DIR() } = {}) {
     ? s.pluginCheckins
     : {}
   if (Object.hasOwn(table, provider)) return { changed: false, reason: "explicit", on: table[provider] === true }
-  s.pluginCheckins = { ...table, [provider]: true }
+  // 签到已被禁止（插件不注册 checkin 钩子）→ 默认写 false，不写 true。
+  s.pluginCheckins = { ...table, [provider]: false }
   writeJsonAtomic(file, s, { backup: true })
-  return { changed: true, on: true }
+  return { changed: true, on: false }
 }
 
 /** magpie 的 waiting 里有没有「我自己」的新版本（git 源只有 commit，没有 npm version） */
