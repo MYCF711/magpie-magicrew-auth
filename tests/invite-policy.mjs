@@ -441,8 +441,8 @@ await checkAsync("打码：手机号 / 邮箱 / 随机串 / 已打码的原样",
   assert.equal(maskName("13800138000"), "138****8000")
   assert.equal(maskName("+8613800138000"), "138****8000")
   assert.equal(maskName("138****8000"), "138****8000", "已经打码的原样返回")
-  assert.equal(maskName("m1abc@163.com"), "m1****@163.com")
-  assert.equal(maskName("14xyz@qq.com"), "14****@qq.com")
+  assert.equal(maskName("abc@163.com"), "ab****@163.com")
+  assert.equal(maskName("demo@qq.com"), "de****@qq.com")
   assert.equal(maskName("nmosvnfujqe7"), "nmos…jqe7")
   assert.equal(maskName(""), "")
   // 整串手机号 / 邮箱不许出现在文案里
@@ -489,13 +489,13 @@ await checkAsync("邮箱账号（国际站那种）→ 文案里是打码形态�
     join(CONFIG, "plugin-auth.json"),
     JSON.stringify({
       [`${SITE}#abc123`]: { org: "orgA", accountId: "181****632", type: "oauth", jwt: "jwt-orgA" },
-      [`${SITE}#mail1`]: { org: "orgMail", accountId: "m1abc@163.com", type: "oauth", jwt: "jwt-mail" },
+      [`${SITE}#mail1`]: { org: "orgMail", accountId: "abc@163.com", type: "oauth", jwt: "jwt-mail" },
     }),
   )
   noteRegisteredInvite(SITE, { code: REGISTERED, org: "orgMail" })
   const note = inviteNote(c)
-  assert.match(note, /m1\*\*\*\*@163\.com/, `实际：${note}`)
-  assert.ok(!note.includes("m1abc@163.com"), "不许露完整邮箱")
+  assert.match(note, /ab\*\*\*\*@163\.com/, `实际：${note}`)
+  assert.ok(!note.includes("abc@163.com"), "不许露完整邮箱")
   clearRegistered()
   seedAuth()
 })

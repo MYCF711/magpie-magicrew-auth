@@ -216,13 +216,13 @@ console.log("\n真实邮箱 —— 只认白名单后缀（临时邮箱域名是
 check("常见邮箱服务商 → 真", () => {
   reset()
   for (const a of [
-    "u1@163.com",
-    "u2@qq.com",
+    "a@163.com",
+    "b@qq.com",
     "someone@163.com",
-    "a.b@gmail.com",
+    "a@gmail.com",
     "x@outlook.com",
     "y@icloud.com",
-    "u3@foxmail.com",
+    "b@foxmail.com",
   ]) {
     assert.equal(isRealMailbox("magicrew-intl", a), true, a)
   }
@@ -230,7 +230,7 @@ check("常见邮箱服务商 → 真", () => {
 
 check("temp-mail.io 的域名 → 假（实测 jbsze.net / yzcalo.com）", () => {
   reset()
-  assert.equal(isRealMailbox("magicrew-intl", "x1@jbsze.net"), false)
+  assert.equal(isRealMailbox("magicrew-intl", "x@jbsze.net"), false)
   assert.equal(isRealMailbox("magicrew-intl", "abc@yzcalo.com"), false)
 })
 
@@ -269,8 +269,8 @@ check("配置文件能追加自建域名后缀", () => {
     join(CACHE, "magicrew-invite-quota-config-magicrew-intl.json"),
     JSON.stringify({ realMailDomains: ["mycorp.com"] }),
   )
-  assert.equal(isRealMailbox("magicrew-intl", "boss@mycorp.com"), true)
-  assert.equal(isRealMailbox("magicrew-intl", "boss@othercorp.com"), false)
+  assert.equal(isRealMailbox("magicrew-intl", "a@mycorp.com"), true)
+  assert.equal(isRealMailbox("magicrew-intl", "b@othercorp.com"), false)
 })
 
 // ═══ ④ 账号表 ════════════════════════════════════════════════════════
@@ -333,9 +333,9 @@ await checkAsync("跳过临时邮箱号和已满的真邮箱号", async () => {
   reset()
   seedAuth([
     { home: "magicrew-intl#a", org: "orgTemp", accountId: "dkroe85ii62n", jwt: "jwt-temp" },
-    { home: "magicrew-intl#b", org: "orgFull", accountId: "full@qq.com", jwt: "jwt-full" },
-    { home: "magicrew-intl#c", org: "orgSmall", accountId: "small@163.com", jwt: "jwt-small" },
-    { home: "magicrew-intl#d", org: "orgBig", accountId: "big@gmail.com", jwt: "jwt-big" },
+    { home: "magicrew-intl#b", org: "orgFull", accountId: "a@qq.com", jwt: "jwt-full" },
+    { home: "magicrew-intl#c", org: "orgSmall", accountId: "b@163.com", jwt: "jwt-small" },
+    { home: "magicrew-intl#d", org: "orgBig", accountId: "demo@gmail.com", jwt: "jwt-big" },
   ])
   // 预填缓存：findInviteSuccessor 会依次问每个候选的 statusOf，缓存命中就不打网络
   const { writeQuotaCache } = await import("../src/invite-quota.mjs")
@@ -443,7 +443,7 @@ await checkAsync("首选满额 → 自动切到真实邮箱且没满的账号，
   reset()
   setSwitch("magicrew", true)
   seedAuth([
-    { home: "magicrew#a", org: "orgA", accountId: "full@qq.com", jwt: "jwt-a" },
+    { home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" },
     { home: "magicrew#b", org: "orgB", accountId: "b@163.com", jwt: "jwt-b" },
     { home: "magicrew#c", org: "orgC", accountId: "tmpxxxx", jwt: "jwt-c" },
   ])
@@ -471,7 +471,7 @@ await checkAsync("满额但没有真实邮箱替补 → 保持原样并留痕", 
   reset()
   setSwitch("magicrew", true)
   seedAuth([
-    { home: "magicrew#a", org: "orgA", accountId: "full@qq.com", jwt: "jwt-a" },
+    { home: "magicrew#a", org: "orgA", accountId: "a@qq.com", jwt: "jwt-a" },
     { home: "magicrew#c", org: "orgC", accountId: "tmpxxxx", jwt: "jwt-c" },
   ])
   seedLogins("magicrew", "magicrew#a")

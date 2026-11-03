@@ -25,6 +25,13 @@ import {
   verifyCaptcha,
 } from "./captcha.mjs"
 import { decideDegFromImage, readVisionModel } from "./vision.mjs"
+import { UA, originFor } from "./api.mjs"
+
+/** magic-service 的指纹与 api.mjs 同源；keewood 用户中心不走这里。 */
+function magicHeaders(site, extra = {}) {
+  const origin = originFor(site.host)
+  return { ...extra, "user-agent": UA, ...(origin ? { origin } : {}) }
+}
 
 /** 一次登录最多换几张图；每张图只提交一次（风控不允许反复试同一个 token） */
 const MAX_CAPTCHA_ROUNDS = 4
@@ -294,7 +301,7 @@ export async function bindOrganization(site, jwt, orgCode) {
   for (const headers of variants) {
     try {
       const res = await fetch(url, {
-        headers: { ...headers, "user-agent": "magpie-magicrew-auth" },
+        headers: magicHeaders(site, headers),
         signal: AbortSignal.timeout(90_000),
       })
       const text = await res.text().catch(() => "")
@@ -463,7 +470,7 @@ export async function fetchOrgs(site, jwt) {
     let res = null
     try {
       res = await fetch(p.url, {
-        headers: { authorization: p.auth, "user-agent": "magpie-magicrew-auth" },
+        headers: magicHeaders(site, { authorization: p.auth }),
         signal: AbortSignal.timeout(90_000),
       })
     } catch (e) {

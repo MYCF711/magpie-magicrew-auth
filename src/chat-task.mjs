@@ -35,7 +35,7 @@
 // input_points / output_points，按两者之和升序取最小的 —— 目前是 qwen3.5-flash
 // （20 / 200），也正是网页的默认模型。没有免费档。
 
-import { fetchModels, fetchModelPoints, SITES } from "./api.mjs"
+import { fetchModels, fetchModelPoints, SITES, UA, originFor } from "./api.mjs"
 
 /** 建话题用的名字池 —— 随机挑一个，别每次都是「测试」那种一眼假的 */
 const TOPIC_NAMES = [
@@ -60,7 +60,10 @@ function pickName() {
 /** 极简 CDP 无关：这是 WebSocket 客户端，只收发文本帧 */
 async function openSocket(host, origin) {
   const url = `wss://${host}/socket.io/?EIO=3&transport=websocket&timestamp=${Date.now()}`
-  const ws = new WebSocket(url, { headers: { Origin: origin } })
+  // Bun 会补默认 UA；国内 WAF 与 国际 ESA 都会据此拒握手。
+  const ws = new WebSocket(url, {
+    headers: { "User-Agent": UA, ...(origin ? { Origin: origin } : {}) },
+  })
   const queue = []
   let notify = null
 
@@ -136,7 +139,8 @@ export async function findProjectId(jwt, org, host, workspaceId) {
       authorization: `Bearer ${jwt}`,
       "content-type": "application/json",
       accept: "application/json",
-      origin: host.includes("magicrew") ? "https://www.magicrew.ai" : "https://www.letsmagic.cn",
+      "user-agent": UA,
+      ...(originFor(host) ? { origin: originFor(host) } : {}),
       "organization-code": org,
     },
     body: JSON.stringify({ workspace_id: workspaceId, page: 1, page_size: 20, show_collaboration: 1, include_special: 0 }),
@@ -154,7 +158,8 @@ export async function createProject(jwt, org, host, workspaceId, name = pickName
       authorization: `Bearer ${jwt}`,
       "content-type": "application/json",
       accept: "application/json",
-      origin: host.includes("magicrew") ? "https://www.magicrew.ai" : "https://www.letsmagic.cn",
+      "user-agent": UA,
+      ...(originFor(host) ? { origin: originFor(host) } : {}),
       "organization-code": org,
     },
     body: JSON.stringify({ workspace_id: workspaceId, project_name: name }),
@@ -175,7 +180,8 @@ export async function createTopic(jwt, org, host, projectId, name = pickName()) 
       authorization: `Bearer ${jwt}`,
       "content-type": "application/json",
       accept: "application/json",
-      origin: host.includes("magicrew") ? "https://www.magicrew.ai" : "https://www.letsmagic.cn",
+      "user-agent": UA,
+      ...(originFor(host) ? { origin: originFor(host) } : {}),
       "organization-code": org,
     },
     body: JSON.stringify({ topic_name: name, project_id: projectId }),
@@ -199,7 +205,7 @@ export async function createTopic(jwt, org, host, projectId, name = pickName()) 
  * @returns {{ok:boolean, messageId?:string, replies?:number, reason?:string}}
  */
 export async function sendChat(jwt, org, host, { topicId, conversationId, text = PICK_TEXT, model }) {
-  const origin = host.includes("magicrew") ? "https://www.magicrew.ai" : "https://www.letsmagic.cn"
+  const origin = originFor(host)
   const sock = await openSocket(host.replace(/^https?:\/\//, ""), origin)
   const ns = String(Date.now())
   const appMsgId = `${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 14)}`

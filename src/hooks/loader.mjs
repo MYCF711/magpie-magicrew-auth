@@ -16,7 +16,7 @@
 
 import { ensureKey, accountOf, keyCandidates, adoptKey, renewViaStore } from "../keys.mjs"
 // UA 只有一个出口（src/api.mjs 的 UA）—— 这里曾被漏掉过，见下面 fetch 包装的注释。
-import { UA } from "../api.mjs"
+import { UA, originFor } from "../api.mjs"
 
 /**
  * 上游「这个账号不行」的两种形态（2026-10-29 实测）：
@@ -872,10 +872,11 @@ export function makeLoader(c) {
   return async (getAuth) => {
     const auth = await getAuth()
     if (!auth) return {}
+    const origin = originFor(c.host)
     return {
       baseURL: c.BASE,
       apiKey: auth.access,
-      headers: { "user-agent": UA },
+      headers: { "user-agent": UA, ...(origin ? { origin } : {}) },
       async fetch(input, init) {
         const fresh = await getAuth()
         if (!fresh) throw new Error(`${c.SHORT} 未登录`)
@@ -904,10 +905,12 @@ export function makeLoader(c) {
           "content-type": "application/json",
           "user-agent": UA,
         }
+        // 国际站必须没有 Origin；国内只认官网 Origin。客户端传的一律不接收。
+        if (origin) headers.origin = origin
         if (c.needsOrgOnGateway && fresh.org) headers["organization-code"] = fresh.org
 
         for (const [k, v] of incoming) {
-          if (["authorization", "host", "content-length", "user-agent"].includes(k.toLowerCase())) continue
+          if (["authorization", "host", "content-length", "user-agent", "origin"].includes(k.toLowerCase())) continue
           headers[k] = v
         }
 
