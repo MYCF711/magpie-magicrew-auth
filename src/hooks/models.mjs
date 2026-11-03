@@ -81,10 +81,16 @@ export function makeModels(c) {
 
     // ⚠⚠⚠ 有快照就**立刻**用快照，网络刷新放后台 —— 这一跳必须做到**零网络**。
     //
-    // 为什么不能靠「超时兜底」：Bun 在 Windows 上的 DNS 解析是**同步阻塞**的。
-    // 冷缓存下 `await fetch(...)` 要 7 秒，而这 7 秒里 `setTimeout(1200)`
-    // **根本触发不了**（事件循环被占住）—— Promise.race 的超时分支形同虚设。
-    // 实测（2026-11-04）：加了 1.2 秒闸之后，这条钩子仍然要 **3.1 秒**才返回。
+    // 为什么不能靠「超时兜底」：Bun 在 Windows 上**前两次 spawn 子进程各阻塞
+    // 事件循环约 3 秒**（是异步的 `spawn`，不是 `spawnSync`；`curl --version`
+    // 这种完全不联网的也一样）。那 3 秒里 `setTimeout(1200)` **根本触发不了**
+    // —— Promise.race 的超时分支形同虚设。实测（2026-11-04）：加了 1.2 秒闸
+    // 之后，这条钩子仍然要 **3.1 秒**才返回。
+    //
+    // ⚠ 别把账记到 DNS 上。冷 DNS 确实慢（7.7 秒 vs 热 0.24 秒），但**不阻塞**：
+    //   同一个 10ms 计时器在 7725ms 里跑了 723/772 次 tick，循环是活的。
+    //   阻塞来自 spawn —— 跑 `curl --version` 只有 4/281 tick，
+    //   跑 `cmd.exe /c exit 0` 则是 7/10（正常）。见 yetone/magpie#5112 的评论。
     //
     // 而 magpie 调 provider.models 时是**同步等着**的（预算 0–2 秒），等不到就
     // 打一条 `the plugin's model list didn't finish in 0s`。既然快照本来就在，

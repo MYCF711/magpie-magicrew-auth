@@ -98,21 +98,34 @@ $ bun tests/auto-maintenance.mjs
 摘掉签到只解决了「Go 锁被一直拿着」。但真机复测发现**还有三条路能让钩子慢到
 magpie 超时**，其中两条是我上一版引入的。逐条补掉：
 
-**① Bun 在 Windows 上 DNS 冷解析要 7–10 秒，而且 `setTimeout` 拦不住它**
+**① Bun 在 Windows 上 `spawn("curl.exe")` 前两次各阻塞事件循环 ~3 秒**
 
-```
-$ curl -w "dns=%{time_namelookup}s" https://i-magic-service.letsmagic.cn/
-  dns=7.766s   ← 冷缓存
-  dns=0.023s   ← 热缓存
-```
-
-最要命的是：**Bun 的 fetch 走的是它自己的解析器，和系统 curl 不共享缓存**。
-而且那 7 秒里事件循环是**被占住**的 —— `setTimeout(1200)` 根本触发不了，
-所以「用 Promise.race 加个 1.2 秒闸」是**假的兜底**（实测仍然要 3.1 秒）。
+> ⚠ **这一条我一开始判错了，先更正**：账不是 DNS 的。
+> 冷 DNS 确实慢（`curl -w dns=%{time_namelookup}`：冷 **7.766s** / 热 **0.023s**），
+> 但它**不阻塞事件循环** —— 同一个 10ms 计时器在 7725ms 里跑了 **723/772** 次 tick，
+> 循环一直是活的，只是慢。我最初是从墙钟时间推的「DNS 阻塞」，错了。
+>
+> 真正阻塞的是 **spawn**。同一个 10ms 计时器，同一个进程里：
+>
+> | 跑的什么 | 墙钟 | tick / 期望 |
+> |---|---|---|
+> | `curl --version`（**完全不联网**） | 2814ms | **4 / 281** |
+> | `curl -sS http://127.0.0.1:3425/…` | 2803ms | **5 / 280** |
+> | 再来一次 | 49ms | 4 / 4 |
+> | `cmd.exe /c exit 0` | 104ms | 7 / 10（正常） |
+>
+> 三个新进程复现（`2821/2836`、`3417/3109` ms，tick 4–9 / 280–341）。
+> 注意第一行：**不联网也一样**，所以不是 DNS、不是 TLS，就是 spawn 本身的开销。
+> 而且 `cmd.exe` 不受影响 —— 是 curl.exe 特有的（大概率是 Defender / SmartScreen
+> 对网络型二进制的首次执行检查，未确证）。
+>
+> 这个已经补进上游 [yetone/magpie#5112](https://github.com/yetone/magpie/issues/5112)
+> 的评论里 —— 它和那个 issue 的 `Atomics.wait` 是**同一类**故障（阻塞宿主事件循环），
+> 但**宿主侧改不到**：任何 shell out 到 curl 的插件都会触发，而所有插件共用一个宿主进程。
 
 真修法：`src/schannel.mjs` 的 `warmUpDns()` —— config 时推迟一轮事件循环，
-同时预热 **Bun 自己的 DNS**（`Bun.dns.prefetch` + 一次 HEAD）和 **curl 的**
-（spawn 一次 HEAD）。顺带把「Bun 进程首次 spawn 要 3 秒」这笔一次性开销也提前付掉。
+同时预热 **Bun 自己的 DNS**（`Bun.dns.prefetch` + 一次 HEAD）、**curl 的 DNS**
+（spawn 一次 HEAD），顺带把「前两次 spawn 各 3 秒」这笔一次性开销提前付掉。
 
 **② `provider.models` 改成「有快照立刻交，后台刷新」**（`src/hooks/models.mjs`）
 
@@ -147,6 +160,9 @@ $ curl -w "dns=%{time_namelookup}s" https://i-magic-service.letsmagic.cn/
 | `auth.refresh` | **6942ms** | 10 秒 |
 
 `auth.checkin` —— **不注册，不存在**。
+
+> 判「阻塞不阻塞」一律看 tick 数，不看墙钟。冷 DNS 慢 7.7 秒但 tick 正常 = 只是慢；
+> spawn 前两次 2.8 秒而 tick 只有 4/281 = 真阻塞。两者对 `setTimeout` 兜底的意义完全相反。
 
 ---
 
