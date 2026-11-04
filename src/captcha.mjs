@@ -67,6 +67,8 @@
 //      邮箱 + 密码（`type:"email_password"`）端点认这个 type，但要账号**事先设过
 //      密码** —— 实测对一个已注册邮箱回 `33002 账号不存在`，不能当通用路。
 
+import { UA } from "./api.mjs"
+
 /** 服务端只认这一套 Unicode；错误码直接用数字，日志里好 grep */
 export const CAPTCHA_CODE = {
   OK: 1000,
@@ -213,7 +215,9 @@ async function postJSON(url, body, { headers = {}, timeoutMs = 90_000 } = {}) {
   const cookie = cookieHeader(origin)
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers, ...(cookie ? { cookie } : {}) },
+    // 以前这里没有 UA，出去的是运行时默认（Bun/…）—— 边缘 WAF 一样拦。
+    // 全插件共用 src/ua.mjs 那一条（api.mjs 转出，值见那里的实测记录）。
+    headers: { "content-type": "application/json", "user-agent": UA, ...headers, ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeoutMs),
   })

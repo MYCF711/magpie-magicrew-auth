@@ -258,7 +258,9 @@ async function postKeewoodJSON(site, path, body, jwt) {
       "content-type": "application/json",
       authorization: jwt,
       origin: site.web,
-      "user-agent": "magpie-magicrew-auth",
+      // 与 magic-service 共用同一条 UA：`magpie-magicrew-auth` 是火山 WAF 明确
+      // 回空 403 的形态（见 AGENTS 坑 41），而这条打的是同一套边缘层。
+      "user-agent": UA,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(90_000),

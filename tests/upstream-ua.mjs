@@ -250,12 +250,20 @@ await checkAsync("空 body + 500 → 退回 HTTP 状态码", async () => {
 // 聊天 405。这是 #30 报的第二处，只修 api.mjs 会「额度好了、对话还是挂」。
 const loaderSrc = readFileSync(new URL("../src/hooks/loader.mjs", import.meta.url), "utf8")
 const apiSrc = readFileSync(new URL("../src/api.mjs", import.meta.url), "utf8")
+// 值住在 src/ua.mjs（schannel.mjs 也要用，放 api.mjs 会成环），api.mjs 只转出。
+const uaSrc = readFileSync(new URL("../src/ua.mjs", import.meta.url), "utf8")
 
-check("api.mjs 导出的 UA 是两站实测共同可通行值", () => {
-  const m = apiSrc.match(/export const UA = "([^"]+)"/)
-  assert.ok(m, "api.mjs 没有导出 UA 常量")
+check("UA 常量是两站实测共同可通行值", () => {
+  const m = uaSrc.match(/export const UA = "([^"]+)"/)
+  assert.ok(m, "src/ua.mjs 没有导出 UA 常量")
   assert.equal(m[1], "curl/8.0")
   assert.doesNotMatch(m[1], /^Mozilla\/|^Bun\/|magpie-magicrew-auth/)
+})
+
+check("api.mjs 只转出那一条常量，不另写第二份", () => {
+  assert.match(apiSrc, /import\s*\{ UA \}\s*from\s*"\.\/ua\.mjs"/, "api.mjs 没有从 ua.mjs 取 UA")
+  assert.match(apiSrc, /export \{ UA \}/, "api.mjs 没有把 UA 转出去（历史导入路径会断）")
+  assert.doesNotMatch(apiSrc, /export const UA = "/, "api.mjs 又写了一份 UA 字面量")
 })
 
 check("loader 从 api.mjs 取 UA，不另写一份", () => {
@@ -275,6 +283,36 @@ check("loader 的 fetch 包装显式带 user-agent", () => {
 
 check("loader 里不再留旧的 MagicrewClient/1.0", () => {
   assert.ok(!loaderSrc.includes("MagicrewClient/1.0"), "loader 顶层 headers 还写着 MagicrewClient/1.0")
+})
+
+// ── 漏点回归：以前这三个出站点根本没带共享 UA ────────────────────────────────
+// ① keewood 组织接口写着自己的名字（火山 WAF 回空 403 的形态）；
+// ② 无头登录的验证码 HTTP 一条 UA 都没有 ⇒ 出去的是 Bun 默认 UA；
+// ③ DNS 预热那条 HEAD 同理。
+// 三处都必须引用共享常量，不许写字面量。
+
+check("keewood 组织接口用共享 UA，不再写 magpie-magicrew-auth", () => {
+  const src = readFileSync(new URL("../src/headless.mjs", import.meta.url), "utf8")
+  assert.ok(!src.includes('"magpie-magicrew-auth"'), "headless.mjs 还在用自己的插件名当 UA")
+  const i = src.indexOf("async function postKeewoodJSON")
+  assert.ok(i > 0, "找不到 postKeewoodJSON")
+  assert.ok(src.slice(i, i + 700).includes('"user-agent": UA'), "keewood 组织接口没有共享 UA")
+})
+
+check("无头登录的验证码 HTTP 带共享 UA", () => {
+  const src = readFileSync(new URL("../src/captcha.mjs", import.meta.url), "utf8")
+  assert.match(src, /import\s*\{[^}]*\bUA\b[^}]*\}\s*from\s*"\.\/api\.mjs"/, "captcha.mjs 没有引用共享 UA")
+  const i = src.indexOf("async function postJSON")
+  assert.ok(i > 0, "找不到 postJSON")
+  assert.ok(src.slice(i, i + 700).includes('"user-agent": UA'), "验证码 HTTP 没有共享 UA")
+})
+
+check("DNS 预热的 HEAD 带共享 UA", () => {
+  const src = readFileSync(new URL("../src/schannel.mjs", import.meta.url), "utf8")
+  assert.match(src, /import\s*\{[^}]*\bUA\b[^}]*\}\s*from\s*"\.\/ua\.mjs"/, "schannel.mjs 没有引用共享 UA")
+  const i = src.indexOf("method: \"HEAD\"")
+  assert.ok(i > 0, "找不到预热 HEAD")
+  assert.ok(src.slice(i, i + 200).includes('"user-agent": UA'), "预热 HEAD 没有共享 UA")
 })
 
 check("WebSocket 首任务握手也显式带共享 UA", () => {
