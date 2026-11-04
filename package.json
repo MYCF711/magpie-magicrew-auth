@@ -1,12 +1,13 @@
 {
   "name": "magpie-magicrew-auth",
-  "version": "0.3.76",
+  "version": "0.3.77",
   "description": "超级麦吉 / MagiCrew for magpie and OpenCode — one package, two providers: letsmagic.cn (国内) and magicrew.ai (international). Password or web-JWT sign-in, the account's own live model list, points balance, newcomer rewards, invite codes.",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "scripts": {
-    "publish:npm": "node publish-npm.mjs"
+    "publish:npm": "node publish-npm.mjs",
+    "check:ua": "node scripts/check-ua.mjs ."
   },
   "files": [
     "index.mjs",
