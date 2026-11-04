@@ -416,6 +416,9 @@ export function gateStatus(origin) {
  * （见 SKIP_HEADERS 已经包含 origin / referer）。
  */
 const PAGE_ORIGIN = new Map([
+  // 国内站两个域名都留着：`openapi` 是 0.3.78 起在用的（见 api.mjs 的 SITES.cn），
+  // `i-magic-service` 是 WAF 拉黑前的原域名 —— 策略回滚时还要能走浏览器通道。
+  ["https://openapi.letsmagic.cn", "https://www.letsmagic.cn"],
   ["https://i-magic-service.letsmagic.cn", "https://www.letsmagic.cn"],
   ["https://magic-service.magicrew.ai", "https://www.magicrew.ai"],
 ])

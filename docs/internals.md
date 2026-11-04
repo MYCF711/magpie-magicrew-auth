@@ -9,11 +9,18 @@ README 里所有「为什么」都在这。取证日期统一是 **2026-10-27**�
 | | 国内 · 超级麦吉 | 国际 · MagiCrew |
 |---|---|---|
 | 网页 | `www.letsmagic.cn` | `www.magicrew.ai` |
-| 业务 API + 模型网关 | `i-magic-service.letsmagic.cn` | `magic-service.magicrew.ai` |
+| 业务 API + 模型网关 | `openapi.letsmagic.cn`（原 `i-magic-service.letsmagic.cn`） | `magic-service.magicrew.ai` |
 | `MAGIC_APP_ENV` | `saas-prod` | `international-prod` |
 | `MAGIC_APP_SHA` | `fb90a86cd576dd10f25efdf914485a3bfcc0a13d` | **同一个值** |
 | `MAGIC_APP_VERSION` | `5.0.157` | `5.0.157` |
 | 套餐支付 | ALIPAY | STRIPE |
+
+> **国内站的 API 域名有两个，WAF 只拦其中一个**（2026-11-04 实测）。`i-magic-service.letsmagic.cn`
+> 和 `openapi.letsmagic.cn` 解析到同一组 IP（`180.184.69.224` / `2406:d440:107:2f00:…`）、
+> 背后是同一个 Go 服务，但火山 WAF 是按 **Host 头**挑域名拦的：同一时刻、同一份 headers，
+> `Host: i-magic-service…` → `403` 空 body + `X-TT-System-Error: 3`，
+> `Host: openapi…` → `200 hello, magic-service!`。0.3.78 起插件走 `openapi`。
+> 判据（一次请求）：`curl -s -o /dev/null -w "%{http_code}" https://openapi.letsmagic.cn/` 出 `200`。
 
 `MAGIC_APP_SHA` 相同 ⇒ 前端是同一份构建，两站差别只在服务端注入的 `MAGIC_*` 环境变量。
 后端是同一个 Go 服务，逐字符同构：

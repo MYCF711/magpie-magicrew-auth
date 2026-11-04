@@ -23,8 +23,10 @@ assert.ok(/--user-data-dir/.test(src), "必须用临时 profile，不许复用�
 
 // ② 页面 origin 必须是官网
 assert.ok(/PAGE_ORIGIN/.test(src), "必须有 API host → 官网 origin 的映射表")
+assert.ok(/openapi\.letsmagic\.cn"\s*,\s*"https:\/\/www\.letsmagic\.cn/.test(src.replace(/\s+/g, " ")),
+  "cn：当前在用的 API 域 openapi.letsmagic.cn 必须映射到 www.letsmagic.cn")
 assert.ok(/i-magic-service\.letsmagic\.cn"\s*,\s*"https:\/\/www\.letsmagic\.cn/.test(src.replace(/\s+/g, " ")),
-  "cn：API 域必须映射到 www.letsmagic.cn")
+  "cn：回退域 i-magic-service.letsmagic.cn 也要留着映射（WAF 策略会回滚）")
 assert.ok(/magic-service\.magicrew\.ai"\s*,\s*"https:\/\/www\.magicrew\.ai/.test(src.replace(/\s+/g, " ")),
   "intl：API 域必须映射到 www.magicrew.ai")
 

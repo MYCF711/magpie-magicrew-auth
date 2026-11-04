@@ -1,3 +1,48 @@
+## 0.3.78 — 2026-11-04
+
+**国内站换域名：`i-magic-service.letsmagic.cn` → `openapi.letsmagic.cn`（WAF 按 Host 拉黑）**
+
+2026-11-04 18:20 实测：国内站整站不可用 —— 首页、额度、模型目录、聊天全部 `403` 空 body
++ `X-TT-System-Error: 3`。不是插件 bug，是火山 WAF 把 `i-magic-service` 这个 **Host** 拉黑了。
+
+同一台机器、同一时刻、**同一个 IP**（`180.184.69.224` / `2406:d440:107:2f00:…`），
+只有 Host 头不同 —— 逐条跑出来的，不是推测：
+
+```text
+curl --resolve openapi.letsmagic.cn:443:180.184.69.224 -H "Host: i-magic-service.letsmagic.cn"
+  → 403（空 body）
+curl --resolve openapi.letsmagic.cn:443:180.184.69.224 -H "Host: openapi.letsmagic.cn"
+  → 200 hello, magic-service!
+```
+
+两个域名解析到同一组 IP、背后是同一个 Go 服务，所以不是 IP、不是 TLS 栈、也不是 SNI
+（两次握手的 SNI 完全一样，都是 `openapi.letsmagic.cn`）。
+
+改法：`SITES.cn.host` 换成 `https://openapi.letsmagic.cn`。它连 Origin 都不挑
+（带官网 origin 200、带自身 origin 也 200），所以 `originFor()` 没动。
+
+用插件真实运行时（magpie 自带的 bun）复验，同一份 headers 逐条对比：
+
+| 路径 | openapi | 原 i-magic-service |
+|---|---|---|
+| `GET /` | 200 `hello, magic-service!` | 403（空） |
+| `GET /api/v1/quota/points/total` | 200 `{"code":2179,"message":"auth_token 不存在"}` | 403（空） |
+| `GET /api/v1/flows/models` | 200 `{"code":2179,…}` | 403（空） |
+| `GET /v1/models` | 200 `{"code":403,"message":"token无效"}` | 403（空） |
+| `POST /v1/chat/completions` | 200 `{"code":403,"message":"token无效"}` | 403（空） |
+
+- `src/api.mjs` 的 `SITES.cn.host` 换掉，原值写进注释留作回退（WAF 策略会回滚）
+- `src/browser-channel.mjs` 的 `PAGE_ORIGIN` 两个国内域名都留映射
+- `tests/smoke.mjs` ④ 不再写死域名，改成认 `SITES.cn.host` 单一来源
+- `tests/browser-channel.mjs` 加一条断言：openapi 必须有官网映射
+- 探针 `_probe/waf-openapi-switch.mjs`（用 magpie 的 bun 跑，一次只跑一遍）
+
+⚠ **国际站 `magic-service.magicrew.ai` 同一时刻也挂了，但是另一种形态**：`405` +
+阿里云 ESA 的 HTML 页（`data-spm="a3c0e"`），换 UA（`curl/8.0` / 完整 Chrome）、去 Origin
+都无效；`openapi.magicrew.ai` 不存在（DNS 不解析）。国内站这半边修好了，国际站仍未解决。
+
+判据（一次请求）：`curl -s -o /dev/null -w "%{http_code}" https://openapi.letsmagic.cn/` 出 `200`。
+
 ## 0.3.77 — 2026-11-04
 
 **出站 UA 全部换成官方客户端 UA（同步脚手架 0.3.10 的坑表第 38 条）**

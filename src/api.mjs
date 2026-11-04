@@ -57,7 +57,32 @@ export const SITES = {
     id: "magicrew",
     label: "国内 · 超级麦吉 Super Magic",
     web: "https://www.letsmagic.cn",
-    host: "https://i-magic-service.letsmagic.cn",
+    // ⚠ 2026-11-04 18:20 起改用 `openapi.letsmagic.cn`。
+    //
+    // 原来这里写 `i-magic-service.letsmagic.cn`，那天下午火山 WAF 把它整域名拉黑：
+    // 同一台机器、同一时刻、同一份 headers，`i-magic-service` 回 403 空 body +
+    // `X-TT-System-Error: 3`，而 `openapi` 回 200 —— 两个域名解析到**同一组 IP**
+    // （180.184.69.224 / 2406:d440:107:2f00:6ae:bb55:ee89:70b2），所以不是 IP 或
+    // TLS 栈的事，是 WAF 按 **Host 头**挑域名拦。逐条实测：
+    //   curl --resolve openapi.letsmagic.cn:443:180.184.69.224 -H "Host: i-magic-service.letsmagic.cn"
+    //     → 403（空 body）        ← 同一个 IP、同一个 SNI，只换 Host
+    //   curl --resolve …同上… -H "Host: openapi.letsmagic.cn"
+    //     → 200 "hello, magic-service!"   ← ★ 唯一变量是 Host
+    //
+    // `openapi` 与 `i-magic-service` 是**同一个 Go 服务**，接口逐字符同构（都验过）：
+    //   GET /                          → 200 hello, magic-service!
+    //   GET /api/v1/quota/points/total → {"code":2179,"message":"auth_token 不存在"}
+    //   GET /api/v1/flows/models       → {"code":2179,"message":"auth_token 不存在"}
+    //   GET /v1/models                 → {"code":403,"message":"token无效"}
+    //   POST /v1/chat/completions      → {"code":403,"message":"token无效"}
+    // 而且它**连 Origin 都不挑**（带官网 origin 200、带 openapi 自身 origin 也 200），
+    // 所以 originFor() 不用跟着改。
+    //
+    // 判据（随时可复验，一次请求）：
+    //   curl -s -o /dev/null -w "%{http_code}" https://openapi.letsmagic.cn/
+    // 出 200 = 这条路还活着；出 403 空 body = WAF 也把它拉黑了，要另找入口。
+    // 回退值 `https://i-magic-service.letsmagic.cn` 记在这里，别删 —— WAF 策略会回滚。
+    host: "https://openapi.letsmagic.cn",
   },
   intl: {
     id: "magicrew-intl",
