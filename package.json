@@ -1,6 +1,7 @@
 {
   "name": "magpie-magicrew-auth",
-  "version": "0.3.78",
+  "version": "1.0.0",
+  "deprecated": "已停止维护（2026-11-04）。上游账号存在被禁用风险，请勿在主力账号上使用；国内站与上游 WAF 的对抗随时可能再次失效。仓库保持公开，代码留档，不再更新。",
   "description": "超级麦吉 / MagiCrew for magpie and OpenCode — one package, two providers: letsmagic.cn (国内) and magicrew.ai (international). Password or web-JWT sign-in, the account's own live model list, points balance, newcomer rewards, invite codes.",
   "type": "module",
   "main": "./index.mjs",
