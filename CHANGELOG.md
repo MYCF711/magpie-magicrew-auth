@@ -1,3 +1,48 @@
+## 1.0.0 — 2026-11-04
+
+**终止维护版 · 封号警告 · 仓库保持公开但不再更新**
+
+这是最后一个版本。发出去之后不再有下一个 —— 不修 bug、不跟上游变更、不适配 magpie 新契约。
+
+### ⚠ 封号风险警告
+
+2026-11-04 实测，本机主力账号 `189****051`（用户名 `MYCF711`）**被上游禁用**：
+
+```text
+GET /api/v1/auth/status        → {"code":3109,"message":"该账号已被禁用，无法登录。",
+                                  "data":{"username":"MYCF711","phone":"189****051"}}
+GET /api/v1/quota/points/total → {"code":2155,"message":"用户不存在"}
+GET /api/v1/flows/models       → {"code":2155,"message":"用户不存在"}
+```
+
+同一 owner 的其他登录标识（`18970098051@189.cn` / `mycf711@189.cn` / `mycf711@foxmail.com`）
+在 `logins.json` 里一律 `用户不存在`。网页端登录同样进不去。
+
+**封号原因无法证实**：上游没给理由，也没有证据能把这件事归到插件身上 —— 所以这里只陈述现象、
+不下因果结论。但这个插件的自动化行为（每日签到、补新人任务、拉模型目录与积分、每 2 小时续 key）
+在服务商眼里确实属于「非官方客户端」，风险请自行权衡：**只用小号，别用主力账号**。
+
+### 这版改了什么
+
+- `package.json`：版本 `1.0.0`，新增 `deprecated` 字段（写明停止维护 + 封号风险）
+- `README.md`：顶部加醒目警告块（封号警告 + 两条上游阻断的现状）
+- `AGENTS.md`：坑表加第 48 条（账号被禁用长什么样，别误判成 WAF）
+- 代码本身相对 0.3.78 **零改动** —— 0.3.78 的换域名修复仍然是对的，保留
+
+### 带着两个已知缺陷发布
+
+1. **国际站没修好**。`magic-service.magicrew.ai` 被阿里云 ESA 回 `405`（响应头
+   `Punish-Loc: keepper`），换 UA / Origin / 强制 IPv4 / 换请求方法全部无效；
+   `openapi.magicrew.ai` 不存在（DNS 不解析），`api.magicrew.ai` 是 teamshare 网关
+   （任何路径都回 `not match rule path`）。**没有可用的替代入口。**
+2. **国内站网页登录仍然不能用**。WAF 按 Host 拉黑的是 `i-magic-service.letsmagic.cn`，
+   插件已经在 0.3.78 改走 `openapi.letsmagic.cn`，但**官网自己的登录页还在打被拉黑的那个** ——
+   验证码校验（keewood）是成功的，下一步 `/api/v1/auth/status` 拿 403 空 body，
+   前端静默吞掉，表现就是「点下一步没反应」。这个只有上游能改。
+
+判据（随时可复验，一次请求）：`curl -s -o /dev/null -w "%{http_code}" https://openapi.letsmagic.cn/`
+—— 出 `200` 说明国内这条还活着；出 `403` 空 body 说明 WAF 也把 `openapi` 拉黑了。
+
 ## 0.3.78 — 2026-11-04
 
 **国内站换域名：`i-magic-service.letsmagic.cn` → `openapi.letsmagic.cn`（WAF 按 Host 拉黑）**
