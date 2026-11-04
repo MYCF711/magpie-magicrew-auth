@@ -50,6 +50,7 @@
 //     造成的，见 $DSH_HOME/AGENTS.md 铁律 2b。）
 
 import { spawn } from "node:child_process"
+import { UA } from "./ua.mjs"
 import os from "node:os"
 import { existsSync } from "node:fs"
 // ⚠ 惰性加载，不做静态 import：browser-channel 里若哪天出语法/依赖问题，
@@ -310,6 +311,8 @@ export function warmUpDns(hosts = []) {
       try {
         await globalThis.fetch(`https://${h}/`, {
           method: "HEAD",
+          // 预热也要带 UA：不带就是运行时默认（Bun/…），边缘 WAF 会记一笔。
+          headers: { "user-agent": UA },
           signal: AbortSignal.timeout(20_000),
         }).catch(() => {})
       } catch {}

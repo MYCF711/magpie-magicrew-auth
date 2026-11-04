@@ -71,9 +71,19 @@ Bun 运行时逐项实测的稳定组合：
 | 国际 | `curl/8.0` | 官网或 API 域名 | 405 HTML |
 | 国际 | 浏览器 UA / `Bun/1.4.4` | 任意 | 405 HTML |
 
-⇒ `src/api.mjs` 导出唯一的 `UA = "curl/8.0"` 与 `originFor(host)`；api、loader、
+⇒ UA 常量住在 `src/ua.mjs`（`api.mjs` 再转出，历史导入路径不变），api、loader、
 首任务、magic-service 组织探测全部共用。loader 还必须丢弃客户端传入的 `origin`，
-否则国际站会被带入一个必然 405 的头。keewood 用户中心是另一套服务，不套用这张表。
+否则国际站会被带入一个必然 405 的头。
+
+**2026-11-04 收口（UA 治理）**：这条常量从「只有 api / loader 用」扩到**所有出站点**，
+三个原本漏 UA 的地方都改成引用它 ——
+`src/headless.mjs` 的 `postKeewoodJSON`（原来写着自己的插件名 `magpie-magicrew-auth`，
+正是上面表里国内站回空 403 的那个形态）、`src/captcha.mjs` 的 `postJSON`（原来一条 UA
+都没有，出去的是 `Bun/…`）、`src/schannel.mjs` 的 DNS 预热 `HEAD`（同上）。
+keewood 用户中心与 magic-service 不是同一套服务，但同属火山 / 阿里云这套边缘层，
+所以共用同一条实测值；判据见 `tests/upstream-ua.mjs` 的三条「漏点回归」。
+`src/vision.mjs` / `src/schannel.mjs` 里打 `127.0.0.1:3425` 的是本机 magpie 网关，
+不出网，不需要 UA。
 
 判据：`node tests/upstream-ua.mjs`（同时钉最终出站 headers，而不只查源码字符串）。
 

@@ -31,12 +31,16 @@
 //   ⇒ 真正的通道兜底在 src/schannel.mjs（被拦时用 curl.exe 重发），
 //     本文件所有请求都走 `request()` 那个唯一出口，不要直接调 fetch。
 //
-// keewood 用户中心是另一套服务，src/headless.mjs 在那儿仍用自己的 UA。
-export const UA = "curl/8.0"
+// 值本身挪到了 src/ua.mjs（schannel.mjs 的 DNS 预热也要用，放这里会成环）；
+// 这里 import 进来再转出，历史导入路径（loader / headless / 首任务 / 组织探测）
+// 与模块内自己的用法都不变。全插件**只有那一条**常量，别另写字面量。
+export { UA }
 
 // 发请求的**唯一出口**。别在别处直接 fetch：那一路会悄悄绕开 Schannel 兜底
 // （0.3.72 的 UA 就在 loader 里漏过一次）。见 src/schannel.mjs 头。
 import { fetchWithFallback as request } from "./schannel.mjs"
+// 出站 UA 的唯一常量（值 + 实测记录见 src/ua.mjs）。
+import { UA } from "./ua.mjs"
 
 // 一个包 = 两个 provider。
 //
