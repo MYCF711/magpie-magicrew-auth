@@ -58,7 +58,7 @@ const env = process.env.MAGICREW_JWT
   : fromEdge()
 
 const { MagicrewAuthPlugin } = await import("../index.mjs")
-const { issueGatewayKey } = await import("../src/api.mjs")
+const { issueGatewayKey, SITES } = await import("../src/api.mjs")
 
 const plugin = await MagicrewAuthPlugin(
   { client: { app: { log: () => {} } }, directory: process.env.TEMP || "." },
@@ -97,7 +97,9 @@ console.log("③ refresh:", renewed?.access ? `ok (new key ${String(renewed.acce
 
 // ④ loader
 const loader = await plugin.auth.loader(getAuth, {})
-console.log("④ loader:", loader.baseURL === "https://i-magic-service.letsmagic.cn/v1" ? "ok" : `FAILED ${loader.baseURL}`)
+// 别在这里写死域名 —— 上游 WAF 会把整个域名拉黑（2026-11-04：i-magic-service → openapi），
+// 一条断言跟着改一次就是纯噪声。认 SITES.cn.host 这一个来源。
+console.log("④ loader:", loader.baseURL === `${SITES.cn.host}/v1` ? "ok" : `FAILED ${loader.baseURL}`)
 
 // ⑤ 一次真实对话（走 loader 的 fetch，验证 max_tokens 抬升与流式都活）
 try {
